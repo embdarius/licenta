@@ -1,0 +1,9 @@
+triage_task:
+  description: >
+    Read the user's message describing their symptoms: "{user_message}". 
+    Identify the core symptoms and provide a clear, empathetic recommendation 
+    on which hospital department they should be routed to (e.g., Cardiology, Neurology, Orthopedics, General Practice, Emergency, etc.).
+  expected_output: >
+    A short, friendly message addressed to the patient summarizing their symptoms and 
+    recommending the most appropriate hospital department for their condition.
+  agent: receptionist
