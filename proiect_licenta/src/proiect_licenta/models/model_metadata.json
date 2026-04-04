@@ -1,8 +1,8 @@
 {
-  "version": 2,
-  "trained_at": "2026-04-04T19:53:40.302359",
-  "n_tfidf_features": 500,
-  "n_severity_words": 549,
+  "version": 3,
+  "trained_at": "2026-04-04T20:56:10.668222",
+  "n_tfidf_features": 1000,
+  "n_severity_words": 689,
   "acuity_classes": [
     1,
     2,
@@ -14,20 +14,28 @@
     "NOT ADMITTED",
     "ADMITTED"
   ],
-  "acuity_accuracy": 0.5339,
-  "disposition_accuracy": 0.7243,
+  "acuity_accuracy_exact": 0.5841,
+  "acuity_accuracy_within_1": 0.9423,
+  "disposition_accuracy": 0.7557,
   "model_type": "XGBClassifier",
-  "model_params": {
-    "n_estimators": 500,
-    "max_depth": 8,
-    "learning_rate": 0.1
-  },
-  "features": [
+  "structured_features": [
     "pain",
+    "pain_missing",
+    "pain_low",
+    "pain_mid",
+    "pain_high",
     "n_complaints",
-    "max_severity_prior",
+    "complaint_length",
+    "min_severity_prior",
     "mean_severity_prior",
-    "tfidf (500 word/bigram features)"
+    "max_severity_prior",
+    "std_severity_prior",
+    "age",
+    "age_bin",
+    "gender_male",
+    "arrival_ambulance",
+    "arrival_helicopter",
+    "arrival_walk_in"
   ],
   "note": "Acuity model outputs classes 0-4 (add 1 to get ESI 1-5)"
 }

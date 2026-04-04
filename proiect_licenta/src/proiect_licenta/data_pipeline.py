@@ -1,16 +1,17 @@
 """
-Data Pipeline for Triage Agent — MIMIC-IV Emergency Department (v2)
+Data Pipeline for Triage Agent — MIMIC-IV Emergency Department (v3)
 
-Improvements over v1:
-  1. TF-IDF word vectorization (instead of multi-hot top-100 complaints)
-  2. XGBoost (instead of RandomForest)
-  3. n_complaints feature (number of chief complaints)
-  4. Complaint severity prior (mean acuity per complaint word)
-  5. Better class imbalance handling via XGBoost scale_pos_weight
+Improvements over v2:
+  - Added patient demographics: age, gender
+  - Added arrival_transport (AMBULANCE, WALK IN, HELICOPTER, etc.)
+  - Increased TF-IDF to 1000 features with trigrams
+  - More engineered features (pain bins, complaint length, keyword flags)
+  - Better XGBoost tuning with early stopping
+  - Properly handles missing pain as a flag
 
 Trains two supervised models:
-  1. Acuity Prediction: chiefcomplaint (TF-IDF) + pain + engineered features → ESI 1-5
-  2. Disposition Prediction: same features + predicted acuity → ADMITTED vs DISCHARGED
+  1. Acuity: chiefcomplaint (TF-IDF) + pain + demographics + arrival → ESI 1-5
+  2. Disposition: same + predicted acuity → ADMITTED vs DISCHARGED
 """
 
 import os
@@ -35,49 +36,86 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATASET_DIR = BASE_DIR / "datasets" / "datasets_mimic-iv" / "mimic-iv-ed"
+HOSP_DIR = BASE_DIR / "datasets" / "datasets_mimic-iv" / "mimic-iv" / "hosp"
 MODELS_DIR = BASE_DIR / "models"
 
 TRIAGE_CSV = DATASET_DIR / "triage.csv"
 EDSTAYS_CSV = DATASET_DIR / "edstays.csv"
+PATIENTS_CSV = HOSP_DIR / "patients.csv"
 
 
 # ---------------------------------------------------------------------------
 # 1. Load & Clean Data
 # ---------------------------------------------------------------------------
 def load_and_clean_data() -> pd.DataFrame:
-    """Load triage.csv + edstays.csv, clean and merge them."""
+    """Load triage + edstays + patients, clean and merge."""
     print("=" * 60)
     print("STEP 1: Loading data...")
     print("=" * 60)
 
+    # Load triage
     triage = pd.read_csv(TRIAGE_CSV)
     print(f"  triage.csv: {len(triage):,} rows")
 
-    edstays = pd.read_csv(EDSTAYS_CSV, usecols=["stay_id", "disposition"])
+    # Load edstays (disposition, gender, arrival_transport, intime)
+    edstays = pd.read_csv(
+        EDSTAYS_CSV,
+        usecols=["subject_id", "stay_id", "intime", "gender",
+                 "arrival_transport", "disposition"],
+    )
     print(f"  edstays.csv: {len(edstays):,} rows")
 
-    df = triage.merge(edstays, on="stay_id", how="inner")
-    print(f"  Merged: {len(df):,} rows")
+    # Load patients (for age computation)
+    patients = pd.read_csv(
+        PATIENTS_CSV,
+        usecols=["subject_id", "anchor_age", "anchor_year"],
+    )
+    print(f"  patients.csv: {len(patients):,} rows")
 
-    # Drop rows with missing chief complaints or acuity
+    # Merge triage + edstays on stay_id
+    df = triage.merge(edstays, on=["subject_id", "stay_id"], how="inner")
+    print(f"  Merged triage+edstays: {len(df):,} rows")
+
+    # Merge with patients on subject_id
+    df = df.merge(patients, on="subject_id", how="left")
+    print(f"  Merged with patients: {len(df):,} rows")
+
+    # --- Compute age at visit ---
+    df["intime"] = pd.to_datetime(df["intime"])
+    df["visit_year"] = df["intime"].dt.year
+    df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
+    df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
+
+    # --- Clean chief complaints ---
     initial_count = len(df)
     df = df.dropna(subset=["chiefcomplaint", "acuity"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
     print(f"  After dropping missing complaints/acuity: {len(df):,} rows "
           f"(dropped {initial_count - len(df):,})")
 
-    # Clean acuity: should be 1-5
+    # Clean acuity
     df["acuity"] = df["acuity"].astype(int)
     df = df[df["acuity"].between(1, 5)]
 
-    # Clean pain: fill missing with -1 (unknown indicator), cap at 0-10
-    df["pain"] = pd.to_numeric(df["pain"], errors="coerce").fillna(-1).astype(int)
+    # Clean pain
+    df["pain"] = pd.to_numeric(df["pain"], errors="coerce")
+    df["pain_missing"] = df["pain"].isna().astype(int)
+    df["pain"] = df["pain"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
+
+    # Gender encoding (F=0, M=1)
+    df["gender_male"] = (df["gender"] == "M").astype(int)
+
+    # Arrival transport encoding
+    df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
+    df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
+    df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
     # Binarize disposition
     df["admitted"] = (df["disposition"] == "ADMITTED").astype(int)
 
+    # Print distributions
     print(f"\n  Acuity distribution:")
     for level in sorted(df["acuity"].unique()):
         count = (df["acuity"] == level).sum()
@@ -89,74 +127,94 @@ def load_and_clean_data() -> pd.DataFrame:
     print(f"    NOT ADMITTED: {len(df) - admitted:,} "
           f"({100 * (len(df) - admitted) / len(df):.1f}%)")
 
+    print(f"\n  Gender: M={df['gender_male'].sum():,}  "
+          f"F={len(df) - df['gender_male'].sum():,}")
+    print(f"  Age: mean={df['age'].mean():.1f}  "
+          f"median={df['age'].median():.0f}  "
+          f"range=[{df['age'].min()}, {df['age'].max()}]")
+    print(f"\n  Arrival transport:")
+    for t in ["AMBULANCE", "WALK IN", "HELICOPTER", "OTHER", "UNKNOWN"]:
+        count = (df["arrival_transport"] == t).sum()
+        if count > 0:
+            print(f"    {t}: {count:,} ({100 * count / len(df):.1f}%)")
+
     return df
 
 
 # ---------------------------------------------------------------------------
-# 2. Normalize complaint text for TF-IDF
+# 2. Normalize complaint text
 # ---------------------------------------------------------------------------
+ABBREVIATIONS = {
+    "abd": "abdominal",
+    "n/v": "nausea vomiting",
+    "n v": "nausea vomiting",
+    "s/p": "status post",
+    "s p": "status post",
+    "sob": "shortness of breath",
+    "cp": "chest pain",
+    "ha": "headache",
+    "ams": "altered mental status",
+    "loc": "loss of consciousness",
+    "etoh": "alcohol intoxication",
+    "uti": "urinary tract infection",
+    "uri": "upper respiratory infection",
+    "mv": "motor vehicle",
+    "mva": "motor vehicle accident",
+    "mvc": "motor vehicle collision",
+    "htn": "hypertension",
+    "dm": "diabetes",
+    "chf": "congestive heart failure",
+    "gi": "gastrointestinal",
+    "r/o": "rule out",
+    "w/": "with",
+    "w/o": "without",
+    "fx": "fracture",
+    "lac": "laceration",
+    "inj": "injury",
+    "sx": "symptoms",
+    "dx": "diagnosis",
+    "tx": "treatment",
+    "hx": "history",
+    "bld": "blood",
+    "diff": "difficulty",
+    "eval": "evaluation",
+    "sz": "seizure",
+    "ped": "pediatric",
+    "psych": "psychiatric",
+    "resp": "respiratory",
+    "bilat": "bilateral",
+    "lt": "left",
+    "rt": "right",
+    "pos": "positive",
+    "neg": "negative",
+    "hiv": "hiv",
+    "copd": "chronic obstructive pulmonary disease",
+    "mi": "myocardial infarction",
+    "cva": "cerebrovascular accident stroke",
+    "dvt": "deep vein thrombosis",
+    "pe": "pulmonary embolism",
+    "ble": "bleeding",
+}
+
+
 def normalize_complaint_text(text: str) -> str:
-    """
-    Normalize chief complaint text for TF-IDF.
-    Converts comma-separated complaint list into a space-separated string of words.
-    Handles abbreviations and common patterns.
-    """
+    """Normalize chief complaint text for TF-IDF."""
     if pd.isna(text) or not str(text).strip():
         return ""
-    
+
     text = str(text).lower().strip()
-    
-    # Replace common separators with spaces
-    text = text.replace(",", " ")
-    text = text.replace(";", " ")
-    text = text.replace("/", " ")
-    text = text.replace("-", " ")
-    
-    # Expand common ED abbreviations
-    abbreviations = {
-        "abd": "abdominal",
-        "n/v": "nausea vomiting",
-        "n v": "nausea vomiting",
-        "s/p": "status post",
-        "s p": "status post",
-        "sob": "shortness of breath",
-        "cp": "chest pain",
-        "ha": "headache",
-        "ams": "altered mental status",
-        "loc": "loss of consciousness",
-        "etoh": "alcohol",
-        "uti": "urinary tract infection",
-        "uri": "upper respiratory infection",
-        "mv": "motor vehicle",
-        "mva": "motor vehicle accident",
-        "mvc": "motor vehicle collision",
-        "htn": "hypertension",
-        "dm": "diabetes",
-        "chf": "congestive heart failure",
-        "gi": "gastrointestinal",
-        "r/o": "rule out",
-        "w/": "with",
-        "w/o": "without",
-        "fx": "fracture",
-        "lac": "laceration",
-        "inj": "injury",
-        "sx": "symptoms",
-        "dx": "diagnosis",
-        "tx": "treatment",
-        "hx": "history",
-        "bld": "blood",
-        "diff": "difficulty",
-    }
-    
+    text = text.replace(",", " ").replace(";", " ").replace("/", " ").replace("-", " ")
+    text = text.replace("(", " ").replace(")", " ").replace(".", " ")
+
     words = text.split()
     expanded = []
     for word in words:
         word = word.strip()
-        if word in abbreviations:
-            expanded.append(abbreviations[word])
-        elif len(word) > 1:  # Skip single characters
+        if word in ABBREVIATIONS:
+            expanded.append(ABBREVIATIONS[word])
+        elif len(word) > 1:
             expanded.append(word)
-    
+
     return " ".join(expanded)
 
 
@@ -169,35 +227,30 @@ def build_features(
     severity_map: dict = None,
     fit: bool = True,
 ) -> tuple:
-    """
-    Build feature matrix with:
-      - TF-IDF of complaint text (word-level)
-      - pain score
-      - n_complaints (number of chief complaints)
-      - max_severity_prior (severity of the most concerning complaint word)
-      - mean_severity_prior (average severity across complaint words)
-    """
+    """Build full feature matrix."""
     print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering")
+    print(f"STEP 2: Feature engineering ({'fitting' if fit else 'transforming'})")
     print("=" * 60)
 
-    # Normalize complaint text
     df = df.copy()
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
 
-    # Count number of original complaints (before normalization)
+    # --- Count of complaints ---
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
 
+    # --- Complaint text length (chars) ---
+    df["complaint_length"] = df["complaint_text"].apply(len)
+
     # --- TF-IDF ---
     if fit:
         tfidf = TfidfVectorizer(
-            max_features=500,        # Top 500 word features
-            min_df=50,               # Word must appear in at least 50 documents
-            max_df=0.95,             # Ignore words in >95% of documents
-            ngram_range=(1, 2),      # Unigrams + bigrams (captures "chest pain" as single feature)
-            sublinear_tf=True,       # Apply log normalization to TF
+            max_features=1000,
+            min_df=30,
+            max_df=0.95,
+            ngram_range=(1, 3),  # Unigrams + bigrams + trigrams
+            sublinear_tf=True,
             strip_accents="unicode",
         )
         tfidf_matrix = tfidf.fit_transform(df["complaint_text"])
@@ -207,49 +260,68 @@ def build_features(
 
     tfidf_df = pd.DataFrame(
         tfidf_matrix.toarray(),
-        columns=[f"tfidf_{w}" for w in tfidf.get_feature_names_out()],
+        columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
         index=df.index,
     )
 
     # --- Severity Prior ---
     if fit:
-        # Compute mean acuity per word across training data
         severity_map = defaultdict(list)
         for _, row in df[["complaint_text", "acuity"]].iterrows():
             for word in row["complaint_text"].split():
                 word = word.strip()
                 if len(word) > 1:
                     severity_map[word].append(row["acuity"])
-        # Convert to mean
-        severity_map = {w: np.mean(vals) for w, vals in severity_map.items() if len(vals) >= 50}
+        severity_map = {
+            w: np.mean(vals)
+            for w, vals in severity_map.items()
+            if len(vals) >= 30
+        }
         print(f"  Severity prior vocabulary: {len(severity_map)} words")
-        print(f"  Most severe words (lowest mean acuity):")
-        sorted_severity = sorted(severity_map.items(), key=lambda x: x[1])[:10]
-        for word, score in sorted_severity:
-            print(f"    {word}: {score:.2f}")
 
     def compute_severity_priors(text: str) -> tuple:
         words = text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
         if severities:
-            return min(severities), np.mean(severities)
-        return 3.0, 3.0  # Default to median acuity
+            return min(severities), np.mean(severities), max(severities), np.std(severities)
+        return 3.0, 3.0, 3.0, 0.0
 
     severity_features = df["complaint_text"].apply(compute_severity_priors)
-    df["max_severity_prior"] = severity_features.apply(lambda x: x[0])
+    df["min_severity_prior"] = severity_features.apply(lambda x: x[0])
     df["mean_severity_prior"] = severity_features.apply(lambda x: x[1])
+    df["max_severity_prior"] = severity_features.apply(lambda x: x[2])
+    df["std_severity_prior"] = severity_features.apply(lambda x: x[3])
 
-    # --- Assemble feature matrix ---
-    engineered = df[["pain", "n_complaints", "max_severity_prior", "mean_severity_prior"]].reset_index(drop=True)
+    # --- Age bins ---
+    df["age_bin"] = pd.cut(
+        df["age"],
+        bins=[0, 18, 35, 50, 65, 80, 120],
+        labels=[0, 1, 2, 3, 4, 5],
+    ).astype(float).fillna(2)
+
+    # --- Pain bins ---
+    df["pain_low"] = ((df["pain"] >= 0) & (df["pain"] <= 3)).astype(int)
+    df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
+    df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
+
+    # --- Assemble ---
+    structured_cols = [
+        "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
+        "n_complaints", "complaint_length",
+        "min_severity_prior", "mean_severity_prior",
+        "max_severity_prior", "std_severity_prior",
+        "age", "age_bin", "gender_male",
+        "arrival_ambulance", "arrival_helicopter", "arrival_walk_in",
+    ]
+
+    structured = df[structured_cols].reset_index(drop=True)
     tfidf_df = tfidf_df.reset_index(drop=True)
 
-    features = pd.concat([engineered, tfidf_df], axis=1)
+    features = pd.concat([structured, tfidf_df], axis=1)
 
-    print(f"\n  Final feature matrix: {features.shape}")
-    print(f"    - pain: 1 column")
-    print(f"    - n_complaints: 1 column")
-    print(f"    - severity priors: 2 columns")
-    print(f"    - TF-IDF: {tfidf_df.shape[1]} columns")
+    print(f"  Structured features: {len(structured_cols)}")
+    print(f"  TF-IDF features: {tfidf_df.shape[1]}")
+    print(f"  Total features: {features.shape[1]}")
 
     return features, tfidf, severity_map
 
@@ -263,7 +335,7 @@ def train_acuity_model(
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> XGBClassifier:
-    """Train and evaluate the acuity prediction model with XGBoost."""
+    """Train acuity model with tuned XGBoost + early stopping."""
     print("\n" + "=" * 60)
     print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
     print("=" * 60)
@@ -272,33 +344,32 @@ def train_acuity_model(
     class_counts = y_train.value_counts()
     total = len(y_train)
     n_classes = len(class_counts)
-    sample_weights = y_train.map(
-        lambda x: total / (n_classes * class_counts[x])
-    )
+    sample_weights = y_train.map(lambda x: total / (n_classes * class_counts[x]))
+
+    y_train_shifted = y_train - 1
+    y_test_shifted = y_test - 1
 
     model = XGBClassifier(
-        n_estimators=500,
-        max_depth=8,
-        learning_rate=0.1,
+        n_estimators=1500,
+        max_depth=9,
+        learning_rate=0.05,
         subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,
-        gamma=0.1,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        colsample_bytree=0.6,
+        colsample_bylevel=0.8,
+        min_child_weight=3,
+        gamma=0.05,
+        reg_alpha=0.5,
+        reg_lambda=2.0,
         objective="multi:softprob",
         num_class=5,
         eval_metric="mlogloss",
+        early_stopping_rounds=50,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
     )
 
-    print("  Training XGBoost (500 trees, max_depth=8, lr=0.1)...")
-    # XGBoost needs classes 0-4
-    y_train_shifted = y_train - 1
-    y_test_shifted = y_test - 1
-
+    print("  Training XGBoost (up to 1500 trees, early stopping=50)...")
     model.fit(
         X_train, y_train_shifted,
         sample_weight=sample_weights,
@@ -306,14 +377,19 @@ def train_acuity_model(
         verbose=False,
     )
 
-    y_pred_shifted = model.predict(X_test)
-    y_pred = y_pred_shifted + 1  # Back to 1-5
+    best_iter = model.best_iteration
+    print(f"  Best iteration: {best_iter}")
 
+    y_pred = model.predict(X_test) + 1
     accuracy = accuracy_score(y_test, y_pred)
-    print(f"\n  Accuracy: {accuracy:.4f}")
+
+    # Also compute "within-1" accuracy (ESI prediction off by at most 1 level)
+    within_1 = np.mean(np.abs(y_pred - y_test.values) <= 1)
+
+    print(f"\n  Accuracy (exact): {accuracy:.4f}")
+    print(f"  Accuracy (within 1 ESI level): {within_1:.4f}")
     print(f"\n  Classification Report:")
-    report = classification_report(y_test, y_pred, digits=3)
-    print(report)
+    print(classification_report(y_test, y_pred, digits=3))
 
     return model
 
@@ -324,51 +400,54 @@ def train_disposition_model(
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> XGBClassifier:
-    """Train and evaluate the admission/discharge prediction model."""
+    """Train disposition model with tuned XGBoost."""
     print("\n" + "=" * 60)
-    print("STEP 4b: Training DISPOSITION model (XGBoost, Admit vs Discharge)")
+    print("STEP 4b: Training DISPOSITION model (XGBoost)")
     print("=" * 60)
 
-    # Scale positive weight for imbalanced binary classification
     neg_count = (y_train == 0).sum()
     pos_count = (y_train == 1).sum()
     scale = neg_count / pos_count
 
     model = XGBClassifier(
-        n_estimators=500,
-        max_depth=8,
-        learning_rate=0.1,
+        n_estimators=1500,
+        max_depth=9,
+        learning_rate=0.05,
         subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,
-        gamma=0.1,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        colsample_bytree=0.6,
+        colsample_bylevel=0.8,
+        min_child_weight=3,
+        gamma=0.05,
+        reg_alpha=0.5,
+        reg_lambda=2.0,
         scale_pos_weight=scale,
         objective="binary:logistic",
         eval_metric="logloss",
+        early_stopping_rounds=50,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
     )
 
-    print("  Training XGBoost (500 trees, max_depth=8, lr=0.1)...")
+    print("  Training XGBoost (up to 1500 trees, early stopping=50)...")
     model.fit(
         X_train, y_train,
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
 
+    best_iter = model.best_iteration
+    print(f"  Best iteration: {best_iter}")
+
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     print(f"\n  Accuracy: {accuracy:.4f}")
     print(f"\n  Classification Report:")
-    report = classification_report(
+    print(classification_report(
         y_test, y_pred,
         target_names=["NOT ADMITTED", "ADMITTED"],
         digits=3,
-    )
-    print(report)
+    ))
 
     return model
 
@@ -382,6 +461,7 @@ def save_models(
     tfidf: TfidfVectorizer,
     severity_map: dict,
     acuity_accuracy: float,
+    within_1_accuracy: float,
     disposition_accuracy: float,
 ):
     """Save trained models and metadata."""
@@ -391,34 +471,32 @@ def save_models(
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Save models
     joblib.dump(acuity_model, MODELS_DIR / "acuity_model.joblib")
     joblib.dump(disposition_model, MODELS_DIR / "disposition_model.joblib")
     joblib.dump(tfidf, MODELS_DIR / "tfidf_vectorizer.joblib")
     joblib.dump(dict(severity_map), MODELS_DIR / "severity_map.joblib")
 
-    # Build vocabulary list for fuzzy matching (from TF-IDF features)
-    vocab = list(tfidf.vocabulary_.keys())
+    # Get TF-IDF feature names for metadata
+    tfidf_feature_names = list(tfidf.get_feature_names_out())
 
     metadata = {
-        "version": 2,
+        "version": 3,
         "trained_at": datetime.now().isoformat(),
         "n_tfidf_features": len(tfidf.vocabulary_),
         "n_severity_words": len(severity_map),
         "acuity_classes": [1, 2, 3, 4, 5],
         "disposition_classes": ["NOT ADMITTED", "ADMITTED"],
-        "acuity_accuracy": round(acuity_accuracy, 4),
+        "acuity_accuracy_exact": round(acuity_accuracy, 4),
+        "acuity_accuracy_within_1": round(within_1_accuracy, 4),
         "disposition_accuracy": round(disposition_accuracy, 4),
         "model_type": "XGBClassifier",
-        "model_params": {
-            "n_estimators": 500,
-            "max_depth": 8,
-            "learning_rate": 0.1,
-        },
-        "features": [
-            "pain", "n_complaints",
-            "max_severity_prior", "mean_severity_prior",
-            f"tfidf (500 word/bigram features)",
+        "structured_features": [
+            "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
+            "n_complaints", "complaint_length",
+            "min_severity_prior", "mean_severity_prior",
+            "max_severity_prior", "std_severity_prior",
+            "age", "age_bin", "gender_male",
+            "arrival_ambulance", "arrival_helicopter", "arrival_walk_in",
         ],
         "note": "Acuity model outputs classes 0-4 (add 1 to get ESI 1-5)",
     }
@@ -426,20 +504,11 @@ def save_models(
     with open(MODELS_DIR / "model_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-    # Remove old v1 artifacts if they exist
-    old_files = ["complaint_encoder.joblib"]
-    for f in old_files:
-        p = MODELS_DIR / f
-        if p.exists():
-            p.unlink()
-            print(f"  Removed old artifact: {f}")
-
     print(f"  Saved to: {MODELS_DIR}")
-    print(f"  - acuity_model.joblib")
-    print(f"  - disposition_model.joblib")
-    print(f"  - tfidf_vectorizer.joblib")
-    print(f"  - severity_map.joblib")
-    print(f"  - model_metadata.json")
+    for fname in ["acuity_model.joblib", "disposition_model.joblib",
+                   "tfidf_vectorizer.joblib", "severity_map.joblib",
+                   "model_metadata.json"]:
+        print(f"  - {fname}")
 
 
 # ---------------------------------------------------------------------------
@@ -447,14 +516,14 @@ def save_models(
 # ---------------------------------------------------------------------------
 def main():
     print("\n" + "#" * 60)
-    print("  MIMIC-IV Triage Model Training Pipeline v2")
-    print("  (TF-IDF + XGBoost + Severity Priors)")
+    print("  MIMIC-IV Triage Model Training Pipeline v3")
+    print("  (TF-IDF + XGBoost + Demographics + Arrival)")
     print("#" * 60)
 
-    # 1. Load data
+    # 1. Load
     df = load_and_clean_data()
 
-    # 2. Train/test split FIRST (prevent data leakage in severity prior)
+    # 2. Split FIRST (prevent leakage)
     print("\n" + "=" * 60)
     print("STEP 3: Train/test split (80/20, stratified by acuity)")
     print("=" * 60)
@@ -464,47 +533,53 @@ def main():
     )
     print(f"  Train: {len(train_df):,} | Test: {len(test_df):,}")
 
-    # 3. Build features (fit on train, transform test)
+    # 3. Features
     X_train, tfidf, severity_map = build_features(train_df, fit=True)
     y_acuity_train = train_df["acuity"].reset_index(drop=True)
     y_admit_train = train_df["admitted"].reset_index(drop=True)
 
-    # Silence the step header for test set
     import io, contextlib
     with contextlib.redirect_stdout(io.StringIO()):
-        X_test, _, _ = build_features(test_df, tfidf=tfidf, severity_map=severity_map, fit=False)
+        X_test, _, _ = build_features(
+            test_df, tfidf=tfidf, severity_map=severity_map, fit=False
+        )
     y_acuity_test = test_df["acuity"].reset_index(drop=True)
     y_admit_test = test_df["admitted"].reset_index(drop=True)
 
-    # 4a. Train acuity model
-    acuity_model = train_acuity_model(X_train, y_acuity_train, X_test, y_acuity_test)
-    acuity_preds = acuity_model.predict(X_test) + 1  # shift back to 1-5
+    # 4a. Acuity model
+    acuity_model = train_acuity_model(
+        X_train, y_acuity_train, X_test, y_acuity_test
+    )
+    acuity_preds = acuity_model.predict(X_test) + 1
     acuity_accuracy = accuracy_score(y_acuity_test, acuity_preds)
+    within_1 = float(np.mean(np.abs(acuity_preds - y_acuity_test.values) <= 1))
 
-    # 4b. Train disposition model (with predicted acuity as feature)
+    # 4b. Disposition model
     X_train_disp = X_train.copy()
     X_train_disp["predicted_acuity"] = acuity_model.predict(X_train) + 1
     X_test_disp = X_test.copy()
     X_test_disp["predicted_acuity"] = acuity_model.predict(X_test) + 1
 
     disposition_model = train_disposition_model(
-        X_train_disp, y_admit_train, X_test_disp, y_admit_test,
+        X_train_disp, y_admit_train, X_test_disp, y_admit_test
     )
-    disp_accuracy = accuracy_score(y_admit_test, disposition_model.predict(X_test_disp))
+    disp_accuracy = accuracy_score(
+        y_admit_test, disposition_model.predict(X_test_disp)
+    )
 
     # 5. Save
     save_models(
         acuity_model, disposition_model,
         tfidf, severity_map,
-        acuity_accuracy, disp_accuracy,
+        acuity_accuracy, within_1, disp_accuracy,
     )
 
     print("\n" + "#" * 60)
     print("  TRAINING COMPLETE!")
     print("#" * 60)
-    print(f"  Acuity model accuracy:     {acuity_accuracy:.4f}")
-    print(f"  Disposition model accuracy: {disp_accuracy:.4f}")
-    print(f"  Models saved to: {MODELS_DIR}")
+    print(f"  Acuity accuracy (exact):    {acuity_accuracy:.4f}")
+    print(f"  Acuity accuracy (within 1): {within_1:.4f}")
+    print(f"  Disposition accuracy:       {disp_accuracy:.4f}")
     print("#" * 60 + "\n")
 
 

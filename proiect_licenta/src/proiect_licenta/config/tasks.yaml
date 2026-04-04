@@ -2,32 +2,44 @@ parse_symptoms_task:
   description: >
     Analyze the patient's message: "{user_message}".
     
-    Extract the chief complaints as a list using standard Emergency Department terminology.
-    Common ED chief complaint terms include: abd pain, chest pain, headache, dyspnea, 
-    back pain, fever, dizziness, n/v (nausea/vomiting), laceration, s/p fall, 
-    altered mental status, weakness, cough, syncope, flank pain, etc.
-    
-    Also estimate a pain score from 0-10 based on the patient's description.
-    If the patient explicitly mentions a pain level, use it. Otherwise, infer from context.
+    Extract the following information:
+    1. Chief complaints as a list using standard Emergency Department terminology.
+       Common terms: abd pain, chest pain, headache, dyspnea, back pain, fever, 
+       dizziness, n/v, laceration, s/p fall, altered mental status, weakness, 
+       cough, syncope, flank pain, etc.
+    2. Pain score from 0-10 based on the patient's description.
+       If explicitly stated, use that value. Otherwise, infer from context.
+       If truly unknown, use -1.
+    3. Age (integer). If not mentioned, use -1.
+    4. Gender ("male", "female", or "unknown").
+    5. Arrival transport ("ambulance", "walk_in", "helicopter", or "unknown").
     
     You MUST respond ONLY with valid JSON in this exact format, nothing else:
     {{
       "chief_complaints": ["complaint1", "complaint2"],
-      "pain_score": 5
+      "pain_score": 5,
+      "age": 45,
+      "gender": "male",
+      "arrival_transport": "unknown"
     }}
   expected_output: >
-    A JSON object with "chief_complaints" (list of strings using standard ED terminology) 
-    and "pain_score" (integer 0-10). No additional text — only valid JSON.
+    A JSON object with "chief_complaints" (list of strings), "pain_score" (int 0-10 or -1),
+    "age" (int or -1), "gender" (string), and "arrival_transport" (string).
+    No additional text, only valid JSON.
   agent: nlp_parser
 
 triage_assessment_task:
   description: >
-    Using the structured patient data from the previous task, perform the following steps:
+    Using the structured patient data from the previous task, perform triage:
     
-    1. Parse the JSON from the previous task to extract chief_complaints and pain_score
-    2. Call the triage_prediction_tool with the chief complaints (as a comma-separated string) 
-       and the pain score
-    3. Based on the tool's output, provide a complete triage assessment including:
+    1. Parse the JSON from the previous task to get all fields
+    2. Call the triage_prediction_tool with ALL available fields:
+       - chief_complaints (comma-separated string)
+       - pain_score (integer)
+       - age (integer, use 50 if -1 or unknown)
+       - gender (string)
+       - arrival_transport (string)
+    3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
        - The confidence of the prediction  
        - Whether the patient should be admitted or discharged
