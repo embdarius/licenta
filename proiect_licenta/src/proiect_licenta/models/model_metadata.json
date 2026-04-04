@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "trained_at": "2026-04-04T19:53:40.302359",
+  "n_tfidf_features": 500,
+  "n_severity_words": 549,
+  "acuity_classes": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "disposition_classes": [
+    "NOT ADMITTED",
+    "ADMITTED"
+  ],
+  "acuity_accuracy": 0.5339,
+  "disposition_accuracy": 0.7243,
+  "model_type": "XGBClassifier",
+  "model_params": {
+    "n_estimators": 500,
+    "max_depth": 8,
+    "learning_rate": 0.1
+  },
+  "features": [
+    "pain",
+    "n_complaints",
+    "max_severity_prior",
+    "mean_severity_prior",
+    "tfidf (500 word/bigram features)"
+  ],
+  "note": "Acuity model outputs classes 0-4 (add 1 to get ESI 1-5)"
+}

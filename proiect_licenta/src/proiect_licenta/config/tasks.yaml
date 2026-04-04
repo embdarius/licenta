@@ -1,9 +1,44 @@
-triage_task:
+parse_symptoms_task:
   description: >
-    Read the user's message describing their symptoms: "{user_message}". 
-    Identify the core symptoms and provide a clear, empathetic recommendation 
-    on which hospital department they should be routed to (e.g., Cardiology, Neurology, Orthopedics, General Practice, Emergency, etc.).
+    Analyze the patient's message: "{user_message}".
+    
+    Extract the chief complaints as a list using standard Emergency Department terminology.
+    Common ED chief complaint terms include: abd pain, chest pain, headache, dyspnea, 
+    back pain, fever, dizziness, n/v (nausea/vomiting), laceration, s/p fall, 
+    altered mental status, weakness, cough, syncope, flank pain, etc.
+    
+    Also estimate a pain score from 0-10 based on the patient's description.
+    If the patient explicitly mentions a pain level, use it. Otherwise, infer from context.
+    
+    You MUST respond ONLY with valid JSON in this exact format, nothing else:
+    {{
+      "chief_complaints": ["complaint1", "complaint2"],
+      "pain_score": 5
+    }}
   expected_output: >
-    A short, friendly message addressed to the patient summarizing their symptoms and 
-    recommending the most appropriate hospital department for their condition.
-  agent: receptionist
+    A JSON object with "chief_complaints" (list of strings using standard ED terminology) 
+    and "pain_score" (integer 0-10). No additional text — only valid JSON.
+  agent: nlp_parser
+
+triage_assessment_task:
+  description: >
+    Using the structured patient data from the previous task, perform the following steps:
+    
+    1. Parse the JSON from the previous task to extract chief_complaints and pain_score
+    2. Call the triage_prediction_tool with the chief complaints (as a comma-separated string) 
+       and the pain score
+    3. Based on the tool's output, provide a complete triage assessment including:
+       - The predicted ESI acuity level (1-5) and what it means
+       - The confidence of the prediction  
+       - Whether the patient should be admitted or discharged
+       - A brief clinical reasoning explanation
+       - Recommended next steps based on the acuity level
+    
+    Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION, 
+    and RECOMMENDATIONS.
+  expected_output: >
+    A comprehensive triage assessment report with ESI acuity level, admission/discharge 
+    prediction, confidence scores, clinical reasoning, and recommended next steps.
+  agent: triage_agent
+  context:
+    - parse_symptoms_task

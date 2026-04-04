@@ -6,15 +6,17 @@ authors = [{ name = "Your Name", email = "you@example.com" }]
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "crewai[google-genai,tools]==1.9.3",
+    "pandas>=2.0.0",
+    "scikit-learn>=1.4.0",
+    "joblib>=1.3.0",
+    "thefuzz[speedup]>=0.22.0",
+    "xgboost>=2.0.0",
 ]
 
 [project.scripts]
 proiect_licenta = "proiect_licenta.main:run"
 run_crew = "proiect_licenta.main:run"
-train = "proiect_licenta.main:train"
-replay = "proiect_licenta.main:replay"
-test = "proiect_licenta.main:test"
-run_with_trigger = "proiect_licenta.main:run_with_trigger"
+train_models = "proiect_licenta.main:train"
 
 [build-system]
 requires = ["hatchling"]

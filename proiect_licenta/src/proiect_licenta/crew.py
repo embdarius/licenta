@@ -2,42 +2,60 @@ from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
-# If you want to run a snippet of code before or after the crew starts,
-# you can use the @before_kickoff and @after_kickoff decorators
-# https://docs.crewai.com/concepts/crews#example-crew-class-with-decorators
+
+from proiect_licenta.tools.triage_tool import TriagePredictionTool
+
 
 @CrewBase
 class ProiectLicenta():
-    """ProiectLicenta crew"""
+    """ProiectLicenta crew — Multi-Agent Medical Triage System"""
 
     agents: List[BaseAgent]
     tasks: List[Task]
 
-    # Learn more about YAML configuration files here:
-    # Agents: https://docs.crewai.com/concepts/agents#yaml-configuration-recommended
-    # Tasks: https://docs.crewai.com/concepts/tasks#yaml-configuration-recommended
-    
-    # If you would like to add tools to your agents, you can learn more about it here:
-    # https://docs.crewai.com/concepts/agents#agent-tools
+    # ── Agents ────────────────────────────────────────────────
+
     @agent
-    def receptionist(self) -> Agent:
+    def nlp_parser(self) -> Agent:
+        """NLP Parser Agent — converts free-text symptoms to structured data."""
         return Agent(
-            config=self.agents_config['receptionist'], # type: ignore[index]
-            verbose=False
+            config=self.agents_config['nlp_parser'],  # type: ignore[index]
+            verbose=True,
+        )
+
+    @agent
+    def triage_agent(self) -> Agent:
+        """Triage Agent — predicts ESI acuity + admission using ML model."""
+        return Agent(
+            config=self.agents_config['triage_agent'],  # type: ignore[index]
+            tools=[TriagePredictionTool()],
+            verbose=True,
+        )
+
+    # ── Tasks ─────────────────────────────────────────────────
+
+    @task
+    def parse_symptoms_task(self) -> Task:
+        """Parse patient's free-text input into structured complaints + pain."""
+        return Task(
+            config=self.tasks_config['parse_symptoms_task'],  # type: ignore[index]
         )
 
     @task
-    def triage_task(self) -> Task:
+    def triage_assessment_task(self) -> Task:
+        """Predict acuity and disposition using the ML triage model."""
         return Task(
-            config=self.tasks_config['triage_task'], # type: ignore[index]
+            config=self.tasks_config['triage_assessment_task'],  # type: ignore[index]
         )
+
+    # ── Crew ──────────────────────────────────────────────────
 
     @crew
     def crew(self) -> Crew:
-        """Creates the ProiectLicenta crew"""
+        """Creates the ProiectLicenta crew."""
         return Crew(
-            agents=self.agents, # Automatically created by the @agent decorator
-            tasks=self.tasks, # Automatically created by the @task decorator
+            agents=self.agents,
+            tasks=self.tasks,
             process=Process.sequential,
-            verbose=False,
+            verbose=True,
         )
