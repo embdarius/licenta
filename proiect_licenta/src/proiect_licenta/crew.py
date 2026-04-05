@@ -4,6 +4,7 @@ from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
 
 from proiect_licenta.tools.triage_tool import TriagePredictionTool
+from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 
 
 @CrewBase
@@ -17,9 +18,10 @@ class ProiectLicenta():
 
     @agent
     def nlp_parser(self) -> Agent:
-        """NLP Parser Agent — converts free-text symptoms to structured data."""
+        """NLP Parser Agent — conducts patient intake interview."""
         return Agent(
             config=self.agents_config['nlp_parser'],  # type: ignore[index]
+            tools=[AskPatientTool()],
             verbose=True,
         )
 

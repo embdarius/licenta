@@ -1,31 +1,31 @@
 parse_symptoms_task:
   description: >
-    Analyze the patient's message: "{user_message}".
+    A patient has arrived and said: "{user_message}".
     
-    Extract the following information:
-    1. Chief complaints as a list using standard Emergency Department terminology.
-       Common terms: abd pain, chest pain, headache, dyspnea, back pain, fever, 
-       dizziness, n/v, laceration, s/p fall, altered mental status, weakness, 
-       cough, syncope, flank pain, etc.
-    2. Pain score from 0-10 based on the patient's description.
-       If explicitly stated, use that value. Otherwise, infer from context.
-       If truly unknown, use -1.
-    3. Age (integer). If not mentioned, use -1.
-    4. Gender ("male", "female", or "unknown").
-    5. Arrival transport ("ambulance", "walk_in", "helicopter", or "unknown").
+    Your job is to gather ALL of the following information for triage. 
+    First, extract what you can from their message. Then, for EACH missing 
+    piece of information, use the ask_patient tool to ask them directly. 
+    Ask one question at a time, and be friendly.
     
-    You MUST respond ONLY with valid JSON in this exact format, nothing else:
+    Required information:
+    1. Chief complaints - what symptoms/issues brought them to the ED.
+       Use standard ED terminology (e.g., "abd pain", "chest pain", "dyspnea", 
+       "headache", "s/p fall", "laceration", "fever", "n/v", "back pain", etc.)
+    2. Pain score - 0 to 10 (0 = no pain, 10 = worst imaginable).
+    3. Age - patient's age in years.
+    4. Gender - "male" or "female".
+    5. Arrival transport - how they got to the ED: "ambulance", "walk_in", or "helicopter".
+    
+    After gathering everything, respond ONLY with valid JSON:
     {{
       "chief_complaints": ["complaint1", "complaint2"],
       "pain_score": 5,
       "age": 45,
       "gender": "male",
-      "arrival_transport": "unknown"
+      "arrival_transport": "walk_in"
     }}
   expected_output: >
-    A JSON object with "chief_complaints" (list of strings), "pain_score" (int 0-10 or -1),
-    "age" (int or -1), "gender" (string), and "arrival_transport" (string).
-    No additional text, only valid JSON.
+    A JSON object with all five fields filled in. No additional text, only valid JSON.
   agent: nlp_parser
 
 triage_assessment_task:
@@ -33,10 +33,10 @@ triage_assessment_task:
     Using the structured patient data from the previous task, perform triage:
     
     1. Parse the JSON from the previous task to get all fields
-    2. Call the triage_prediction_tool with ALL available fields:
+    2. Call the triage_prediction_tool with ALL fields:
        - chief_complaints (comma-separated string)
        - pain_score (integer)
-       - age (integer, use 50 if -1 or unknown)
+       - age (integer)
        - gender (string)
        - arrival_transport (string)
     3. Based on the tool's output, provide a complete triage assessment:
