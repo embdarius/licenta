@@ -1,16 +1,12 @@
 """
-Data Pipeline for Triage Agent — MIMIC-IV Emergency Department (v3)
+Data Pipeline for Triage Agent — MIMIC-IV Emergency Department (v3b)
 
-Improvements over v2:
-  - Added patient demographics: age, gender
-  - Added arrival_transport (AMBULANCE, WALK IN, HELICOPTER, etc.)
-  - Increased TF-IDF to 1000 features with trigrams
-  - More engineered features (pain bins, complaint length, keyword flags)
-  - Better XGBoost tuning with early stopping
-  - Properly handles missing pain as a flag
+Features: TF-IDF (2000 word/bigram/trigram features) + pain + demographics +
+  arrival transport + severity priors + interaction features.
+Model: XGBoost with 3000 trees, lr=0.02, soft class weighting.
 
 Trains two supervised models:
-  1. Acuity: chiefcomplaint (TF-IDF) + pain + demographics + arrival → ESI 1-5
+  1. Acuity: chiefcomplaint + pain + demographics + arrival → ESI 1-5
   2. Disposition: same + predicted acuity → ADMITTED vs DISCHARGED
 """
 
@@ -246,10 +242,10 @@ def build_features(
     # --- TF-IDF ---
     if fit:
         tfidf = TfidfVectorizer(
-            max_features=1000,
-            min_df=30,
+            max_features=2000,
+            min_df=20,
             max_df=0.95,
-            ngram_range=(1, 3),  # Unigrams + bigrams + trigrams
+            ngram_range=(1, 3),
             sublinear_tf=True,
             strip_accents="unicode",
         )
@@ -264,18 +260,20 @@ def build_features(
         index=df.index,
     )
 
-    # --- Severity Prior ---
+    # --- Severity Prior (vectorized for speed) ---
     if fit:
-        severity_map = defaultdict(list)
-        for _, row in df[["complaint_text", "acuity"]].iterrows():
-            for word in row["complaint_text"].split():
+        word_acuity = defaultdict(list)
+        texts = df["complaint_text"].values
+        acuities = df["acuity"].values
+        for i in range(len(texts)):
+            for word in str(texts[i]).split():
                 word = word.strip()
                 if len(word) > 1:
-                    severity_map[word].append(row["acuity"])
+                    word_acuity[word].append(acuities[i])
         severity_map = {
             w: np.mean(vals)
-            for w, vals in severity_map.items()
-            if len(vals) >= 30
+            for w, vals in word_acuity.items()
+            if len(vals) >= 20
         }
         print(f"  Severity prior vocabulary: {len(severity_map)} words")
 
@@ -283,7 +281,7 @@ def build_features(
         words = text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
         if severities:
-            return min(severities), np.mean(severities), max(severities), np.std(severities)
+            return min(severities), np.mean(severities), max(severities), np.std(severities) if len(severities) > 1 else 0.0
         return 3.0, 3.0, 3.0, 0.0
 
     severity_features = df["complaint_text"].apply(compute_severity_priors)
@@ -304,6 +302,14 @@ def build_features(
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
+    # --- Interaction features ---
+    df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
+    df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
+    df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
+    df["high_pain_ambulance"] = df["pain_high"] * df["arrival_ambulance"]
+    df["elderly"] = (df["age"] >= 65).astype(int)
+    df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
+
     # --- Assemble ---
     structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
@@ -312,6 +318,8 @@ def build_features(
         "max_severity_prior", "std_severity_prior",
         "age", "age_bin", "gender_male",
         "arrival_ambulance", "arrival_helicopter", "arrival_walk_in",
+        "age_ambulance", "pain_x_min_severity", "age_severity",
+        "high_pain_ambulance", "elderly", "elderly_ambulance",
     ]
 
     structured = df[structured_cols].reset_index(drop=True)
@@ -340,22 +348,25 @@ def train_acuity_model(
     print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
     print("=" * 60)
 
-    # Compute sample weights for class imbalance
+    # Soft class weights: sqrt of inverse frequency
+    # Full inverse over-prioritizes ESI 5 (0.3%) and kills accuracy on ESI 2-3
     class_counts = y_train.value_counts()
     total = len(y_train)
     n_classes = len(class_counts)
-    sample_weights = y_train.map(lambda x: total / (n_classes * class_counts[x]))
+    sample_weights = y_train.map(
+        lambda x: np.sqrt(total / (n_classes * class_counts[x]))
+    )
 
     y_train_shifted = y_train - 1
     y_test_shifted = y_test - 1
 
     model = XGBClassifier(
-        n_estimators=1500,
-        max_depth=9,
-        learning_rate=0.05,
+        n_estimators=3000,
+        max_depth=10,
+        learning_rate=0.02,
         subsample=0.8,
-        colsample_bytree=0.6,
-        colsample_bylevel=0.8,
+        colsample_bytree=0.5,
+        colsample_bylevel=0.7,
         min_child_weight=3,
         gamma=0.05,
         reg_alpha=0.5,
@@ -363,13 +374,13 @@ def train_acuity_model(
         objective="multi:softprob",
         num_class=5,
         eval_metric="mlogloss",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
     )
 
-    print("  Training XGBoost (up to 1500 trees, early stopping=50)...")
+    print("  Training XGBoost (up to 3000 trees, lr=0.02, early stopping=100)...")
     model.fit(
         X_train, y_train_shifted,
         sample_weight=sample_weights,
@@ -383,7 +394,7 @@ def train_acuity_model(
     y_pred = model.predict(X_test) + 1
     accuracy = accuracy_score(y_test, y_pred)
 
-    # Also compute "within-1" accuracy (ESI prediction off by at most 1 level)
+    # Also compute "within-1" accuracy
     within_1 = np.mean(np.abs(y_pred - y_test.values) <= 1)
 
     print(f"\n  Accuracy (exact): {accuracy:.4f}")
@@ -410,12 +421,12 @@ def train_disposition_model(
     scale = neg_count / pos_count
 
     model = XGBClassifier(
-        n_estimators=1500,
-        max_depth=9,
-        learning_rate=0.05,
+        n_estimators=3000,
+        max_depth=10,
+        learning_rate=0.02,
         subsample=0.8,
-        colsample_bytree=0.6,
-        colsample_bylevel=0.8,
+        colsample_bytree=0.5,
+        colsample_bylevel=0.7,
         min_child_weight=3,
         gamma=0.05,
         reg_alpha=0.5,
@@ -423,13 +434,13 @@ def train_disposition_model(
         scale_pos_weight=scale,
         objective="binary:logistic",
         eval_metric="logloss",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
     )
 
-    print("  Training XGBoost (up to 1500 trees, early stopping=50)...")
+    print("  Training XGBoost (up to 3000 trees, lr=0.02, early stopping=100)...")
     model.fit(
         X_train, y_train,
         eval_set=[(X_test, y_test)],
@@ -516,8 +527,8 @@ def save_models(
 # ---------------------------------------------------------------------------
 def main():
     print("\n" + "#" * 60)
-    print("  MIMIC-IV Triage Model Training Pipeline v3")
-    print("  (TF-IDF + XGBoost + Demographics + Arrival)")
+    print("  MIMIC-IV Triage Model Training Pipeline v3b")
+    print("  (TF-IDF 2K + XGBoost 3K trees + Demographics + Interactions)")
     print("#" * 60)
 
     # 1. Load

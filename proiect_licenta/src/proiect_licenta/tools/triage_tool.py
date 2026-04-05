@@ -233,7 +233,16 @@ class TriagePredictionTool(BaseTool):
         arrival_helicopter = 1 if at == "helicopter" else 0
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
 
-        # 7. Assemble feature vector (must match training order!)
+        # 7. Interaction features (must match training pipeline!)
+        pain_clipped = max(0, pain_val) if pain_val >= 0 else 0
+        age_ambulance = age_val * arrival_ambulance
+        pain_x_min_severity = pain_clipped * (5 - min_sev)
+        age_severity = age_val * (5 - min_sev)
+        high_pain_ambulance = pain_high * arrival_ambulance
+        elderly = 1 if age_val >= 65 else 0
+        elderly_ambulance = elderly * arrival_ambulance
+
+        # 8. Assemble feature vector (must match training order!)
         structured = pd.DataFrame({
             "pain": [pain_val],
             "pain_missing": [pain_missing],
@@ -252,6 +261,12 @@ class TriagePredictionTool(BaseTool):
             "arrival_ambulance": [arrival_ambulance],
             "arrival_helicopter": [arrival_helicopter],
             "arrival_walk_in": [arrival_walk_in],
+            "age_ambulance": [age_ambulance],
+            "pain_x_min_severity": [pain_x_min_severity],
+            "age_severity": [age_severity],
+            "high_pain_ambulance": [high_pain_ambulance],
+            "elderly": [elderly],
+            "elderly_ambulance": [elderly_ambulance],
         })
         features = pd.concat([structured, tfidf_df], axis=1)
 

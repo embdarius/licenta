@@ -1,8 +1,8 @@
 {
   "version": 3,
-  "trained_at": "2026-04-04T20:56:10.668222",
-  "n_tfidf_features": 1000,
-  "n_severity_words": 689,
+  "trained_at": "2026-04-05T16:09:41.099918",
+  "n_tfidf_features": 2000,
+  "n_severity_words": 819,
   "acuity_classes": [
     1,
     2,
@@ -14,9 +14,9 @@
     "NOT ADMITTED",
     "ADMITTED"
   ],
-  "acuity_accuracy_exact": 0.5841,
-  "acuity_accuracy_within_1": 0.9423,
-  "disposition_accuracy": 0.7557,
+  "acuity_accuracy_exact": 0.6668,
+  "acuity_accuracy_within_1": 0.9765,
+  "disposition_accuracy": 0.7587,
   "model_type": "XGBClassifier",
   "structured_features": [
     "pain",
