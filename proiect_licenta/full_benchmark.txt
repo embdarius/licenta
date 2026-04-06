@@ -1,0 +1,52 @@
+=== DIAGNOSIS MODEL BENCHMARK ===
+                                         precision    recall  f1-score   support
+
+         Blood and Blood-Forming Organs       0.32      0.43      0.37       189
+                     Circulatory System       0.46      0.45      0.45      1170
+                       Digestive System       0.46      0.54      0.50      1339
+                    Diseases of the Ear       0.30      0.63      0.40        46
+                    Diseases of the Eye       0.42      0.66      0.52        89
+      Endocrine, Nutritional, Metabolic       0.49      0.37      0.42       433
+                   Genitourinary System       0.47      0.43      0.45       960
+      Infectious and Parasitic Diseases       0.14      0.09      0.11       300
+                   Injury and Poisoning       0.73      0.66      0.69      2991
+                       Mental Disorders       0.71      0.81      0.76      1150
+                 Musculoskeletal System       0.56      0.67      0.61      1680
+                              Neoplasms       0.03      0.02      0.02        46
+                         Nervous System       0.24      0.31      0.27       213
+        Nervous System and Sense Organs       0.36      0.27      0.31       326
+                  Pregnancy, Childbirth       0.55      0.58      0.56       284
+                     Respiratory System       0.50      0.68      0.58      1065
+           Skin and Subcutaneous Tissue       0.38      0.52      0.44       606
+           Supplemental / Health Status       0.52      0.56      0.54       218
+Symptoms, Signs, Ill-Defined Conditions       0.65      0.57      0.61      6893
+
+                               accuracy                           0.57     19998
+                              macro avg       0.44      0.49      0.45     19998
+                           weighted avg       0.58      0.57      0.57     19998
+
+
+=== SERVICE MODEL BENCHMARK ===
+              precision    recall  f1-score   support
+
+        CMED       0.50      0.65      0.56       663
+       CSURG       0.00      0.00      0.00        35
+          GU       0.09      0.11      0.10        36
+         GYN       0.21      0.26      0.23        54
+         MED       0.73      0.67      0.70      4327
+        NMED       0.60      0.59      0.59       533
+       NSURG       0.28      0.31      0.30       181
+         OBS       0.07      0.06      0.06        18
+        OMED       0.26      0.14      0.19       431
+       ORTHO       0.50      0.59      0.54       245
+       PSURG       0.09      0.12      0.10        17
+       PSYCH       0.00      0.00      0.00         5
+        SURG       0.35      0.48      0.40       556
+       TRAUM       0.36      0.47      0.41       139
+       TSURG       0.15      0.15      0.15        27
+       VSURG       0.22      0.28      0.25        79
+
+    accuracy                           0.58      7346
+   macro avg       0.28      0.30      0.29      7346
+weighted avg       0.60      0.58      0.59      7346
+

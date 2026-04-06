@@ -1,0 +1,91 @@
+﻿
+############################################################
+  MIMIC-IV Doctor Model Training Pipeline (Phase 2)
+############################################################
+============================================================
+STEP 1: Loading data for Doctor Agent...
+============================================================
+============================================================
+STEP 1: Loading data...
+============================================================
+  triage.csv: 425,087 rows
+  edstays.csv: 425,087 rows
+  patients.csv: 364,627 rows
+  Merged triage+edstays: 425,087 rows
+  Merged with patients: 425,087 rows
+  After dropping missing complaints/acuity: 418,083 rows (dropped 7,004)
+
+  Acuity distribution:
+    ESI 1: 24,015 (5.7%)
+    ESI 2: 139,407 (33.3%)
+    ESI 3: 225,060 (53.8%)
+    ESI 4: 28,502 (6.8%)
+    ESI 5: 1,099 (0.3%)
+
+  Disposition distribution:
+    ADMITTED:     153,581 (36.7%)
+    NOT ADMITTED: 264,502 (63.3%)
+
+  Gender: M=191,084  F=226,999
+  Age: mean=52.8  median=53  range=[18, 103]
+
+  Arrival transport:
+    AMBULANCE: 150,424 (36.0%)
+    WALK IN: 251,464 (60.1%)
+    HELICOPTER: 535 (0.1%)
+    OTHER: 1,256 (0.3%)
+    UNKNOWN: 14,404 (3.4%)
+  Loading categorized_diagnosis.csv...
+  Merged primary diagnosis, rows: 417121
+  Loading hadm_id from edstays.csv...
+  Loading services.csv...
+
+  [BENCHMARK] Downsampling dataset to 100,000 rows...
+
+  Splitting data FIRST to avoid Out-Of-Memory errors...
+
+============================================================
+STEP 2: Generating Features & Triage Predictions
+============================================================
+  Processing Train features...
+  Processing Test features...
+
+============================================================
+STEP 3: Training DIAGNOSIS CATEGORY model
+============================================================
+  Training Diagnosis XGBoost on 79992 samples (19 classes)...
+  Best iteration: 765
+  Diagnosis Accuracy: 0.6099
+
+  Top 5 Categories Performance:
+                                         precision    recall  f1-score  support
+macro avg                                 0.512912  0.403158  0.437936  19998.0
+weighted avg                              0.600787  0.609861  0.590177  19998.0
+Symptoms, Signs, Ill-Defined Conditions   0.597051  0.792978  0.681206   6893.0
+Injury and Poisoning                      0.690407  0.709796  0.699967   2991.0
+Musculoskeletal System                    0.577697  0.666071  0.618745   1680.0
+
+============================================================
+STEP 4: Training SERVICE DEPARTMENT model
+============================================================
+  Filtering to 29185 train admitted samples across 15 services.
+  Training Service XGBoost...
+  Best iteration: 308
+  Service Accuracy: 0.6532
+
+  Top 5 Services Performance:
+              precision    recall  f1-score  support
+macro avg      0.452876  0.229488  0.266218   7341.0
+weighted avg   0.626013  0.653181  0.594461   7341.0
+MED            0.665714  0.914953  0.770683   4327.0
+CMED           0.607438  0.443439  0.512642    663.0
+SURG           0.645161  0.107914  0.184900    556.0
+
+============================================================
+STEP 5: Saving Model Artifacts
+============================================================
+  Saved artifacts to D:\Projects\Licenta\licenta\proiect_licenta\src\proiect_licenta\models
+  - diagnosis_model.joblib
+  - diagnosis_le.joblib
+  - service_model.joblib
+  - service_le.joblib
