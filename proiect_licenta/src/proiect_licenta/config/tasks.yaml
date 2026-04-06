@@ -54,3 +54,30 @@ triage_assessment_task:
   agent: triage_agent
   context:
     - parse_symptoms_task
+
+doctor_assessment_task:
+  description: >
+    Using the patient data from the parse_symptoms_task and the predictions output 
+    from the triage_assessment_task, perform your doctor assessment:
+    
+    1. Parse the JSON and extract the input fields (complaints, pain, age, etc.).
+    2. Extract the predicted ESI acuity level (1-5) and the disposition prediction 
+       (ADMITTED or NOT ADMITTED) from the triage_assessment_task output.
+    3. Call the doctor_prediction_tool passing ALL patient inputs plus 
+       `predicted_acuity` and `predicted_disposition`.
+    4. Provide a complete medical assessment formatted with the following sections:
+       - DIAGNOSIS CATEGORY: Provide the predicted broad diagnosis and 
+         top alternatives.
+       - HOSPITAL DEPARTMENT: Provide the predicted department (or state N/A 
+         Discharged) with confidence.
+       - CLINICAL RATIONALE: Discuss why this diagnosis makes sense given the 
+         triage scenario.
+       - NURSE REQUEST: List the specific vital signs, labs, or information 
+         you want the Nurse Agent to collect next.
+  expected_output: >
+    A Medical Doctor Assessment summarizing diagnosis, service assignment, clinical 
+    rationale, and actionable nurse requests.
+  agent: doctor_agent
+  context:
+    - parse_symptoms_task
+    - triage_assessment_task
