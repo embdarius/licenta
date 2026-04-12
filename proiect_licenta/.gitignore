@@ -6,3 +6,6 @@ __pycache__/
 *.csv
 *.parquet
 src/proiect_licenta/datasets/
+
+# Models
+models/

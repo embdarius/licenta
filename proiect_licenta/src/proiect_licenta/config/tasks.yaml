@@ -31,7 +31,7 @@ parse_symptoms_task:
 triage_assessment_task:
   description: >
     Using the structured patient data from the previous task, perform triage:
-    
+
     1. Parse the JSON from the previous task to get all fields
     2. Call the triage_prediction_tool with ALL fields:
        - chief_complaints (comma-separated string)
@@ -41,16 +41,73 @@ triage_assessment_task:
        - arrival_transport (string)
     3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
-       - The confidence of the prediction  
+       - The confidence of the prediction
        - Whether the patient should be admitted or discharged
        - A brief clinical reasoning explanation
        - Recommended next steps based on the acuity level
-    
-    Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION, 
+
+    Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION,
     and RECOMMENDATIONS.
+
+    IMPORTANT: At the END of your response, you MUST include a structured data block
+    so the doctor agent can use it. Format it exactly like this:
+
+    ---STRUCTURED_DATA---
+    chief_complaints: <comma-separated complaints from the parsed input>
+    pain_score: <integer>
+    age: <integer>
+    gender: <male or female>
+    arrival_transport: <ambulance, walk_in, or helicopter>
+    predicted_acuity: <integer 1-5 from the tool output>
+    is_admitted: <true or false based on disposition prediction>
+    ---END_DATA---
   expected_output: >
-    A comprehensive triage assessment report with ESI acuity level, admission/discharge 
+    A comprehensive triage assessment report with ESI acuity level, admission/discharge
     prediction, confidence scores, clinical reasoning, and recommended next steps.
+    Must end with a ---STRUCTURED_DATA--- block containing all patient parameters
+    and triage results for the doctor agent.
   agent: triage_agent
   context:
     - parse_symptoms_task
+
+doctor_assessment_task:
+  description: >
+    You are the doctor reviewing this patient after triage. Read the triage
+    assessment from the previous task carefully.
+
+    1. Extract the structured data from the ---STRUCTURED_DATA--- block at the
+       end of the triage assessment. Parse each field.
+    2. Determine if the patient is admitted (is_admitted = true) or not.
+
+    IF THE PATIENT IS ADMITTED:
+      Call the doctor_prediction_tool with these parameters:
+        - chief_complaints (comma-separated string)
+        - pain_score (integer)
+        - age (integer)
+        - gender (string)
+        - arrival_transport (string)
+        - predicted_acuity (integer 1-5)
+        - is_admitted (true)
+      Then provide a comprehensive doctor assessment:
+        - The predicted diagnosis category and top alternatives
+        - The recommended hospital department and alternatives
+        - Confidence levels for each prediction
+        - Clinical reasoning connecting the complaints to the diagnosis
+        - What additional information would help (vitals, labs, imaging)
+
+    IF THE PATIENT IS NOT ADMITTED (DISCHARGE):
+      Do NOT call the tool. Instead provide:
+        - A brief summary confirming the discharge recommendation
+        - Possible outpatient diagnoses to investigate
+        - Follow-up recommendations (when to return, what to watch for)
+
+    Format your response with clear sections: DIAGNOSIS, DEPARTMENT ASSIGNMENT
+    (if admitted), CLINICAL REASONING, and RECOMMENDATIONS.
+  expected_output: >
+    A comprehensive doctor assessment. For admitted patients: diagnosis category,
+    department assignment, confidence scores, clinical reasoning, and recommendations
+    for additional workup. For discharged patients: discharge summary with follow-up
+    instructions.
+  agent: doctor_agent
+  context:
+    - triage_assessment_task

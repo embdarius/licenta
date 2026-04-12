@@ -5,11 +5,12 @@ from typing import List
 
 from proiect_licenta.tools.triage_tool import TriagePredictionTool
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
+from proiect_licenta.tools.doctor_tool import DoctorPredictionTool
 
 
 @CrewBase
 class ProiectLicenta():
-    """ProiectLicenta crew — Multi-Agent Medical Triage System"""
+    """ProiectLicenta crew — Multi-Agent Medical Decision Support System"""
 
     agents: List[BaseAgent]
     tasks: List[Task]
@@ -34,6 +35,15 @@ class ProiectLicenta():
             verbose=True,
         )
 
+    @agent
+    def doctor_agent(self) -> Agent:
+        """Doctor Agent — predicts diagnosis + department for admitted patients."""
+        return Agent(
+            config=self.agents_config['doctor_agent'],  # type: ignore[index]
+            tools=[DoctorPredictionTool()],
+            verbose=True,
+        )
+
     # ── Tasks ─────────────────────────────────────────────────
 
     @task
@@ -48,6 +58,13 @@ class ProiectLicenta():
         """Predict acuity and disposition using the ML triage model."""
         return Task(
             config=self.tasks_config['triage_assessment_task'],  # type: ignore[index]
+        )
+
+    @task
+    def doctor_assessment_task(self) -> Task:
+        """Predict diagnosis and department for admitted patients."""
+        return Task(
+            config=self.tasks_config['doctor_assessment_task'],  # type: ignore[index]
         )
 
     # ── Crew ──────────────────────────────────────────────────

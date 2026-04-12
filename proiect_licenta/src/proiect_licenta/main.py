@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """
-Multi-Agent Medical Triage System — Entry Point
+Multi-Agent Medical Decision Support System — Entry Point
 
 Flow:
   1. Patient describes symptoms in natural language
   2. NLP Parser Agent extracts structured chief complaints + pain score
   3. Triage Agent predicts ESI acuity (1-5) and admission/discharge
+  4. Doctor Agent predicts diagnosis category + department (if admitted)
 """
 
 import sys
@@ -17,9 +18,9 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
 
 def run():
-    """Run the triage crew interactively."""
+    """Run the medical decision support crew interactively."""
     print("\n" + "=" * 60)
-    print("  [+] Multi-Agent Medical Triage System")
+    print("  [+] Multi-Agent Medical Decision Support System")
     print("  Powered by MIMIC-IV + CrewAI")
     print("=" * 60)
 
@@ -36,7 +37,7 @@ def run():
     try:
         result = ProiectLicenta().crew().kickoff(inputs=inputs)
         print("\n" + "=" * 60)
-        print("  TRIAGE ASSESSMENT RESULT")
+        print("  MEDICAL ASSESSMENT RESULT")
         print("=" * 60)
         print(result)
         print("=" * 60 + "\n")
@@ -45,9 +46,15 @@ def run():
 
 
 def train():
-    """Train the ML models (run data_pipeline.py)."""
+    """Train the triage ML models (run data_pipeline.py)."""
     from proiect_licenta.data_pipeline import main as train_pipeline
     train_pipeline()
+
+
+def train_doctor():
+    """Train the doctor ML models (run doctor_data_pipeline.py)."""
+    from proiect_licenta.doctor_data_pipeline import main as train_doctor_pipeline
+    train_doctor_pipeline()
 
 
 if __name__ == "__main__":

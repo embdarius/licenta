@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /d/Antigravity/resources/app -type f -name *.ts -not -path */node_modules/* -not -path */.git/*)",
+      "Bash(find /d/Antigravity -name .env* -o -name config.* -o -name settings.json)",
+      "Bash(grep -r \"api\\\\.google\\\\|googleapis\\\\|/chat\\\\|/agent\\\\|/api\" /d/Antigravity/resources/app/extensions/antigravity --include=*.js)",
+      "Bash(find /d/Antigravity/resources/app/node_modules -name *agent_manager* -o -name *chat_client* -o -name *cortex*)",
+      "Read(//c/Users/ember/AppData/Roaming/Antigravity/**)",
+      "Read(//c/Users/ember/AppData/Local/**)",
+      "Bash(find C:/Users/ember/AppData/Local/Antigravity/ -name *.json)",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)"
+    ]
+  }
+}
