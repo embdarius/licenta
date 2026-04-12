@@ -6,6 +6,8 @@ from typing import List
 from proiect_licenta.tools.triage_tool import TriagePredictionTool
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 from proiect_licenta.tools.doctor_tool import DoctorPredictionTool
+from proiect_licenta.tools.nurse_tool import NurseDataCollectionTool
+from proiect_licenta.tools.doctor_tool_v2 import DoctorPredictionToolV2
 
 
 @CrewBase
@@ -37,10 +39,19 @@ class ProiectLicenta():
 
     @agent
     def doctor_agent(self) -> Agent:
-        """Doctor Agent — predicts diagnosis + department for admitted patients."""
+        """Doctor Agent — predicts diagnosis + department (v1 and v2)."""
         return Agent(
             config=self.agents_config['doctor_agent'],  # type: ignore[index]
-            tools=[DoctorPredictionTool()],
+            tools=[DoctorPredictionTool(), DoctorPredictionToolV2()],
+            verbose=True,
+        )
+
+    @agent
+    def nurse_agent(self) -> Agent:
+        """Nurse Agent — collects vital signs and medication history."""
+        return Agent(
+            config=self.agents_config['nurse_agent'],  # type: ignore[index]
+            tools=[NurseDataCollectionTool()],
             verbose=True,
         )
 
@@ -62,9 +73,23 @@ class ProiectLicenta():
 
     @task
     def doctor_assessment_task(self) -> Task:
-        """Predict diagnosis and department for admitted patients."""
+        """Initial doctor assessment (v1) — diagnosis + department from triage data."""
         return Task(
             config=self.tasks_config['doctor_assessment_task'],  # type: ignore[index]
+        )
+
+    @task
+    def nurse_data_collection_task(self) -> Task:
+        """Nurse collects vital signs and medication history from patient."""
+        return Task(
+            config=self.tasks_config['nurse_data_collection_task'],  # type: ignore[index]
+        )
+
+    @task
+    def doctor_reassessment_task(self) -> Task:
+        """Enhanced doctor assessment (v2) — with vital signs + medication data."""
+        return Task(
+            config=self.tasks_config['doctor_reassessment_task'],  # type: ignore[index]
         )
 
     # ── Crew ──────────────────────────────────────────────────

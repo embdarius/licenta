@@ -1,21 +1,21 @@
 parse_symptoms_task:
   description: >
     A patient has arrived and said: "{user_message}".
-    
-    Your job is to gather ALL of the following information for triage. 
-    First, extract what you can from their message. Then, for EACH missing 
-    piece of information, use the ask_patient tool to ask them directly. 
+
+    Your job is to gather ALL of the following information for triage.
+    First, extract what you can from their message. Then, for EACH missing
+    piece of information, use the ask_patient tool to ask them directly.
     Ask one question at a time, and be friendly.
-    
+
     Required information:
     1. Chief complaints - what symptoms/issues brought them to the ED.
-       Use standard ED terminology (e.g., "abd pain", "chest pain", "dyspnea", 
+       Use standard ED terminology (e.g., "abd pain", "chest pain", "dyspnea",
        "headache", "s/p fall", "laceration", "fever", "n/v", "back pain", etc.)
     2. Pain score - 0 to 10 (0 = no pain, 10 = worst imaginable).
     3. Age - patient's age in years.
     4. Gender - "male" or "female".
     5. Arrival transport - how they got to the ED: "ambulance", "walk_in", or "helicopter".
-    
+
     After gathering everything, respond ONLY with valid JSON:
     {{
       "chief_complaints": ["complaint1", "complaint2"],
@@ -88,12 +88,13 @@ doctor_assessment_task:
         - arrival_transport (string)
         - predicted_acuity (integer 1-5)
         - is_admitted (true)
-      Then provide a comprehensive doctor assessment:
+      Then provide a comprehensive INITIAL doctor assessment:
         - The predicted diagnosis category and top alternatives
         - The recommended hospital department and alternatives
         - Confidence levels for each prediction
         - Clinical reasoning connecting the complaints to the diagnosis
-        - What additional information would help (vitals, labs, imaging)
+        - Note that this is a PRELIMINARY assessment and will be enhanced
+          with vital signs and medication data from the nurse
 
     IF THE PATIENT IS NOT ADMITTED (DISCHARGE):
       Do NOT call the tool. Instead provide:
@@ -101,13 +102,94 @@ doctor_assessment_task:
         - Possible outpatient diagnoses to investigate
         - Follow-up recommendations (when to return, what to watch for)
 
-    Format your response with clear sections: DIAGNOSIS, DEPARTMENT ASSIGNMENT
-    (if admitted), CLINICAL REASONING, and RECOMMENDATIONS.
+    Format your response with clear sections: INITIAL DIAGNOSIS, DEPARTMENT
+    ASSIGNMENT (if admitted), CLINICAL REASONING, and NEXT STEPS.
+
+    IMPORTANT: At the END of your response, include the structured data block
+    so the nurse and enhanced assessment can use it:
+
+    ---STRUCTURED_DATA---
+    chief_complaints: <comma-separated complaints>
+    pain_score: <integer>
+    age: <integer>
+    gender: <male or female>
+    arrival_transport: <ambulance, walk_in, or helicopter>
+    predicted_acuity: <integer 1-5>
+    is_admitted: <true or false>
+    ---END_DATA---
   expected_output: >
-    A comprehensive doctor assessment. For admitted patients: diagnosis category,
-    department assignment, confidence scores, clinical reasoning, and recommendations
-    for additional workup. For discharged patients: discharge summary with follow-up
-    instructions.
+    A comprehensive initial doctor assessment. For admitted patients: diagnosis
+    category, department assignment, confidence scores, clinical reasoning.
+    For discharged patients: discharge summary with follow-up instructions.
+    Must end with a ---STRUCTURED_DATA--- block.
   agent: doctor_agent
   context:
     - triage_assessment_task
+
+nurse_data_collection_task:
+  description: >
+    The doctor has completed their initial assessment. Now collect vital signs
+    and medication history from the patient to provide additional clinical data.
+
+    Call the nurse_data_collection tool with a brief patient context string
+    summarizing the chief complaints and triage results from prior assessments.
+
+    After collecting the data, present a clear summary of what was collected:
+    - List each vital sign value (or note which were unavailable)
+    - List the medications reported (or note if none/unknown)
+    - Flag any concerning vital sign values
+
+    Include the FULL JSON output from the tool in your response so the doctor
+    can parse it for the enhanced assessment.
+  expected_output: >
+    A summary of collected vital signs and medications, plus the full JSON
+    output from the nurse_data_collection tool for the doctor to use.
+  agent: nurse_agent
+  context:
+    - triage_assessment_task
+    - doctor_assessment_task
+
+doctor_reassessment_task:
+  description: >
+    You are the doctor performing an ENHANCED reassessment using the nurse's
+    vital signs and medication data.
+
+    1. Extract the structured data from the ---STRUCTURED_DATA--- block in
+       the initial doctor assessment (chief_complaints, pain_score, age,
+       gender, arrival_transport, predicted_acuity, is_admitted).
+
+    2. Extract vital signs and medications from the nurse's data collection.
+       Parse the JSON from the nurse's output to get:
+       - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1 if null/missing)
+       - medications_raw (the raw medication text, or "unknown" if not provided)
+
+    3. IF THE PATIENT IS ADMITTED:
+       Call the doctor_prediction_tool_v2 with ALL available data:
+         - chief_complaints, pain_score, age, gender, arrival_transport
+         - predicted_acuity, is_admitted
+         - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1.0 for missing)
+         - medications_raw
+
+       Then provide an enhanced assessment that includes:
+         - Updated diagnosis category and top alternatives
+         - Updated department recommendation
+         - Comparison with your initial v1 assessment (what changed and why)
+         - How the vital signs and medications influenced the prediction
+         - Final clinical reasoning and recommendations
+
+    4. IF THE PATIENT IS NOT ADMITTED:
+       Skip the tool call. Provide a brief note that the discharge recommendation
+       stands, and note any vital sign concerns from the nurse data.
+
+    Format your response with: ENHANCED DIAGNOSIS, DEPARTMENT ASSIGNMENT,
+    COMPARISON WITH INITIAL ASSESSMENT, VITAL SIGNS IMPACT, and
+    FINAL RECOMMENDATIONS.
+  expected_output: >
+    An enhanced doctor assessment incorporating vital signs and medication data.
+    Includes comparison with initial assessment, noting any changes in diagnosis
+    or department. Final clinical reasoning and recommendations for the patient.
+  agent: doctor_agent
+  context:
+    - triage_assessment_task
+    - doctor_assessment_task
+    - nurse_data_collection_task

@@ -4,7 +4,7 @@
 
 This is a **Bachelor's Thesis** project implementing a **Multi-Agent Architecture for Medical Decision Support** using **CrewAI** and **supervised machine learning** trained on the **MIMIC-IV Emergency Department** dataset (~425K real patient encounters).
 
-The system simulates a clinical emergency department workflow: a patient describes their symptoms in natural language, and a pipeline of specialized AI agents processes the input through triage, diagnosis, and disposition.
+The system simulates a clinical emergency department workflow: a patient describes their symptoms in natural language, and a pipeline of specialized AI agents processes the input through triage, initial diagnosis, nurse data collection, and enhanced reassessment.
 
 **Tech stack:** Python 3.13, CrewAI 1.9.3, Gemini 2.5 Flash (LLM), XGBoost, scikit-learn, pandas, thefuzz.
 
@@ -13,11 +13,11 @@ The system simulates a clinical emergency department workflow: a patient describ
 ## System Architecture
 
 ```
-Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurse Agent]
-                         (LLM)             (ML model)      (ML model)      (future)
+Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
+           (LLM)        (ML)      (ML)         (interactive) (ML+vitals+meds)
 ```
 
-### Full Agent Pipeline (currently 3 operational, 2 planned)
+### Full Agent Pipeline (4 operational agents, 5 tasks)
 
 ```
 +---------------------------------------------------------------------+
@@ -25,30 +25,39 @@ Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurs
 +---------------------------------------------------------------------+
 |                                                                      |
 |  1. NLP Parser Agent (LLM - Gemini)               [OPERATIONAL]     |
+|     Task:   parse_symptoms_task                                      |
 |     Input:  Free-text patient description                            |
 |     Output: JSON { chief_complaints[], pain_score, age,              |
 |                    gender, arrival_transport }                        |
 |     Tool:   ask_patient (interactive follow-up questions)            |
 |                                                                      |
 |  2. Triage Agent (ML - XGBoost)                    [OPERATIONAL]     |
+|     Task:   triage_assessment_task                                   |
 |     Input:  Structured complaints + pain + demographics              |
 |     Output: ESI acuity level (1-5), admission/discharge prediction   |
 |     Tool:   triage_prediction_tool (wraps 2 XGBoost models)         |
 |                                                                      |
-|  3. Doctor Agent (ML - XGBoost)                    [OPERATIONAL]     |
+|  3. Doctor Agent — Initial (ML - XGBoost v1)       [OPERATIONAL]     |
+|     Task:   doctor_assessment_task                                   |
 |     Input:  Triage results + patient data                            |
-|     Output: Diagnosis category (14 classes),                         |
-|             hospital department (11 classes, admitted only)           |
-|     Tool:   doctor_prediction_tool (wraps 2 XGBoost models)         |
+|     Output: Preliminary diagnosis (14 classes) + department (11)     |
+|     Tool:   doctor_prediction_tool (wraps 2 XGBoost v1 models)      |
 |                                                                      |
-|  4. Nurse/Assistant Agent (FUTURE - not yet implemented)             |
-|     Input:  Requests from Doctor Agent                               |
-|     Output: Vital signs, patient history, clinical parameters        |
-|     Data:   vitalsign.csv, medrecon.csv from MIMIC-IV               |
+|  4. Nurse Agent (Interactive)                      [OPERATIONAL]     |
+|     Task:   nurse_data_collection_task                               |
+|     Input:  Patient context from triage + initial assessment         |
+|     Output: Vital signs (temp, HR, RR, O2, BP) + medication list    |
+|     Tool:   nurse_data_collection (interactive stdin collection)     |
+|     Note:   Each field can be skipped ("I don't know")              |
 |                                                                      |
-|  5. Text Generation Agent (FUTURE - not yet implemented)             |
-|     Purpose: Generate synthetic patient utterances from structured    |
-|              data for testing and ML model validation                 |
+|  5. Doctor Agent — Enhanced (ML - XGBoost v2)      [OPERATIONAL]     |
+|     Task:   doctor_reassessment_task                                 |
+|     Input:  All prior data + vital signs + medications               |
+|     Output: Enhanced diagnosis + department + comparison with v1     |
+|     Tool:   doctor_prediction_tool_v2 (wraps 2 XGBoost v2 models)  |
+|                                                                      |
+|  (Future) Text Generation Agent                                      |
+|     Purpose: Generate synthetic patient utterances for testing       |
 |                                                                      |
 +---------------------------------------------------------------------+
 ```
@@ -140,15 +149,15 @@ Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurs
 
 ---
 
-## Phase 2: Doctor Agent (Complete)
+## Phase 2: Doctor Agent v1 (Complete)
 
-### Doctor Agent
+### Doctor Agent (Initial Assessment)
 - **Type:** CrewAI agent with `DoctorPredictionTool` wrapping two XGBoost models
-- **What it does:** For admitted patients, predicts diagnosis category (14 classes) and hospital department (11 classes). For discharged patients, provides discharge summary.
+- **What it does:** For admitted patients, predicts diagnosis category (14 classes) and hospital department (11 classes) using triage data only. For discharged patients, provides discharge summary.
 - **Config:** `agents.yaml` (doctor_agent) and `tasks.yaml` (doctor_assessment_task)
 - **Data flow:** Receives triage results via structured data block from triage agent
 
-### Doctor ML Models (stored in `src/proiect_licenta/models/doctor/`)
+### Doctor v1 ML Models (stored in `src/proiect_licenta/models/doctor/`)
 
 #### Model 3: Diagnosis Category Prediction (14 classes)
 - **File:** `diagnosis_model.joblib`
@@ -202,9 +211,9 @@ Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurs
 #### Supporting Artifacts
 - `doctor_metadata.json` — Training date, accuracy metrics, label lists, department names
 
-### Doctor Benchmark Results (test set: 20,000 samples)
+### Doctor v1 Benchmark Results (test set: 20,000 samples)
 
-#### Diagnosis Category Model
+#### Diagnosis Category Model (v1)
 
 | Metric | Value |
 |--------|-------|
@@ -235,7 +244,7 @@ Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurs
 3. Genitourinary -> Symptoms (28% of Genitourinary cases)
 4. Respiratory -> Symptoms (20% of Respiratory cases)
 
-#### Department Model
+#### Department Model (v1)
 
 | Metric | Value |
 |--------|-------|
@@ -260,6 +269,90 @@ Patient (free text) -> NLP Parser Agent -> Triage Agent -> Doctor Agent -> [Nurs
 
 ---
 
+## Phase 3: Nurse Agent + Doctor v2 (Complete)
+
+### Nurse Agent
+- **Type:** CrewAI agent with `NurseDataCollectionTool` (interactive data collection via stdin)
+- **What it does:** Collects vital signs (temperature, heart rate, respiratory rate, O2 saturation, systolic/diastolic blood pressure) and medication history from the patient
+- **Partial data support:** Each field can be skipped ("I don't know" / Enter). Missing values are handled via sentinel values + `_missing` binary flags, and population median imputation for the ML model
+- **Config:** `agents.yaml` (nurse_agent) and `tasks.yaml` (nurse_data_collection_task)
+- **Data flow:** Runs after the initial doctor assessment; outputs are passed to the doctor v2 reassessment
+
+### Doctor v2 ML Models (stored in `src/proiect_licenta/models/doctor/`)
+
+#### Model 5: Diagnosis Category v2 (14 classes, with nurse data)
+- **File:** `diagnosis_model_v2.joblib`
+- **Algorithm:** XGBClassifier (3000 trees, max_depth=10, lr=0.02, early stopping)
+- **Training data:** 80K samples (80/20 split from 100K sampled from 157K admitted patients)
+- **Features (2056 total):**
+  - 2025 triage features (same as v1: 2023 triage + predicted_acuity + predicted_disposition)
+  - 20 vital sign features:
+    - Raw values: `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`
+    - Missing flags: `temperature_missing`, `heartrate_missing`, `resprate_missing`, `o2sat_missing`, `sbp_missing`, `dbp_missing`
+    - Clinical flags: `fever` (>100.4F), `tachycardia` (HR>100), `bradycardia` (HR<60), `tachypnea` (RR>20), `hypoxia` (O2<94%), `hypertension` (SBP>140), `hypotension` (SBP<90)
+    - `map` (mean arterial pressure = (SBP + 2*DBP) / 3)
+  - 11 medication features:
+    - `n_medications` (count of pre-admission medications)
+    - `meds_unknown` (1 if no medication data available)
+    - 9 binary category flags: `has_cardiac_meds`, `has_diabetes_meds`, `has_psych_meds`, `has_respiratory_meds`, `has_opioid_meds`, `has_anticoagulant_meds`, `has_gi_meds`, `has_thyroid_meds`, `has_anticonvulsant_meds`
+
+#### Model 6: Department v2 (11 classes, with nurse data)
+- **File:** `department_model_v2.joblib`
+- **Features:** Same 2056 features PLUS `predicted_diagnosis` from diagnosis v2 model (cascading)
+
+#### Medication Classification
+- **Training data source:** `medrecon.csv` (`etcdescription` field) — maps drug class descriptions to 9 binary category flags via keyword matching
+- **Inference:** Patient-reported medication names are classified using:
+  1. A 120+ entry drug name map (generic + brand names to categories)
+  2. Keyword matching on drug class descriptions
+  3. Covers common medications: statins, ACE inhibitors, insulin, SSRIs, inhalers, anticoagulants, PPIs, thyroid meds, anticonvulsants, etc.
+
+#### Vital Sign Processing
+- **Data source:** `triage.csv` columns (temperature, heartrate, resprate, o2sat, sbp, dbp) — these are the vitals measured at triage time
+- **Missing value handling:** Each vital gets a `_missing` binary flag; missing values are imputed with population medians (temp=98.1F, HR=84, RR=18, O2=98%, SBP=134, DBP=78)
+- **Physiological clipping:** Values outside plausible ranges are clipped (e.g., temperature 90-110F, HR 20-250, O2 50-100%)
+- **Vital sign availability in training data:** 93-95% of admitted patients have vitals recorded; 84% have medication data
+
+#### Supporting Artifacts
+- `doctor_v2_metadata.json` — Training date, accuracy metrics, label lists, vital medians, medication keyword map
+
+### Doctor v1 vs v2 Benchmark Comparison (test set: 20,000 samples)
+
+#### Diagnosis Category: v1 vs v2
+
+| Metric | v1 | v2 | Improvement |
+|--------|-----|-----|-------------|
+| **Top-1 accuracy** | 50.2% | **52.4%** | **+2.3pp** |
+| **Top-3 accuracy** | 83.6% | **84.9%** | +1.3pp |
+| **Top-5 accuracy** | 91.2% | **92.3%** | +1.1pp |
+| Cohen's kappa | 0.415 | **0.435** | +0.020 |
+
+**Per-class diagnosis improvements (v1 -> v2):**
+- **Biggest gains:** Symptoms/Ill-Defined (+5.6pp), Circulatory (+5.2pp), Endocrine (+2.5pp), Injury (+2.3pp)
+- **Slight regressions:** Skin (-5.0pp), Nervous System (-3.8pp), Digestive (-2.2pp)
+- **Stable:** Mental Disorders, Musculoskeletal, Genitourinary
+
+#### Department: v1 vs v2
+
+| Metric | v1 | v2 | Improvement |
+|--------|-----|-----|-------------|
+| **Top-1 accuracy** | 59.1% | **65.0%** | **+5.9pp** |
+| **Top-3 accuracy** | 92.5% | **93.7%** | +1.2pp |
+| Cohen's kappa | 0.388 | **0.435** | +0.046 |
+| Majority baseline | 59.9% | 59.9% | -- |
+
+**Per-class department improvements (v1 -> v2):**
+- **Biggest gains:** OMED/Oncology (+11.6pp), MED/General (+10.6pp), NMED/Neuro (+0.7pp)
+- **Regressions:** TRAUM (-9.6pp), OTHER (-8.9pp), OTHER_SURG (-7.0pp), SURG (-5.9pp)
+
+**Key findings:**
+- Department v2 accuracy (65.0%) now exceeds the majority baseline (59.9%), which v1 (59.1%) did not
+- Vital signs help the most with medical (non-surgical) departments where physiological state directly influences routing
+- Surgical departments regressed slightly, likely because surgery routing depends more on injury type (already in chief complaints) than vitals
+- Top v2 features are still dominated by TF-IDF terms (specific complaint language), but nurse features appear in top 50
+
+---
+
 ## Text Preprocessing Pipeline (shared across all models)
 
 Both the training pipelines and inference tools apply identical preprocessing:
@@ -276,7 +369,7 @@ Both the training pipelines and inference tools apply identical preprocessing:
 The system uses a cascading design where each model's output feeds into the next:
 
 ```
-Chief complaints + demographics
+Chief complaints + demographics (2023 features)
          |
          v
   [Acuity Model] -> predicted_acuity (ESI 1-5)
@@ -284,16 +377,23 @@ Chief complaints + demographics
          v
   [Disposition Model] -> predicted_disposition (admit/discharge)
          |                 (uses predicted_acuity as feature)
-         v
-  [Diagnosis Model] -> predicted_diagnosis (14 categories)
-         |                 (uses predicted_acuity + predicted_disposition as features)
-         v
-  [Department Model] -> predicted_department (11 services)
-                           (uses predicted_acuity + predicted_disposition
-                            + predicted_diagnosis as features)
+         |
+    +----+----+
+    |         |
+    v         v
+[Diagnosis  [Diagnosis  <- + vital signs + medication features (31 extra)
+ Model v1]   Model v2]
+    |         |
+    v         v
+[Department [Department
+ Model v1]   Model v2]
+    |         |
+    v         v
+ INITIAL    ENHANCED
+ ASSESSMENT REASSESSMENT (with nurse data comparison)
 ```
 
-This mirrors clinical flow: severity determines admission, admission status influences diagnosis coding, and diagnosis determines department routing.
+v1 path uses 2025 features (triage only). v2 path uses 2056 features (triage + 20 vital + 11 medication). Both paths run sequentially so the user sees initial results before providing nurse data.
 
 ---
 
@@ -304,19 +404,23 @@ proiect_licenta/
 |-- .env                          # GEMINI_API_KEY, MODEL config
 |-- pyproject.toml                # Dependencies + script entry points
 |-- benchmark.py                  # Triage model benchmark script
-|-- benchmark_doctor.py           # Doctor model benchmark script
+|-- benchmark_doctor.py           # Doctor v1 model benchmark script
+|-- benchmark_nurse.py            # Doctor v1 vs v2 comparison benchmark
 |-- src/proiect_licenta/
 |   |-- main.py                   # Entry point -- interactive patient input -> crew kickoff
-|   |-- crew.py                   # CrewAI crew definition -- 3 agents, 3 tasks, sequential
+|   |-- crew.py                   # CrewAI crew definition -- 4 agents, 5 tasks, sequential
 |   |-- data_pipeline.py          # Triage ML training pipeline (acuity + disposition)
-|   |-- doctor_data_pipeline.py   # Doctor ML training pipeline (diagnosis + department)
+|   |-- doctor_data_pipeline.py   # Doctor v1 ML training pipeline (diagnosis + department)
+|   |-- nurse_data_pipeline.py    # Doctor v2 ML training pipeline (+ vitals + medications)
 |   |-- config/
-|   |   |-- agents.yaml           # Agent definitions (nlp_parser, triage_agent, doctor_agent)
-|   |   +-- tasks.yaml            # Task definitions (parse, triage, doctor assessment)
+|   |   |-- agents.yaml           # Agent definitions (nlp_parser, triage, doctor, nurse)
+|   |   +-- tasks.yaml            # Task definitions (5 tasks: parse, triage, doctor v1, nurse, doctor v2)
 |   |-- tools/
 |   |   |-- __init__.py           # Exports all tools
 |   |   |-- triage_tool.py        # CrewAI BaseTool wrapping triage ML models
-|   |   |-- doctor_tool.py        # CrewAI BaseTool wrapping doctor ML models
+|   |   |-- doctor_tool.py        # CrewAI BaseTool wrapping doctor v1 ML models
+|   |   |-- doctor_tool_v2.py     # CrewAI BaseTool wrapping doctor v2 ML models (+ nurse data)
+|   |   |-- nurse_tool.py         # CrewAI BaseTool for interactive vital/medication collection
 |   |   |-- ask_patient_tool.py   # Interactive follow-up question tool
 |   |   +-- custom_tool.py        # (unused template file)
 |   |-- models/                   # Triage model artifacts (.joblib)
@@ -325,17 +429,20 @@ proiect_licenta/
 |   |   |-- tfidf_vectorizer.joblib
 |   |   |-- severity_map.joblib
 |   |   |-- model_metadata.json
-|   |   +-- doctor/               # Doctor model artifacts
-|   |       |-- diagnosis_model.joblib
-|   |       |-- department_model.joblib
-|   |       +-- doctor_metadata.json
+|   |   +-- doctor/               # Doctor model artifacts (v1 + v2)
+|   |       |-- diagnosis_model.joblib      # v1
+|   |       |-- department_model.joblib     # v1
+|   |       |-- doctor_metadata.json        # v1
+|   |       |-- diagnosis_model_v2.joblib   # v2 (with nurse data)
+|   |       |-- department_model_v2.joblib  # v2 (with nurse data)
+|   |       +-- doctor_v2_metadata.json     # v2
 |   +-- datasets/datasets_mimic-iv/
 |       |-- mimic-iv-ed/          # Emergency Department data (PRIMARY)
 |       |   |-- triage.csv        # 425K rows: complaints, pain, vitals, acuity
 |       |   |-- edstays.csv       # 425K rows: stay tracking, gender, arrival, disposition
 |       |   |-- diagnosis.csv     # 900K rows: ICD-9/10 diagnosis codes per stay
 |       |   |-- vitalsign.csv     # 1.4M rows: longitudinal vital signs during stay
-|       |   |-- medrecon.csv      # Medication reconciliation (pre-admission meds)
+|       |   |-- medrecon.csv      # 3M rows: medication reconciliation (pre-admission meds)
 |       |   |-- pyxis.csv         # Medications dispensed during stay
 |       |   +-- files_created/
 |       |       +-- categorized_diagnosis.csv  # ICD codes grouped into categories
@@ -384,7 +491,7 @@ Columns: `subject_id, gender, anchor_age, anchor_year, anchor_year_group, dod`
 
 ## Design Decisions
 
-1. **No vital signs at triage/doctor stage** -- By design, the current models use only complaints + pain + demographics. Vital signs are deferred to the Nurse/Assistant Agent. This allows benchmarking "before Nurse" vs "after Nurse" to measure the impact of additional clinical data.
+1. **Two-phase doctor assessment** -- The Doctor Agent runs twice: v1 (triage data only) and v2 (with nurse data). This allows direct comparison of predictions before and after vital signs/medication data, demonstrating the clinical value of additional data collection.
 
 2. **LLM for NLP parsing, ML for prediction** -- The NLP Parser uses Gemini (LLM) for natural language understanding. All prediction models use supervised ML (XGBoost) trained on 400K+ real encounters for reliable, auditable predictions.
 
@@ -411,10 +518,13 @@ uv sync
 # Train/retrain triage ML models (~90 minutes)
 uv run train_models
 
-# Train/retrain doctor ML models (~30 minutes)
+# Train/retrain doctor v1 ML models (~30 minutes)
 uv run train_doctor
 
-# Run the full 3-agent system interactively
+# Train/retrain doctor v2 ML models with nurse data (~45 minutes)
+uv run train_nurse
+
+# Run the full 4-agent, 5-task system interactively
 uv run crewai run
 
 # Or equivalently
@@ -422,7 +532,8 @@ uv run run_crew
 
 # Run benchmarks
 uv run python benchmark.py          # Triage models
-uv run python benchmark_doctor.py   # Doctor models
+uv run python benchmark_doctor.py   # Doctor v1 models
+uv run python benchmark_nurse.py    # Doctor v1 vs v2 comparison
 ```
 
 ### Environment Variables (`.env`)
@@ -434,17 +545,6 @@ GEMINI_API_KEY=<key>
 ---
 
 ## Future Goals
-
-### Phase 3: Nurse/Assistant Agent
-- Provides supplementary patient information on request from the Doctor Agent
-- Has access to: vital signs (`vitalsign.csv`), medication history (`medrecon.csv`), clinical parameters
-- Simulates a real nurse taking vitals and reporting to the doctor
-- **Key benchmark:** Compare diagnosis/department accuracy before and after adding vital signs
-- Expected improvement areas:
-  - Circulatory vs Respiratory differentiation (heart rate, BP, O2 sat)
-  - Infectious disease detection (fever/temperature is a strong signal currently missing)
-  - Endocrine detection (glucose levels, vital abnormalities)
-  - OMED/Oncology detection (likely needs medication history from medrecon.csv)
 
 ### Phase 4: Text Generation Agent
 - Generates synthetic natural language patient descriptions from structured data
@@ -469,9 +569,9 @@ GEMINI_API_KEY=<key>
 - Train on full 157K admitted rows instead of 100K
 - Add second/third diagnoses (seq_num 2, 3) as multi-label training signal
 - Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category
-- Add vital signs from Nurse Agent (expected to significantly improve Infectious, Endocrine, Circulatory detection)
-- Add medication history from Nurse Agent (expected to help OMED/Oncology detection)
+- Explore longitudinal vital signs from `vitalsign.csv` (multiple readings during stay) vs current single triage vitals
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue, not a model issue -- patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations
+- Surgical department routing could benefit from injury-specific features rather than vitals
 
 ---
 
@@ -485,4 +585,6 @@ GEMINI_API_KEY=<key>
 
 4. **Doctor training time:** With 3000 trees and 2025 features on 80K samples, training takes ~30 minutes (two models). Early stopping typically triggers around iteration 1400-1900.
 
-5. **Doctor model accuracy ceiling:** The 50% diagnosis accuracy and 59% department accuracy are fundamentally limited by the available features (chief complaints + demographics only). Adding vital signs, labs, and medication history from the Nurse Agent is expected to significantly improve these numbers.
+5. **Doctor model accuracy:** Diagnosis accuracy improved from 50.2% (v1) to 52.4% (v2) with vital signs and medications. Department accuracy improved from 59.1% to 65.0%. Further gains likely require richer features (labs, imaging, longitudinal vitals) or a hierarchical classification approach.
+
+6. **Doctor v2 training time:** With 3000 trees and 2056 features on 80K samples, training takes ~45 minutes (two models). The medication aggregation step (3M rows from medrecon.csv) adds ~5 minutes to data loading.

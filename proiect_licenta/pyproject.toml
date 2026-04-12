@@ -18,6 +18,7 @@ proiect_licenta = "proiect_licenta.main:run"
 run_crew = "proiect_licenta.main:run"
 train_models = "proiect_licenta.main:train"
 train_doctor = "proiect_licenta.main:train_doctor"
+train_nurse = "proiect_licenta.main:train_nurse"
 
 [build-system]
 requires = ["hatchling"]

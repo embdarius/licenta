@@ -6,7 +6,9 @@ Flow:
   1. Patient describes symptoms in natural language
   2. NLP Parser Agent extracts structured chief complaints + pain score
   3. Triage Agent predicts ESI acuity (1-5) and admission/discharge
-  4. Doctor Agent predicts diagnosis category + department (if admitted)
+  4. Doctor Agent predicts diagnosis category + department (v1, if admitted)
+  5. Nurse Agent collects vital signs + medication history
+  6. Doctor Agent enhanced reassessment (v2, with nurse data)
 """
 
 import sys
@@ -55,6 +57,12 @@ def train_doctor():
     """Train the doctor ML models (run doctor_data_pipeline.py)."""
     from proiect_licenta.doctor_data_pipeline import main as train_doctor_pipeline
     train_doctor_pipeline()
+
+
+def train_nurse():
+    """Train Doctor v2 models with vital signs + medication features."""
+    from proiect_licenta.nurse_data_pipeline import main as train_nurse_pipeline
+    train_nurse_pipeline()
 
 
 if __name__ == "__main__":
