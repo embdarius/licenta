@@ -1,0 +1,194 @@
+# System Architecture
+
+This document describes the end-to-end architecture of the Multi-Agent Medical Decision Support System: the agent pipeline, task flow, cascading ML design, shared text preprocessing, and project layout on disk.
+
+For per-agent deep dives (tools, models, benchmarks, training evolution) see:
+- [`agents/nlp-parser-agent.md`](agents/nlp-parser-agent.md)
+- [`agents/triage-agent.md`](agents/triage-agent.md)
+- [`agents/doctor-agent.md`](agents/doctor-agent.md)
+- [`agents/nurse-agent.md`](agents/nurse-agent.md)
+
+---
+
+## High-Level Flow
+
+```
+Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
+           (LLM)        (ML)      (ML)         (interactive) (ML+vitals+meds)
+```
+
+The system simulates a clinical emergency department workflow: a patient describes their symptoms in natural language, and a pipeline of specialized AI agents processes the input through triage, initial diagnosis, nurse data collection, and enhanced reassessment.
+
+---
+
+## Full Agent Pipeline (4 operational agents, 5 tasks)
+
+```
++---------------------------------------------------------------------+
+|                  MULTI-AGENT MEDICAL SYSTEM                          |
++---------------------------------------------------------------------+
+|                                                                      |
+|  1. NLP Parser Agent (LLM - Gemini)               [OPERATIONAL]     |
+|     Task:   parse_symptoms_task                                      |
+|     Input:  Free-text patient description                            |
+|     Output: JSON { chief_complaints[], pain_score, age,              |
+|                    gender, arrival_transport }                        |
+|     Tool:   ask_patient (interactive follow-up questions)            |
+|                                                                      |
+|  2. Triage Agent (ML - XGBoost)                    [OPERATIONAL]     |
+|     Task:   triage_assessment_task                                   |
+|     Input:  Structured complaints + pain + demographics              |
+|     Output: ESI acuity level (1-5), admission/discharge prediction   |
+|     Tool:   triage_prediction_tool (wraps 2 XGBoost models)         |
+|                                                                      |
+|  3. Doctor Agent - Initial (ML - XGBoost v1)       [OPERATIONAL]     |
+|     Task:   doctor_assessment_task                                   |
+|     Input:  Triage results + patient data                            |
+|     Output: Preliminary diagnosis (14 classes) + department (11)     |
+|     Tool:   doctor_prediction_tool (wraps 2 XGBoost v1 models)      |
+|                                                                      |
+|  4. Nurse Agent (Interactive)                      [OPERATIONAL]     |
+|     Task:   nurse_data_collection_task                               |
+|     Input:  Patient context from triage + initial assessment         |
+|     Output: Vital signs (temp, HR, RR, O2, BP) + medication list    |
+|     Tool:   nurse_data_collection (interactive stdin collection)     |
+|     Note:   Each field can be skipped ("I don't know")              |
+|                                                                      |
+|  5. Doctor Agent - Enhanced (ML - XGBoost v2)      [OPERATIONAL]     |
+|     Task:   doctor_reassessment_task                                 |
+|     Input:  All prior data + vital signs + medications               |
+|     Output: Enhanced diagnosis + department + comparison with v1     |
+|     Tool:   doctor_prediction_tool_v2 (wraps 2 XGBoost v2 models)  |
+|                                                                      |
+|  (Future) Text Generation Agent                                      |
+|     Purpose: Generate synthetic patient utterances for testing       |
+|                                                                      |
++---------------------------------------------------------------------+
+```
+
+Although there are only 4 distinct agents, the Doctor Agent runs twice (as two separate tasks), yielding 5 tasks total. All tasks execute sequentially via `Process.sequential`.
+
+---
+
+## Cascading Prediction Architecture
+
+The system uses a cascading design where each model's output feeds into the next:
+
+```
+Chief complaints + demographics (2023 features)
+         |
+         v
+  [Acuity Model] -> predicted_acuity (ESI 1-5)
+         |
+         v
+  [Disposition Model] -> predicted_disposition (admit/discharge)
+         |                 (uses predicted_acuity as feature)
+         |
+    +----+----+
+    |         |
+    v         v
+[Diagnosis  [Diagnosis  <- + vital signs + medication features (31 extra)
+ Model v1]   Model v2]
+    |         |
+    v         v
+[Department [Department
+ Model v1]   Model v2]
+    |         |
+    v         v
+ INITIAL    ENHANCED
+ ASSESSMENT REASSESSMENT (with nurse data comparison)
+```
+
+- **v1 path** uses 2025 features (triage only: 2023 base + predicted_acuity + predicted_disposition).
+- **v2 path** uses 2056 features (triage 2025 + 20 vital-sign features + 11 medication features).
+- Both paths run sequentially so the user sees initial results before providing nurse data.
+- The Department model always consumes the predicted diagnosis from its matching-version diagnosis model (diagnosis v1 -> department v1, diagnosis v2 -> department v2).
+
+---
+
+## Text Preprocessing Pipeline (shared across all models)
+
+Both the training pipelines and inference tools apply identical preprocessing:
+
+1. **Lowercase + strip** the chief complaint text.
+2. **Replace separators** (`,`, `;`, `/`, `-`, `(`, `)`, `.`) with spaces.
+3. **Expand abbreviations:** 45+ medical abbreviations mapped (e.g., `abd` -> `abdominal`, `sob` -> `shortness of breath`, `cp` -> `chest pain`, `cva` -> `cerebrovascular accident stroke`, etc.).
+4. **TF-IDF vectorization** with the saved vectorizer (2000 features, unigram/bigram/trigram).
+5. **Severity priors** computed by looking up each word's mean acuity from training data.
+
+The same abbreviation map, vectorizer, and severity map are reused at inference by every prediction tool — guaranteeing feature parity between training and runtime.
+
+---
+
+## Project Structure
+
+```
+proiect_licenta/
+|-- .env                          # GEMINI_API_KEY, MODEL config
+|-- pyproject.toml                # Dependencies + script entry points
+|-- PROJECT_CONTEXT.md            # Top-level overview + doc index
+|-- benchmark.py                  # Triage model benchmark script
+|-- benchmark_doctor.py           # Doctor v1 model benchmark script
+|-- benchmark_nurse.py            # Doctor v1 vs v2 comparison benchmark
+|-- docs/
+|   |-- architecture.md           # This file
+|   |-- datasets.md               # MIMIC-IV dataset reference
+|   |-- future-work.md            # Roadmap + v2 analysis + improvements
+|   +-- agents/
+|       |-- nlp-parser-agent.md
+|       |-- triage-agent.md
+|       |-- doctor-agent.md
+|       +-- nurse-agent.md
+|-- src/proiect_licenta/
+|   |-- main.py                   # Entry point -- interactive patient input -> crew kickoff
+|   |-- crew.py                   # CrewAI crew definition -- 4 agents, 5 tasks, sequential
+|   |-- data_pipeline.py          # Triage ML training pipeline (acuity + disposition)
+|   |-- doctor_data_pipeline.py   # Doctor v1 ML training pipeline (diagnosis + department)
+|   |-- nurse_data_pipeline.py    # Doctor v2 ML training pipeline (+ vitals + medications)
+|   |-- config/
+|   |   |-- agents.yaml           # Agent definitions (nlp_parser, triage, doctor, nurse)
+|   |   +-- tasks.yaml            # Task definitions (5 tasks: parse, triage, doctor v1, nurse, doctor v2)
+|   |-- tools/
+|   |   |-- __init__.py           # Exports all tools
+|   |   |-- triage_tool.py        # CrewAI BaseTool wrapping triage ML models
+|   |   |-- doctor_tool.py        # CrewAI BaseTool wrapping doctor v1 ML models
+|   |   |-- doctor_tool_v2.py     # CrewAI BaseTool wrapping doctor v2 ML models (+ nurse data)
+|   |   |-- nurse_tool.py         # CrewAI BaseTool for interactive vital/medication collection
+|   |   |-- ask_patient_tool.py   # Interactive follow-up question tool
+|   |   +-- custom_tool.py        # (unused template file)
+|   |-- models/                   # Triage model artifacts (.joblib)
+|   |   |-- acuity_model.joblib
+|   |   |-- disposition_model.joblib
+|   |   |-- tfidf_vectorizer.joblib
+|   |   |-- severity_map.joblib
+|   |   |-- model_metadata.json
+|   |   +-- doctor/               # Doctor model artifacts (v1 + v2)
+|   |       |-- diagnosis_model.joblib      # v1
+|   |       |-- department_model.joblib     # v1
+|   |       |-- doctor_metadata.json        # v1
+|   |       |-- diagnosis_model_v2.joblib   # v2 (with nurse data)
+|   |       |-- department_model_v2.joblib  # v2 (with nurse data)
+|   |       +-- doctor_v2_metadata.json     # v2
+|   +-- datasets/datasets_mimic-iv/
+|       |-- mimic-iv-ed/          # Emergency Department data (PRIMARY)
+|       |   |-- triage.csv        # 425K rows: complaints, pain, vitals, acuity
+|       |   |-- edstays.csv       # 425K rows: stay tracking, gender, arrival, disposition
+|       |   |-- diagnosis.csv     # 900K rows: ICD-9/10 diagnosis codes per stay
+|       |   |-- vitalsign.csv     # 1.4M rows: longitudinal vital signs during stay
+|       |   |-- medrecon.csv      # 3M rows: medication reconciliation (pre-admission meds)
+|       |   |-- pyxis.csv         # Medications dispensed during stay
+|       |   +-- files_created/
+|       |       +-- categorized_diagnosis.csv  # ICD codes grouped into categories
+|       |-- mimic-iv/hosp/        # Hospital data
+|       |   |-- patients.csv      # Demographics (age, gender, death date)
+|       |   |-- admissions.csv    # Hospital admissions
+|       |   |-- services.csv      # Department assignments (MED, SURG, NEURO, etc.)
+|       |   |-- diagnoses_icd.csv # Hospital-wide ICD diagnosis codes
+|       |   +-- d_icd_diagnoses.csv # ICD code dictionary
+|       |-- mimic-iv/note/        # Clinical notes (unused -- see datasets.md)
+|       |   |-- discharge.csv     # ~3.3 GB discharge summaries
+|       |   |-- radiology.csv     # ~2.7 GB radiology reports
+|       |   |-- discharge_detail.csv
+|       |   +-- radiology_detail.csv
+|       +-- mimic-iv/icu/         # ICU data (NOT USED)
+```
