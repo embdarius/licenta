@@ -9,7 +9,10 @@
       "Read(//c/Users/ember/AppData/Local/**)",
       "Bash(find C:/Users/ember/AppData/Local/Antigravity/ -name *.json)",
       "Bash(for dir:*)",
-      "Bash(do echo:*)"
+      "Bash(do echo:*)",
+      "Bash(uv run python -c ':*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)"
     ]
   }
 }

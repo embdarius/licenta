@@ -16,7 +16,19 @@ parse_symptoms_task:
     4. Gender - "male" or "female".
     5. Arrival transport - how they got to the ED: "ambulance", "walk_in", or "helicopter".
 
-    After gathering everything, respond ONLY with valid JSON:
+    IMPORTANT — Vital signs for ambulance/helicopter patients:
+    If the patient arrived by AMBULANCE or HELICOPTER, EMS provides vital signs at
+    handoff. After confirming arrival_transport is ambulance or helicopter, also ask
+    for the following (the patient can say "skip" or "I don't know" for any):
+    6. Temperature (Fahrenheit, e.g., 98.6)
+    7. Heart rate (bpm, e.g., 80)
+    8. Respiratory rate (breaths/min, e.g., 16)
+    9. Oxygen saturation (%, e.g., 98)
+    10. Blood pressure (systolic/diastolic, e.g., 120/80)
+    For walk-in patients, do NOT ask for vitals.
+
+    After gathering everything, respond ONLY with valid JSON.
+    For walk-in patients:
     {{
       "chief_complaints": ["complaint1", "complaint2"],
       "pain_score": 5,
@@ -24,8 +36,23 @@ parse_symptoms_task:
       "gender": "male",
       "arrival_transport": "walk_in"
     }}
+    For ambulance/helicopter patients (include vitals, use -1 for any unknown):
+    {{
+      "chief_complaints": ["complaint1", "complaint2"],
+      "pain_score": 7,
+      "age": 68,
+      "gender": "female",
+      "arrival_transport": "ambulance",
+      "temperature": 101.2,
+      "heartrate": 110,
+      "resprate": 22,
+      "o2sat": 94,
+      "sbp": 85,
+      "dbp": 55
+    }}
   expected_output: >
-    A JSON object with all five fields filled in. No additional text, only valid JSON.
+    A JSON object with all required fields filled in. For ambulance/helicopter patients,
+    includes vital sign fields (use -1 for unknown). No additional text, only valid JSON.
   agent: nlp_parser
 
 triage_assessment_task:
@@ -33,17 +60,23 @@ triage_assessment_task:
     Using the structured patient data from the previous task, perform triage:
 
     1. Parse the JSON from the previous task to get all fields
-    2. Call the triage_prediction_tool with ALL fields:
+    2. Call the triage_prediction_tool with ALL available fields:
        - chief_complaints (comma-separated string)
        - pain_score (integer)
        - age (integer)
        - gender (string)
        - arrival_transport (string)
+       - If the JSON contains vital sign fields (temperature, heartrate, resprate,
+         o2sat, sbp, dbp) — these are present for ambulance/helicopter patients —
+         pass them as well. Use the values from the JSON directly.
+         For walk-in patients these fields will be absent; do not pass them
+         (the tool defaults to -1 for missing vitals).
     3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
        - The confidence of the prediction
        - Whether the patient should be admitted or discharged
        - A brief clinical reasoning explanation
+       - If vital signs were provided, note any abnormalities detected by the tool
        - Recommended next steps based on the acuity level
 
     Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION,

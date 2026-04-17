@@ -121,7 +121,7 @@ DEPARTMENT_NAMES = {
 # ---------------------------------------------------------------------------
 # Reuse triage preprocessing
 # ---------------------------------------------------------------------------
-from proiect_licenta.data_pipeline import normalize_complaint_text, ABBREVIATIONS
+from proiect_licenta.triage_pipeline_v1 import normalize_complaint_text, ABBREVIATIONS
 
 
 # ---------------------------------------------------------------------------

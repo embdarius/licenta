@@ -17,6 +17,7 @@ dependencies = [
 proiect_licenta = "proiect_licenta.main:run"
 run_crew = "proiect_licenta.main:run"
 train_models = "proiect_licenta.main:train"
+train_triage_v2 = "proiect_licenta.main:train_triage_v2"
 train_doctor = "proiect_licenta.main:train_doctor"
 train_nurse = "proiect_licenta.main:train_nurse"
 

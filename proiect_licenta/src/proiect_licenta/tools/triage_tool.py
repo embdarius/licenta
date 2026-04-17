@@ -1,14 +1,16 @@
 """
-Triage Prediction Tool v3 — CrewAI Tool
+Triage Prediction Tool v2 — CrewAI Tool
 
-Uses TF-IDF + XGBoost models with demographics for triage predictions.
-Takes chief complaints, pain score, age, gender, arrival transport.
+Uses TF-IDF + XGBoost models with demographics and vital signs for triage predictions.
+Takes chief complaints, pain score, age, gender, arrival transport, and optional vitals.
 Returns ESI acuity level (1-5), admission/discharge, confidence scores.
+
+Loads models from models_v2/ (triage pipeline v2 with vital signs).
 """
 
 import json
 from pathlib import Path
-from typing import Type
+from typing import Optional, Type
 
 import joblib
 import numpy as np
@@ -20,7 +22,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,32 @@ def normalize_complaint_text(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Vital sign constants (must match triage_pipeline_v2.py)
+# ---------------------------------------------------------------------------
+VITAL_COLS = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
+
+VITAL_CLIP_RANGES = {
+    "temperature": (90.0, 110.0),
+    "heartrate":   (20.0, 250.0),
+    "resprate":    (4.0, 60.0),
+    "o2sat":       (50.0, 100.0),
+    "sbp":         (50.0, 300.0),
+    "dbp":         (20.0, 200.0),
+}
+
+ABNORMALITY_THRESHOLDS = {
+    "fever":        ("temperature", ">",  100.4),
+    "hypothermic":  ("temperature", "<",  96.8),
+    "tachycardic":  ("heartrate",   ">",  100),
+    "bradycardic":  ("heartrate",   "<",  60),
+    "tachypneic":   ("resprate",    ">",  20),
+    "hypoxic":      ("o2sat",       "<",  94),
+    "hypertensive": ("sbp",         ">",  140),
+    "hypotensive":  ("sbp",         "<",  90),
+}
+
+
+# ---------------------------------------------------------------------------
 # Lazy model loading
 # ---------------------------------------------------------------------------
 _models_cache = None
@@ -111,11 +139,13 @@ def get_models():
         disposition_model = joblib.load(MODELS_DIR / "disposition_model.joblib")
         tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
         severity_map = joblib.load(MODELS_DIR / "severity_map.joblib")
+        vital_medians = joblib.load(MODELS_DIR / "vital_medians.joblib")
 
         with open(MODELS_DIR / "model_metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
-        _models_cache = (acuity_model, disposition_model, tfidf, severity_map, metadata)
+        _models_cache = (acuity_model, disposition_model, tfidf, severity_map,
+                         vital_medians, metadata)
     return _models_cache
 
 
@@ -135,7 +165,7 @@ ACUITY_DESCRIPTIONS = {
 # Tool Input Schema
 # ---------------------------------------------------------------------------
 class TriageInput(BaseModel):
-    """Input schema for the Triage Prediction Tool."""
+    """Input schema for the Triage Prediction Tool v2."""
     chief_complaints: str = Field(
         ...,
         description="Comma-separated list of chief complaints, "
@@ -159,6 +189,30 @@ class TriageInput(BaseModel):
         description="How patient arrived: 'ambulance', 'walk_in', "
                     "'helicopter', or 'unknown'."
     )
+    temperature: float = Field(
+        default=-1.0,
+        description="Body temperature in Fahrenheit. Use -1 if unknown."
+    )
+    heartrate: float = Field(
+        default=-1.0,
+        description="Heart rate in bpm. Use -1 if unknown."
+    )
+    resprate: float = Field(
+        default=-1.0,
+        description="Respiratory rate in breaths/min. Use -1 if unknown."
+    )
+    o2sat: float = Field(
+        default=-1.0,
+        description="Oxygen saturation percentage (0-100). Use -1 if unknown."
+    )
+    sbp: float = Field(
+        default=-1.0,
+        description="Systolic blood pressure in mmHg. Use -1 if unknown."
+    )
+    dbp: float = Field(
+        default=-1.0,
+        description="Diastolic blood pressure in mmHg. Use -1 if unknown."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +225,11 @@ class TriagePredictionTool(BaseTool):
         "whether the patient should be admitted or discharged. "
         "Required inputs: chief_complaints (comma-separated string), "
         "pain_score (0-10 or -1 if unknown). "
-        "Optional inputs: age (int, default 50), gender ('male'/'female'/'unknown'), "
-        "arrival_transport ('ambulance'/'walk_in'/'helicopter'/'unknown'). "
-        "Uses an XGBoost model trained on 400K+ MIMIC-IV ED visits."
+        "Optional inputs: age, gender, arrival_transport, "
+        "temperature (°F), heartrate (bpm), resprate, o2sat (%), sbp, dbp (mmHg). "
+        "Vital signs default to -1 (unknown) — provide them when available "
+        "(e.g., ambulance/helicopter patients with EMS vitals). "
+        "Uses XGBoost models trained on 100K+ MIMIC-IV ED visits with vital signs."
     )
     args_schema: Type[BaseModel] = TriageInput
 
@@ -184,9 +240,16 @@ class TriagePredictionTool(BaseTool):
         age: int = 50,
         gender: str = "unknown",
         arrival_transport: str = "unknown",
+        temperature: float = -1.0,
+        heartrate: float = -1.0,
+        resprate: float = -1.0,
+        o2sat: float = -1.0,
+        sbp: float = -1.0,
+        dbp: float = -1.0,
     ) -> str:
-        """Run triage prediction."""
-        acuity_model, disposition_model, tfidf, severity_map, metadata = get_models()
+        """Run triage prediction with optional vital signs."""
+        (acuity_model, disposition_model, tfidf, severity_map,
+         vital_medians, metadata) = get_models()
 
         # 1. Normalize complaint text
         complaint_text = normalize_complaint_text(chief_complaints)
@@ -219,7 +282,7 @@ class TriagePredictionTool(BaseTool):
         # 5. Demographics
         age_val = max(0, min(120, age))
         age_bins = [0, 18, 35, 50, 65, 80, 120]
-        age_bin = 2  # default
+        age_bin = 2
         for i, (low, high) in enumerate(zip(age_bins[:-1], age_bins[1:])):
             if low < age_val <= high:
                 age_bin = i
@@ -233,7 +296,7 @@ class TriagePredictionTool(BaseTool):
         arrival_helicopter = 1 if at == "helicopter" else 0
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
 
-        # 7. Interaction features (must match training pipeline!)
+        # 7. v1 interaction features
         pain_clipped = max(0, pain_val) if pain_val >= 0 else 0
         age_ambulance = age_val * arrival_ambulance
         pain_x_min_severity = pain_clipped * (5 - min_sev)
@@ -242,8 +305,57 @@ class TriagePredictionTool(BaseTool):
         elderly = 1 if age_val >= 65 else 0
         elderly_ambulance = elderly * arrival_ambulance
 
-        # 8. Assemble feature vector (must match training order!)
+        # 8. Vital signs — resolve missing values
+        raw_vitals = {
+            "temperature": temperature,
+            "heartrate": heartrate,
+            "resprate": resprate,
+            "o2sat": o2sat,
+            "sbp": sbp,
+            "dbp": dbp,
+        }
+
+        vital_values = {}
+        vital_missing_flags = {}
+        for col in VITAL_COLS:
+            val = raw_vitals[col]
+            lo, hi = VITAL_CLIP_RANGES[col]
+            # Treat -1 or out-of-range as missing
+            if val < 0 or val < lo or val > hi:
+                vital_missing_flags[f"{col}_missing"] = 1
+                vital_values[col] = vital_medians[col]
+            else:
+                vital_missing_flags[f"{col}_missing"] = 0
+                vital_values[col] = val
+
+        # 9. Abnormality flags (computed on imputed values)
+        abnormality_flags = {}
+        for flag_name, (col, op, threshold) in ABNORMALITY_THRESHOLDS.items():
+            v = vital_values[col]
+            if op == ">":
+                abnormality_flags[flag_name] = 1 if v > threshold else 0
+            else:
+                abnormality_flags[flag_name] = 1 if v < threshold else 0
+
+        abnormal_vital_count = sum(abnormality_flags.values())
+
+        # 10. Vital interaction features
+        tachycardic = abnormality_flags["tachycardic"]
+        hypoxic = abnormality_flags["hypoxic"]
+        hypotensive = abnormality_flags["hypotensive"]
+        fever = abnormality_flags["fever"]
+
+        tachycardic_ambulance = tachycardic * arrival_ambulance
+        hypoxic_ambulance = hypoxic * arrival_ambulance
+        hypotensive_ambulance = hypotensive * arrival_ambulance
+        fever_ambulance = fever * arrival_ambulance
+        tachycardic_elderly = tachycardic * elderly
+        hypoxic_elderly = hypoxic * elderly
+        hypotensive_elderly = hypotensive * elderly
+
+        # 11. Assemble feature vector (must match training order!)
         structured = pd.DataFrame({
+            # v1 features
             "pain": [pain_val],
             "pain_missing": [pain_missing],
             "pain_low": [pain_low],
@@ -267,16 +379,50 @@ class TriagePredictionTool(BaseTool):
             "high_pain_ambulance": [high_pain_ambulance],
             "elderly": [elderly],
             "elderly_ambulance": [elderly_ambulance],
+            # v2 — raw vitals
+            "temperature": [vital_values["temperature"]],
+            "heartrate": [vital_values["heartrate"]],
+            "resprate": [vital_values["resprate"]],
+            "o2sat": [vital_values["o2sat"]],
+            "sbp": [vital_values["sbp"]],
+            "dbp": [vital_values["dbp"]],
+            # v2 — missing flags
+            "temperature_missing": [vital_missing_flags["temperature_missing"]],
+            "heartrate_missing": [vital_missing_flags["heartrate_missing"]],
+            "resprate_missing": [vital_missing_flags["resprate_missing"]],
+            "o2sat_missing": [vital_missing_flags["o2sat_missing"]],
+            "sbp_missing": [vital_missing_flags["sbp_missing"]],
+            "dbp_missing": [vital_missing_flags["dbp_missing"]],
+            # v2 — abnormality flags
+            "fever": [abnormality_flags["fever"]],
+            "hypothermic": [abnormality_flags["hypothermic"]],
+            "tachycardic": [tachycardic],
+            "bradycardic": [abnormality_flags["bradycardic"]],
+            "tachypneic": [abnormality_flags["tachypneic"]],
+            "hypoxic": [hypoxic],
+            "hypertensive": [abnormality_flags["hypertensive"]],
+            "hypotensive": [hypotensive],
+            # v2 — abnormal count
+            "abnormal_vital_count": [abnormal_vital_count],
+            # v2 — vital-transport interactions
+            "tachycardic_ambulance": [tachycardic_ambulance],
+            "hypoxic_ambulance": [hypoxic_ambulance],
+            "hypotensive_ambulance": [hypotensive_ambulance],
+            "fever_ambulance": [fever_ambulance],
+            # v2 — vital-age interactions
+            "tachycardic_elderly": [tachycardic_elderly],
+            "hypoxic_elderly": [hypoxic_elderly],
+            "hypotensive_elderly": [hypotensive_elderly],
         })
         features = pd.concat([structured, tfidf_df], axis=1)
 
-        # 8. Predict acuity
+        # 12. Predict acuity
         acuity_pred_shifted = int(acuity_model.predict(features)[0])
         acuity_pred = acuity_pred_shifted + 1
         acuity_proba = acuity_model.predict_proba(features)[0]
         acuity_confidence = float(acuity_proba[acuity_pred_shifted])
 
-        # 9. Predict disposition
+        # 13. Predict disposition (cascading)
         features_disp = features.copy()
         features_disp["predicted_acuity"] = acuity_pred
 
@@ -291,6 +437,22 @@ class TriagePredictionTool(BaseTool):
             for i, prob in enumerate(acuity_proba)
         }
 
+        # Summarize which vitals were provided vs imputed
+        vitals_provided = {
+            col: vital_values[col]
+            for col in VITAL_COLS
+            if vital_missing_flags[f"{col}_missing"] == 0
+        }
+        vitals_imputed = [
+            col for col in VITAL_COLS
+            if vital_missing_flags[f"{col}_missing"] == 1
+        ]
+
+        # List abnormalities detected
+        abnormalities_detected = [
+            flag for flag, val in abnormality_flags.items() if val == 1
+        ]
+
         result = {
             "complaint_analysis": {
                 "input_complaints": raw_complaints,
@@ -303,6 +465,12 @@ class TriagePredictionTool(BaseTool):
                 "age": age_val,
                 "gender": gender,
                 "arrival_transport": arrival_transport,
+            },
+            "vital_signs": {
+                "provided": vitals_provided,
+                "imputed_as_missing": vitals_imputed,
+                "abnormalities_detected": abnormalities_detected,
+                "abnormal_vital_count": abnormal_vital_count,
             },
             "acuity_prediction": {
                 "predicted_esi_level": acuity_pred,

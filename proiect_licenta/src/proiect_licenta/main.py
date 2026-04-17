@@ -48,9 +48,15 @@ def run():
 
 
 def train():
-    """Train the triage ML models (run data_pipeline.py)."""
-    from proiect_licenta.data_pipeline import main as train_pipeline
+    """Train the triage ML models v1 (run triage_pipeline_v1.py)."""
+    from proiect_licenta.triage_pipeline_v1 import main as train_pipeline
     train_pipeline()
+
+
+def train_triage_v2():
+    """Train the triage ML models v2 with vital signs (run triage_pipeline_v2.py)."""
+    from proiect_licenta.triage_pipeline_v2 import main as train_pipeline_v2
+    train_pipeline_v2()
 
 
 def train_doctor():

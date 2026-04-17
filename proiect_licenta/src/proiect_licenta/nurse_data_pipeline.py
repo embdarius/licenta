@@ -47,7 +47,7 @@ MEDRECON_CSV = DATASET_DIR / "medrecon.csv"
 from proiect_licenta.doctor_data_pipeline import (
     DIAGNOSIS_GROUP_MAP, SERVICE_GROUP_MAP, DEPARTMENT_NAMES,
 )
-from proiect_licenta.data_pipeline import normalize_complaint_text
+from proiect_licenta.triage_pipeline_v1 import normalize_complaint_text
 
 # ---------------------------------------------------------------------------
 # Medication category grouping

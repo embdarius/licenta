@@ -26,7 +26,7 @@ Ordered by expected lift per unit of effort.
 
 ### Tier 1 — high-lift, mostly low-risk
 
-1. **Add triage vitals to the triage model itself.** The vitals are already in `triage.csv` and *are* recorded at triage time (no leakage). Triage acuity is inherently a physiological-plus-complaint decision; the current triage model uses only complaints. Expected lift: meaningful (vitals are the single largest input to clinical ESI scoring in practice).
+1. ~~**Add triage vitals to the triage model itself.**~~ **DONE (triage v4).** Vital signs from `triage.csv` are now used for ambulance/helicopter patients (~36%). The training pipeline masks vitals for walk-ins to match inference behavior. Acuity improved from 66.7% → 68.0% overall, and ambulance/helicopter patients specifically score 70.4%. Best iteration hit 2999/3000 — adding more trees is the next free lift for this model.
 2. **Use longitudinal vitals from `vitalsign.csv` for Doctor v2.** Replace the single triage snapshot with (min, max, last, trend) over the first N minutes of the stay. Include the `rhythm` categorical signal. Must be carefully time-windowed to avoid leakage — only readings before the decision point.
 3. **Use discharge-note diagnosis as cleaner training labels.** Extract a normalized diagnosis from `discharge.csv` to replace the ICD-coded primary diagnosis. This directly attacks the 33% "Symptoms/Ill-Defined" labeling ceiling.
 4. **Train on the full 157K admitted rows** instead of the 100K sample. Free lift.
@@ -50,8 +50,8 @@ Ordered by expected lift per unit of effort.
 ## Model-level improvement opportunities
 
 ### Triage models
-- Add more trees (models still weren't converging at 3000 — best_iteration near 2990).
-- Include triage vital signs from `triage.csv` (see Tier 1 #1 above).
+- Add more trees — best_iteration was 2999/3000 on the full dataset, model has not converged.
+- ~~Include triage vital signs from `triage.csv`.~~ **DONE in triage v4.**
 - Try LightGBM as an alternative to XGBoost.
 - Ensemble methods (stacking multiple models).
 - Neural network with learned embeddings for complaint text.

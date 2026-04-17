@@ -15,7 +15,7 @@ Columns: `subject_id, stay_id, temperature, heartrate, resprate, o2sat, sbp, dbp
 - `chiefcomplaint`: Free-text, comma-separated (e.g., "Abd pain, Abdominal distention").
 - `pain`: 0-10 patient-reported pain score.
 - `acuity`: ESI 1-5 (1 = most severe, 5 = least severe).
-- Vital signs (`temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`): available at triage time. Used by the **Doctor v2** pipeline (as the nurse-data source at training time). **Not used by the triage models** in the current version — adding them there is a high-priority improvement (see [`future-work.md`](future-work.md)).
+- Vital signs (`temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`): recorded by the triage nurse for virtually all patients. **Used by the triage v2 model** — but only for ambulance/helicopter patients (~36%), matching real inference behavior where only EMS patients have vitals at triage handoff. Walk-in patients have their vitals masked to missing during training. Also used by the **Doctor v2** pipeline as the nurse-data source at training time.
 
 ### `mimic-iv-ed/edstays.csv`
 
@@ -122,13 +122,13 @@ The project focuses entirely on the Emergency Department pathway.
 
 | Artifact | Training tables | Feature count |
 |---|---|---|
-| Triage acuity model | `triage.csv` + `edstays.csv` + `patients.csv` | 2023 |
-| Triage disposition model | Same + `predicted_acuity` | 2024 |
+| Triage acuity model (v4) | `triage.csv` (vitals for ambulance/helicopter only) + `edstays.csv` + `patients.csv` | 2051 |
+| Triage disposition model (v4) | Same + `predicted_acuity` | 2052 |
 | Doctor v1 diagnosis | Same + `services.csv` (labels via diagnoses) + `predicted_acuity` + `predicted_disposition` | 2025 |
 | Doctor v1 department | Same + `predicted_diagnosis` | 2026 |
 | Doctor v2 diagnosis | All of v1 + `triage.csv` vitals (20 features) + `medrecon.csv` (11 features) | 2056 |
 | Doctor v2 department | Same + `predicted_diagnosis` | 2057 |
 
 Row counts (after cleaning):
-- Triage training: 418K cleaned -> 334K train / 83K test (80/20 split).
+- Triage v4 training: 418K cleaned -> 334K train / 83K test (80/20 split, full dataset).
 - Doctor training: 157K admitted -> 100K sampled -> 80K train / 20K test.

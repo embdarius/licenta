@@ -32,14 +32,17 @@ The system simulates a clinical emergency department workflow: a patient describ
 |     Task:   parse_symptoms_task                                      |
 |     Input:  Free-text patient description                            |
 |     Output: JSON { chief_complaints[], pain_score, age,              |
-|                    gender, arrival_transport }                        |
+|                    gender, arrival_transport,                         |
+|                    vitals (ambulance/helicopter only) }               |
 |     Tool:   ask_patient (interactive follow-up questions)            |
+|     Note:   Collects EMS vitals for ambulance/helicopter patients    |
 |                                                                      |
-|  2. Triage Agent (ML - XGBoost)                    [OPERATIONAL]     |
+|  2. Triage Agent (ML - XGBoost v4)                 [OPERATIONAL]     |
 |     Task:   triage_assessment_task                                   |
-|     Input:  Structured complaints + pain + demographics              |
+|     Input:  Complaints + pain + demographics + vitals (if available) |
 |     Output: ESI acuity level (1-5), admission/discharge prediction   |
 |     Tool:   triage_prediction_tool (wraps 2 XGBoost models)         |
+|     Note:   Vitals used for ambulance/helicopter; masked for walk-in |
 |                                                                      |
 |  3. Doctor Agent - Initial (ML - XGBoost v1)       [OPERATIONAL]     |
 |     Task:   doctor_assessment_task                                   |
@@ -75,19 +78,19 @@ Although there are only 4 distinct agents, the Doctor Agent runs twice (as two s
 The system uses a cascading design where each model's output feeds into the next:
 
 ```
-Chief complaints + demographics (2023 features)
+Chief complaints + demographics (+ EMS vitals for ambulance/helicopter)
+         |
+         v  [2051 features for ambulance/helicopter; walk-ins get vitals=missing]
+  [Acuity Model v4] -> predicted_acuity (ESI 1-5)
          |
          v
-  [Acuity Model] -> predicted_acuity (ESI 1-5)
-         |
-         v
-  [Disposition Model] -> predicted_disposition (admit/discharge)
-         |                 (uses predicted_acuity as feature)
+  [Disposition Model v4] -> predicted_disposition (admit/discharge)
+         |                   (uses predicted_acuity as feature)
          |
     +----+----+
     |         |
     v         v
-[Diagnosis  [Diagnosis  <- + vital signs + medication features (31 extra)
+[Diagnosis  [Diagnosis  <- + vital signs (nurse) + medication features (31 extra)
  Model v1]   Model v2]
     |         |
     v         v
@@ -99,9 +102,10 @@ Chief complaints + demographics (2023 features)
  ASSESSMENT REASSESSMENT (with nurse data comparison)
 ```
 
-- **v1 path** uses 2025 features (triage only: 2023 base + predicted_acuity + predicted_disposition).
-- **v2 path** uses 2056 features (triage 2025 + 20 vital-sign features + 11 medication features).
-- Both paths run sequentially so the user sees initial results before providing nurse data.
+- **Triage path** uses 2051 features: 23 v1 structured + 28 vital-sign features + 2000 TF-IDF. Vitals are real for ambulance/helicopter patients and median-imputed (with missing flags) for walk-ins.
+- **v1 doctor path** uses 2025 features (triage 2023 base + predicted_acuity + predicted_disposition).
+- **v2 doctor path** uses 2056 features (doctor v1 2025 + 20 vital-sign features + 11 medication features).
+- Both doctor paths run sequentially so the user sees initial results before providing nurse data.
 - The Department model always consumes the predicted diagnosis from its matching-version diagnosis model (diagnosis v1 -> department v1, diagnosis v2 -> department v2).
 
 ---
@@ -127,7 +131,8 @@ proiect_licenta/
 |-- .env                          # GEMINI_API_KEY, MODEL config
 |-- pyproject.toml                # Dependencies + script entry points
 |-- PROJECT_CONTEXT.md            # Top-level overview + doc index
-|-- benchmark.py                  # Triage model benchmark script
+|-- benchmark.py                  # Triage v3b model benchmark script (v1 pipeline)
+|-- benchmark_triage_v2.py        # Triage v4 model benchmark (realistic: vitals only for ambulance/helicopter)
 |-- benchmark_doctor.py           # Doctor v1 model benchmark script
 |-- benchmark_nurse.py            # Doctor v1 vs v2 comparison benchmark
 |-- docs/
@@ -142,7 +147,8 @@ proiect_licenta/
 |-- src/proiect_licenta/
 |   |-- main.py                   # Entry point -- interactive patient input -> crew kickoff
 |   |-- crew.py                   # CrewAI crew definition -- 4 agents, 5 tasks, sequential
-|   |-- data_pipeline.py          # Triage ML training pipeline (acuity + disposition)
+|   |-- triage_pipeline_v1.py      # Triage ML training pipeline v3b (acuity + disposition, no vitals)
+|   |-- triage_pipeline_v2.py      # Triage ML training pipeline v4 (+ vital signs, ambulance/helicopter)
 |   |-- doctor_data_pipeline.py   # Doctor v1 ML training pipeline (diagnosis + department)
 |   |-- nurse_data_pipeline.py    # Doctor v2 ML training pipeline (+ vitals + medications)
 |   |-- config/
@@ -156,11 +162,18 @@ proiect_licenta/
 |   |   |-- nurse_tool.py         # CrewAI BaseTool for interactive vital/medication collection
 |   |   |-- ask_patient_tool.py   # Interactive follow-up question tool
 |   |   +-- custom_tool.py        # (unused template file)
-|   |-- models/                   # Triage model artifacts (.joblib)
+|   |-- models/                   # Triage v3b model artifacts (.joblib) — kept for reference
 |   |   |-- acuity_model.joblib
 |   |   |-- disposition_model.joblib
 |   |   |-- tfidf_vectorizer.joblib
 |   |   |-- severity_map.joblib
+|   |   |-- model_metadata.json
+|   |-- models_v2/                # Triage v4 model artifacts (current — used by triage_tool.py)
+|   |   |-- acuity_model.joblib
+|   |   |-- disposition_model.joblib
+|   |   |-- tfidf_vectorizer.joblib
+|   |   |-- severity_map.joblib
+|   |   |-- vital_medians.joblib  # Per-vital training medians for imputation at inference
 |   |   |-- model_metadata.json
 |   |   +-- doctor/               # Doctor model artifacts (v1 + v2)
 |   |       |-- diagnosis_model.joblib      # v1

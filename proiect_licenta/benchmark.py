@@ -22,7 +22,7 @@ from sklearn.metrics import (
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------------------------------------------------------------------
-# Paths (same as data_pipeline.py)
+# Paths (same as triage_pipeline_v1.py)
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent / "src" / "proiect_licenta"
 DATASET_DIR = BASE_DIR / "datasets" / "datasets_mimic-iv" / "mimic-iv-ed"
@@ -34,7 +34,7 @@ MODELS_DIR = BASE_DIR / "models"
 # ---------------------------------------------------------------------------
 import sys
 sys.path.insert(0, str(BASE_DIR.parent))
-from proiect_licenta.data_pipeline import (
+from proiect_licenta.triage_pipeline_v1 import (
     load_and_clean_data, build_features, normalize_complaint_text,
 )
 
