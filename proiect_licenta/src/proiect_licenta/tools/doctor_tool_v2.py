@@ -27,131 +27,19 @@ DOCTOR_MODELS_DIR = MODELS_DIR / "doctor"
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
 
 # ---------------------------------------------------------------------------
-# Medication classification — maps patient-reported drug names to categories
+# Medication classification — shared vocabulary with the training pipeline
 # ---------------------------------------------------------------------------
-DRUG_NAME_MAP = {
-    # Cardiac
-    "lisinopril": "has_cardiac_meds", "enalapril": "has_cardiac_meds",
-    "ramipril": "has_cardiac_meds", "captopril": "has_cardiac_meds",
-    "atorvastatin": "has_cardiac_meds", "simvastatin": "has_cardiac_meds",
-    "rosuvastatin": "has_cardiac_meds", "pravastatin": "has_cardiac_meds",
-    "lipitor": "has_cardiac_meds", "crestor": "has_cardiac_meds",
-    "metoprolol": "has_cardiac_meds", "atenolol": "has_cardiac_meds",
-    "propranolol": "has_cardiac_meds", "carvedilol": "has_cardiac_meds",
-    "amlodipine": "has_cardiac_meds", "nifedipine": "has_cardiac_meds",
-    "diltiazem": "has_cardiac_meds", "verapamil": "has_cardiac_meds",
-    "losartan": "has_cardiac_meds", "valsartan": "has_cardiac_meds",
-    "irbesartan": "has_cardiac_meds", "olmesartan": "has_cardiac_meds",
-    "hydrochlorothiazide": "has_cardiac_meds", "furosemide": "has_cardiac_meds",
-    "spironolactone": "has_cardiac_meds", "chlorthalidone": "has_cardiac_meds",
-    "nitroglycerin": "has_cardiac_meds", "isosorbide": "has_cardiac_meds",
-    "norvasc": "has_cardiac_meds", "lasix": "has_cardiac_meds",
-    # Diabetes
-    "metformin": "has_diabetes_meds", "glucophage": "has_diabetes_meds",
-    "insulin": "has_diabetes_meds", "lantus": "has_diabetes_meds",
-    "humalog": "has_diabetes_meds", "novolog": "has_diabetes_meds",
-    "glipizide": "has_diabetes_meds", "glyburide": "has_diabetes_meds",
-    "glimepiride": "has_diabetes_meds", "januvia": "has_diabetes_meds",
-    "sitagliptin": "has_diabetes_meds", "empagliflozin": "has_diabetes_meds",
-    "jardiance": "has_diabetes_meds", "ozempic": "has_diabetes_meds",
-    "semaglutide": "has_diabetes_meds", "trulicity": "has_diabetes_meds",
-    # Psychiatric
-    "sertraline": "has_psych_meds", "zoloft": "has_psych_meds",
-    "fluoxetine": "has_psych_meds", "prozac": "has_psych_meds",
-    "escitalopram": "has_psych_meds", "lexapro": "has_psych_meds",
-    "citalopram": "has_psych_meds", "paroxetine": "has_psych_meds",
-    "venlafaxine": "has_psych_meds", "duloxetine": "has_psych_meds",
-    "bupropion": "has_psych_meds", "wellbutrin": "has_psych_meds",
-    "trazodone": "has_psych_meds", "mirtazapine": "has_psych_meds",
-    "alprazolam": "has_psych_meds", "xanax": "has_psych_meds",
-    "lorazepam": "has_psych_meds", "ativan": "has_psych_meds",
-    "diazepam": "has_psych_meds", "valium": "has_psych_meds",
-    "clonazepam": "has_psych_meds", "klonopin": "has_psych_meds",
-    "quetiapine": "has_psych_meds", "seroquel": "has_psych_meds",
-    "risperidone": "has_psych_meds", "olanzapine": "has_psych_meds",
-    "aripiprazole": "has_psych_meds", "lithium": "has_psych_meds",
-    "lamotrigine": "has_psych_meds",
-    "adderall": "has_psych_meds", "methylphenidate": "has_psych_meds",
-    "ritalin": "has_psych_meds", "concerta": "has_psych_meds",
-    "ambien": "has_psych_meds", "zolpidem": "has_psych_meds",
-    # Respiratory
-    "albuterol": "has_respiratory_meds", "salbutamol": "has_respiratory_meds",
-    "fluticasone": "has_respiratory_meds", "advair": "has_respiratory_meds",
-    "symbicort": "has_respiratory_meds", "montelukast": "has_respiratory_meds",
-    "singulair": "has_respiratory_meds", "tiotropium": "has_respiratory_meds",
-    "spiriva": "has_respiratory_meds",
-    "flonase": "has_respiratory_meds", "budesonide": "has_respiratory_meds",
-    # Opioid
-    "oxycodone": "has_opioid_meds", "percocet": "has_opioid_meds",
-    "hydrocodone": "has_opioid_meds", "vicodin": "has_opioid_meds",
-    "morphine": "has_opioid_meds", "codeine": "has_opioid_meds",
-    "tramadol": "has_opioid_meds", "fentanyl": "has_opioid_meds",
-    "oxycontin": "has_opioid_meds",
-    # Anticoagulant
-    "warfarin": "has_anticoagulant_meds", "coumadin": "has_anticoagulant_meds",
-    "apixaban": "has_anticoagulant_meds", "eliquis": "has_anticoagulant_meds",
-    "rivaroxaban": "has_anticoagulant_meds", "xarelto": "has_anticoagulant_meds",
-    "dabigatran": "has_anticoagulant_meds", "pradaxa": "has_anticoagulant_meds",
-    "aspirin": "has_anticoagulant_meds", "clopidogrel": "has_anticoagulant_meds",
-    "plavix": "has_anticoagulant_meds", "heparin": "has_anticoagulant_meds",
-    "enoxaparin": "has_anticoagulant_meds", "lovenox": "has_anticoagulant_meds",
-    # GI
-    "omeprazole": "has_gi_meds", "prilosec": "has_gi_meds",
-    "pantoprazole": "has_gi_meds", "protonix": "has_gi_meds",
-    "esomeprazole": "has_gi_meds", "nexium": "has_gi_meds",
-    "lansoprazole": "has_gi_meds", "prevacid": "has_gi_meds",
-    "ranitidine": "has_gi_meds", "famotidine": "has_gi_meds",
-    "pepcid": "has_gi_meds", "ondansetron": "has_gi_meds",
-    "zofran": "has_gi_meds",
-    "docusate": "has_gi_meds", "senna": "has_gi_meds",
-    # Thyroid
-    "levothyroxine": "has_thyroid_meds", "synthroid": "has_thyroid_meds",
-    "liothyronine": "has_thyroid_meds", "methimazole": "has_thyroid_meds",
-    # Anticonvulsant
-    "gabapentin": "has_anticonvulsant_meds", "neurontin": "has_anticonvulsant_meds",
-    "pregabalin": "has_anticonvulsant_meds", "lyrica": "has_anticonvulsant_meds",
-    "levetiracetam": "has_anticonvulsant_meds", "keppra": "has_anticonvulsant_meds",
-    "phenytoin": "has_anticonvulsant_meds", "dilantin": "has_anticonvulsant_meds",
-    "carbamazepine": "has_anticonvulsant_meds", "tegretol": "has_anticonvulsant_meds",
-    "topiramate": "has_anticonvulsant_meds", "topamax": "has_anticonvulsant_meds",
-    "valproic": "has_anticonvulsant_meds", "depakote": "has_anticonvulsant_meds",
-}
+# The drug-name and class-keyword maps live in `tools.med_vocab` so that the
+# training pipeline (nurse_data_pipeline) and this inference tool cannot
+# drift apart. See `med_vocab.py` for the lists and the audit that motivated
+# centralization (audit_med_vocab.py).
+from proiect_licenta.tools.med_vocab import (
+    DRUG_NAME_MAP, MED_CLASS_KEYWORDS, MED_CATEGORIES,
+    flags_from_name, flags_from_text,
+)
 
-# Keyword matching for drug class descriptions (supplements DRUG_NAME_MAP)
-MED_KEYWORD_MAP = {
-    "has_cardiac_meds": [
-        "statin", "beta blocker", "ace inhibitor", "calcium channel",
-        "angiotensin", "diuretic", "nitrate", "blood pressure",
-        "cholesterol", "heart medication",
-    ],
-    "has_diabetes_meds": [
-        "insulin", "diabetes", "blood sugar", "metformin",
-    ],
-    "has_psych_meds": [
-        "antidepressant", "anxiety", "depression", "sleeping pill",
-        "sleep aid", "antipsychotic", "benzodiazepine",
-    ],
-    "has_respiratory_meds": [
-        "inhaler", "asthma", "copd", "breathing",
-    ],
-    "has_opioid_meds": [
-        "opioid", "pain killer", "painkiller", "narcotic",
-    ],
-    "has_anticoagulant_meds": [
-        "blood thinner", "anticoagulant",
-    ],
-    "has_gi_meds": [
-        "acid reflux", "antacid", "stomach", "proton pump", "laxative",
-    ],
-    "has_thyroid_meds": [
-        "thyroid",
-    ],
-    "has_anticonvulsant_meds": [
-        "seizure", "epilepsy", "anticonvulsant",
-    ],
-}
-
-MED_CATEGORIES = list(MED_KEYWORD_MAP.keys())
+# Back-compat alias (older code imported MED_KEYWORD_MAP).
+MED_KEYWORD_MAP = MED_CLASS_KEYWORDS
 
 # Vital sign medians (from training data, used when patient doesn't know)
 VITAL_MEDIANS = {
@@ -161,7 +49,12 @@ VITAL_MEDIANS = {
 
 
 def classify_medications(medications_raw: str) -> dict:
-    """Classify patient-reported medications into category flags."""
+    """Classify patient-reported medications into category flags.
+
+    Uses the shared med_vocab vocabulary: alphabetic-token drug-name lookup
+    plus word-boundary free-text keyword match (with "non-opioid"/
+    "non-salicylate" negations neutralized).
+    """
     flags = {cat: 0 for cat in MED_CATEGORIES}
 
     if not medications_raw or medications_raw.lower() in (
@@ -178,19 +71,10 @@ def classify_medications(medications_raw: str) -> dict:
     ]
     n_meds = max(len(meds_list), 1)
 
-    # Match each medication word against drug name map
-    for med in meds_list:
-        for word in med.split():
-            word = word.strip().rstrip(".,;")
-            if word in DRUG_NAME_MAP:
-                flags[DRUG_NAME_MAP[word]] = 1
-
-    # Also check full text against keyword categories
-    for cat, keywords in MED_KEYWORD_MAP.items():
-        for kw in keywords:
-            if kw in med_lower:
-                flags[cat] = 1
-                break
+    matched = flags_from_name(med_lower) | flags_from_text(med_lower)
+    for cat in matched:
+        if cat in flags:
+            flags[cat] = 1
 
     return {"n_medications": n_meds, "meds_unknown": 0, **flags}
 

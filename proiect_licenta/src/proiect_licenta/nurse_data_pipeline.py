@@ -52,59 +52,28 @@ from proiect_licenta.triage_pipeline_v1 import normalize_complaint_text
 # ---------------------------------------------------------------------------
 # Medication category grouping
 # ---------------------------------------------------------------------------
-# Maps etcdescription substrings to our 9 binary medication flags.
-# A medication matches a category if ANY of the substrings appear in its etcdescription.
-MED_CATEGORY_KEYWORDS = {
-    "has_cardiac_meds": [
-        "statin", "beta blocker", "ace inhibitor", "calcium channel",
-        "angiotensin", "diuretic", "aldosterone", "nitrate",
-        "coronary vasodilator", "antihyperlipidemic", "alpha-beta blocker",
-    ],
-    "has_diabetes_meds": [
-        "biguanide", "insulin", "sulfonylurea", "antihyperglycemic",
-        "glucose monitor", "glucose test",
-    ],
-    "has_psych_meds": [
-        "benzodiazepine", "antidepressant", "ssri", "snri", "ndri",
-        "antipsychotic", "antianxiety", "sedative-hypnotic",
-        "sari", "nassa", "tricyclic", "bipolar", "adhd",
-    ],
-    "has_respiratory_meds": [
-        "asthma", "copd", "inhaled", "nasal corticosteroid",
-        "bronchodilator",
-    ],
-    "has_opioid_meds": [
-        "opioid", "oxycodone",
-    ],
-    "has_anticoagulant_meds": [
-        "anticoagulant", "coumarin", "platelet aggregation inhibitor",
-        "thienopyridine",
-    ],
-    "has_gi_meds": [
-        "proton pump", "ppi", "laxative", "antiemetic",
-        "gastric acid", "h2-receptor",
-    ],
-    "has_thyroid_meds": [
-        "thyroid",
-    ],
-    "has_anticonvulsant_meds": [
-        "anticonvulsant",
-    ],
-}
+# Both the drug-name map and the class-keyword map live in the shared
+# `tools.med_vocab` module so training (this file) and inference
+# (`tools.doctor_tool_v2`) use exactly the same vocabulary. See the module
+# docstring for the audit that motivated centralization.
+from proiect_licenta.tools.med_vocab import (
+    DRUG_NAME_MAP, MED_CLASS_KEYWORDS, MED_CATEGORIES,
+    flags_from_row,
+)
+
+# Back-compat alias: the old name was MED_CATEGORY_KEYWORDS and held only the
+# class-description side. Kept for the metadata dump below.
+MED_CATEGORY_KEYWORDS = MED_CLASS_KEYWORDS
 
 
-def classify_medication(etcdescription: str) -> set:
-    """Return set of medication category flags for one etcdescription string."""
-    if pd.isna(etcdescription):
-        return set()
-    desc_lower = str(etcdescription).lower()
-    categories = set()
-    for flag, keywords in MED_CATEGORY_KEYWORDS.items():
-        for kw in keywords:
-            if kw in desc_lower:
-                categories.add(flag)
-                break
-    return categories
+def classify_medication(name: str, etcdescription: str) -> set:
+    """Training-time classifier: union of drug-name-map and class-keyword hits.
+
+    Replaces the older etcdescription-only version so the training side
+    flags the same rows that the inference side (which only sees the drug
+    name) would flag.
+    """
+    return flags_from_row(name, etcdescription)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +120,7 @@ def load_and_clean_data() -> pd.DataFrame:
 
     # Load medications and aggregate per stay
     print("  Loading medrecon.csv and aggregating per stay...")
-    med = pd.read_csv(MEDRECON_CSV, usecols=["stay_id", "etcdescription"])
+    med = pd.read_csv(MEDRECON_CSV, usecols=["stay_id", "name", "etcdescription"])
     med_features = _aggregate_medications(med)
     print(f"  medrecon.csv: {len(med):,} rows -> {len(med_features):,} stay-level records")
 
@@ -235,23 +204,35 @@ def load_and_clean_data() -> pd.DataFrame:
 
 
 def _aggregate_medications(med: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate medication data per stay_id into feature columns."""
+    """Aggregate medication data per stay_id into feature columns.
+
+    For each row we take the union of flags from the drug `name` (inference-
+    side vocabulary) and the `etcdescription` class (training-side vocabulary),
+    then OR the flags across all rows for a given stay.
+    """
     # Count medications per stay
     med_count = med.groupby("stay_id").size().rename("n_medications")
 
-    # Classify each medication row
-    all_flags = med.apply(lambda row: classify_medication(row["etcdescription"]), axis=1)
+    # Per-row flag set. Using shared med_vocab.flags_from_row keeps training
+    # aligned with inference vocabulary.
+    med = med.copy()
+    med["_flags"] = [
+        flags_from_row(n, d)
+        for n, d in zip(med["name"].values, med["etcdescription"].values)
+    ]
 
-    # Build per-stay binary flags
-    flag_records = []
-    for stay_id, group_idx in med.groupby("stay_id").groups.items():
-        flags = set()
-        for idx in group_idx:
-            flags |= all_flags.iloc[all_flags.index.get_loc(idx)] if idx in all_flags.index else set()
-        record = {"stay_id": stay_id}
-        for flag_name in MED_CATEGORY_KEYWORDS:
-            record[flag_name] = 1 if flag_name in flags else 0
-        flag_records.append(record)
+    # Per-stay union of flags, expanded to one column per category.
+    def _union(series):
+        out = set()
+        for s in series:
+            out |= s
+        return out
+
+    per_stay = med.groupby("stay_id")["_flags"].apply(_union)
+    flag_records = [
+        {"stay_id": sid, **{cat: int(cat in flags) for cat in MED_CATEGORIES}}
+        for sid, flags in per_stay.items()
+    ]
 
     flags_df = pd.DataFrame(flag_records)
     result = flags_df.merge(med_count.reset_index(), on="stay_id", how="left")
