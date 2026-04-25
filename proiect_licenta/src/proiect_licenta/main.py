@@ -48,26 +48,26 @@ def run():
 
 
 def train():
-    """Train the triage ML models v1 (run triage_pipeline_v1.py)."""
-    from proiect_licenta.triage_pipeline_v1 import main as train_pipeline
+    """Train the triage ML models v1 (training/train_triage_v1.py)."""
+    from proiect_licenta.training.train_triage_v1 import main as train_pipeline
     train_pipeline()
 
 
 def train_triage_v2():
-    """Train the triage ML models v2 with vital signs (run triage_pipeline_v2.py)."""
-    from proiect_licenta.triage_pipeline_v2 import main as train_pipeline_v2
+    """Train the triage ML models v2 with vital signs (training/train_triage_v2.py)."""
+    from proiect_licenta.training.train_triage_v2 import main as train_pipeline_v2
     train_pipeline_v2()
 
 
 def train_doctor():
-    """Train the doctor ML models (run doctor_data_pipeline.py)."""
-    from proiect_licenta.doctor_data_pipeline import main as train_doctor_pipeline
+    """Train the doctor v1 ML models (training/train_doctor.py)."""
+    from proiect_licenta.training.train_doctor import main as train_doctor_pipeline
     train_doctor_pipeline()
 
 
 def train_nurse():
-    """Train Doctor v2 models with vital signs + medication features."""
-    from proiect_licenta.nurse_data_pipeline import main as train_nurse_pipeline
+    """Train Doctor v2 models with vital signs + medication features (training/train_nurse.py)."""
+    from proiect_licenta.training.train_nurse import main as train_nurse_pipeline
     train_nurse_pipeline()
 
 

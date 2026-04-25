@@ -8,7 +8,7 @@ medication category flags:
     has_anticonvulsant_meds
 
 Used by:
-    nurse_data_pipeline.py  (training: medrecon.csv `name` + `etcdescription`)
+    training/train_nurse.py (training: medrecon.csv `name` + `etcdescription`)
     doctor_tool_v2 / v3     (inference: patient-reported medications)
 
 Expanded based on the medication vocabulary audit (audit_med_vocab.py) that

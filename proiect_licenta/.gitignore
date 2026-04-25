@@ -2,10 +2,15 @@
 __pycache__/
 .DS_Store
 
-# Dataset files
+# Dataset files (raw MIMIC-IV CSVs — too large for git)
 *.csv
 *.parquet
+data/
 src/proiect_licenta/datasets/
 
-# Models
+# Trained model artifacts (regeneratable via `uv run train_*`)
+artifacts/
 models/
+models_v2/
+src/proiect_licenta/models/
+src/proiect_licenta/models_v2/

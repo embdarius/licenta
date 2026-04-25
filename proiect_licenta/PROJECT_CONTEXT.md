@@ -26,6 +26,12 @@ This file is the slim top-level overview. Detailed documentation is split per to
 
 **If you're new:** read `docs/architecture.md` first, then the four agent files in order (NLP Parser -> Triage -> Doctor -> Nurse).
 
+### Repo Conventions (must-knows for editing)
+
+- **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths.
+- **`src/proiect_licenta/preprocessing.py`** owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1/v2, doctor, nurse, and runtime tools all import from here so training and inference can't drift.
+- **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/{triage,doctor}/{v1,v2}/`. Retrain with `uv run train_*` (see "How to Run").
+
 ---
 
 ## System at a Glance
@@ -90,9 +96,11 @@ uv run crewai run
 uv run run_crew
 
 # Run benchmarks
-uv run python benchmark.py          # Triage models
-uv run python benchmark_doctor.py   # Doctor v1 models
-uv run python benchmark_nurse.py    # Doctor v1 vs v2 comparison
+uv run python benchmarks/benchmark_triage_v1.py             # Triage v1 models
+uv run python benchmarks/benchmark_triage_v2.py             # Triage v2 models (with vitals)
+uv run python benchmarks/benchmark_triage_v2_realistic.py   # Triage v2 under realistic missing-vitals scenario
+uv run python benchmarks/benchmark_doctor.py                # Doctor v1 models
+uv run python benchmarks/benchmark_nurse.py                 # Doctor v1 vs v2 comparison
 ```
 
 ### Environment Variables (`.env`)

@@ -1,54 +1,51 @@
-# ProiectLicenta Crew
+# Multi-Agent Medical Decision Support System
 
-Welcome to the ProiectLicenta Crew project, powered by [crewAI](https://crewai.com). This template is designed to help you set up a multi-agent AI system with ease, leveraging the powerful and flexible framework provided by crewAI. Our goal is to enable your agents to collaborate effectively on complex tasks, maximizing their collective intelligence and capabilities.
+Bachelor's thesis project implementing a multi-agent architecture for emergency-department decision support, built on **CrewAI** + **XGBoost** and trained on the **MIMIC-IV-ED** dataset (~425K real patient encounters).
 
-## Installation
+A patient describes their symptoms in natural language; a pipeline of four specialized agents (NLP Parser → Triage → Doctor → Nurse → Doctor v2) walks the case through triage, initial diagnosis, vital-sign collection, and an enhanced reassessment.
 
-Ensure you have Python >=3.10 <3.14 installed on your system. This project uses [UV](https://docs.astral.sh/uv/) for dependency management and package handling, offering a seamless setup and execution experience.
-
-First, if you haven't already, install uv:
-
-```bash
-pip install uv
+```
+Patient → NLP Parser → Triage → Doctor v1 → Nurse → Doctor v2
+          (LLM)        (ML)     (ML)        (interactive)  (ML+vitals+meds)
 ```
 
-Next, navigate to your project directory and install the dependencies:
+## Documentation
 
-(Optional) Lock the dependencies and install them by using the CLI command:
-```bash
-crewai install
-```
-### Customizing
+- **[PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)** — top-level overview, benchmarks, design decisions, status.
+- **[docs/architecture.md](docs/architecture.md)** — full pipeline diagram, cascading prediction design, on-disk layout.
+- **[docs/agents/](docs/agents/)** — per-agent deep dives (NLP Parser, Triage, Doctor, Nurse).
+- **[docs/datasets.md](docs/datasets.md)** — MIMIC-IV table reference.
+- **[docs/future-work.md](docs/future-work.md)** — known issues, roadmap, planned phases 4 + 5.
 
-**Add your `OPENAI_API_KEY` into the `.env` file**
+If you're new, read `PROJECT_CONTEXT.md` first.
 
-- Modify `src/proiect_licenta/config/agents.yaml` to define your agents
-- Modify `src/proiect_licenta/config/tasks.yaml` to define your tasks
-- Modify `src/proiect_licenta/crew.py` to add your own logic, tools and specific args
-- Modify `src/proiect_licenta/main.py` to add custom inputs for your agents and tasks
-
-## Running the Project
-
-To kickstart your crew of AI agents and begin task execution, run this from the root folder of your project:
+## Quick start
 
 ```bash
-$ crewai run
+# Install
+uv sync
+
+# Configure: create .env with
+#   MODEL=gemini/gemini-2.5-flash
+#   GEMINI_API_KEY=<your key>
+
+# Run the full 4-agent pipeline
+uv run run_crew
+
+# Train models (see PROJECT_CONTEXT.md for timings)
+uv run train_models       # triage v1
+uv run train_triage_v2    # triage v2 (with vitals)
+uv run train_doctor       # doctor v1
+uv run train_nurse        # doctor v2 (uses nurse data)
+
+# Benchmarks
+uv run python benchmarks/benchmark_triage_v2.py
+uv run python benchmarks/benchmark_doctor.py
+uv run python benchmarks/benchmark_nurse.py
 ```
 
-This command initializes the proiect_licenta Crew, assembling the agents and assigning them tasks as defined in your configuration.
+Datasets are not committed — place the MIMIC-IV CSVs under `src/proiect_licenta/datasets/datasets_mimic-iv/` (see `docs/datasets.md`).
 
-This example, unmodified, will run the create a `report.md` file with the output of a research on LLMs in the root folder.
+## Tech stack
 
-## Understanding Your Crew
-
-The proiect_licenta Crew is composed of multiple AI agents, each with unique roles, goals, and tools. These agents collaborate on a series of tasks, defined in `config/tasks.yaml`, leveraging their collective skills to achieve complex objectives. The `config/agents.yaml` file outlines the capabilities and configurations of each agent in your crew.
-
-## Support
-
-For support, questions, or feedback regarding the ProiectLicenta Crew or crewAI.
-- Visit our [documentation](https://docs.crewai.com)
-- Reach out to us through our [GitHub repository](https://github.com/joaomdmoura/crewai)
-- [Join our Discord](https://discord.com/invite/X4JWnZnxPb)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
-
-Let's create wonders together with the power and simplicity of crewAI.
+Python 3.13 · CrewAI 1.9.3 · Gemini 2.5 Flash · XGBoost · scikit-learn · pandas · thefuzz

@@ -130,11 +130,15 @@ The same abbreviation map, vectorizer, and severity map are reused at inference 
 proiect_licenta/
 |-- .env                          # GEMINI_API_KEY, MODEL config
 |-- pyproject.toml                # Dependencies + script entry points
+|-- README.md                     # Quick-start + doc map
+|-- CLAUDE.md                     # Onboarding pointer for Claude Code sessions
 |-- PROJECT_CONTEXT.md            # Top-level overview + doc index
-|-- benchmark.py                  # Triage v3b model benchmark script (v1 pipeline)
-|-- benchmark_triage_v2.py        # Triage v4 model benchmark (realistic: vitals only for ambulance/helicopter)
-|-- benchmark_doctor.py           # Doctor v1 model benchmark script
-|-- benchmark_nurse.py            # Doctor v1 vs v2 comparison benchmark
+|-- benchmarks/                   # Evaluation scripts (run with `uv run python benchmarks/<name>.py`)
+|   |-- benchmark_triage_v1.py    # Triage v3b model benchmark (v1 pipeline)
+|   |-- benchmark_triage_v2.py    # Triage v4 model benchmark (with vitals)
+|   |-- benchmark_triage_v2_realistic.py  # v2 under realistic missing-vitals scenario
+|   |-- benchmark_doctor.py       # Doctor v1 model benchmark
+|   +-- benchmark_nurse.py        # Doctor v1 vs v2 comparison benchmark
 |-- docs/
 |   |-- architecture.md           # This file
 |   |-- datasets.md               # MIMIC-IV dataset reference
@@ -144,64 +148,80 @@ proiect_licenta/
 |       |-- triage-agent.md
 |       |-- doctor-agent.md
 |       +-- nurse-agent.md
-|-- src/proiect_licenta/
-|   |-- main.py                   # Entry point -- interactive patient input -> crew kickoff
-|   |-- crew.py                   # CrewAI crew definition -- 4 agents, 5 tasks, sequential
-|   |-- triage_pipeline_v1.py      # Triage ML training pipeline v3b (acuity + disposition, no vitals)
-|   |-- triage_pipeline_v2.py      # Triage ML training pipeline v4 (+ vital signs, ambulance/helicopter)
-|   |-- doctor_data_pipeline.py   # Doctor v1 ML training pipeline (diagnosis + department)
-|   |-- nurse_data_pipeline.py    # Doctor v2 ML training pipeline (+ vitals + medications)
-|   |-- config/
-|   |   |-- agents.yaml           # Agent definitions (nlp_parser, triage, doctor, nurse)
-|   |   +-- tasks.yaml            # Task definitions (5 tasks: parse, triage, doctor v1, nurse, doctor v2)
-|   |-- tools/
-|   |   |-- __init__.py           # Exports all tools
-|   |   |-- triage_tool.py        # CrewAI BaseTool wrapping triage ML models
-|   |   |-- doctor_tool.py        # CrewAI BaseTool wrapping doctor v1 ML models
-|   |   |-- doctor_tool_v2.py     # CrewAI BaseTool wrapping doctor v2 ML models (+ nurse data)
-|   |   |-- nurse_tool.py         # CrewAI BaseTool for interactive vital/medication collection
-|   |   |-- ask_patient_tool.py   # Interactive follow-up question tool
-|   |   +-- custom_tool.py        # (unused template file)
-|   |-- models/                   # Triage v3b model artifacts (.joblib) — kept for reference
-|   |   |-- acuity_model.joblib
-|   |   |-- disposition_model.joblib
-|   |   |-- tfidf_vectorizer.joblib
-|   |   |-- severity_map.joblib
-|   |   |-- model_metadata.json
-|   |-- models_v2/                # Triage v4 model artifacts (current — used by triage_tool.py)
-|   |   |-- acuity_model.joblib
-|   |   |-- disposition_model.joblib
-|   |   |-- tfidf_vectorizer.joblib
-|   |   |-- severity_map.joblib
-|   |   |-- vital_medians.joblib  # Per-vital training medians for imputation at inference
-|   |   |-- model_metadata.json
-|   |   +-- doctor/               # Doctor model artifacts (v1 + v2)
-|   |       |-- diagnosis_model.joblib      # v1
-|   |       |-- department_model.joblib     # v1
-|   |       |-- doctor_metadata.json        # v1
-|   |       |-- diagnosis_model_v2.joblib   # v2 (with nurse data)
-|   |       |-- department_model_v2.joblib  # v2 (with nurse data)
-|   |       +-- doctor_v2_metadata.json     # v2
-|   +-- datasets/datasets_mimic-iv/
-|       |-- mimic-iv-ed/          # Emergency Department data (PRIMARY)
-|       |   |-- triage.csv        # 425K rows: complaints, pain, vitals, acuity
-|       |   |-- edstays.csv       # 425K rows: stay tracking, gender, arrival, disposition
-|       |   |-- diagnosis.csv     # 900K rows: ICD-9/10 diagnosis codes per stay
-|       |   |-- vitalsign.csv     # 1.4M rows: longitudinal vital signs during stay
-|       |   |-- medrecon.csv      # 3M rows: medication reconciliation (pre-admission meds)
-|       |   |-- pyxis.csv         # Medications dispensed during stay
-|       |   +-- files_created/
-|       |       +-- categorized_diagnosis.csv  # ICD codes grouped into categories
-|       |-- mimic-iv/hosp/        # Hospital data
-|       |   |-- patients.csv      # Demographics (age, gender, death date)
-|       |   |-- admissions.csv    # Hospital admissions
-|       |   |-- services.csv      # Department assignments (MED, SURG, NEURO, etc.)
-|       |   |-- diagnoses_icd.csv # Hospital-wide ICD diagnosis codes
-|       |   +-- d_icd_diagnoses.csv # ICD code dictionary
-|       |-- mimic-iv/note/        # Clinical notes (unused -- see datasets.md)
-|       |   |-- discharge.csv     # ~3.3 GB discharge summaries
-|       |   |-- radiology.csv     # ~2.7 GB radiology reports
-|       |   |-- discharge_detail.csv
-|       |   +-- radiology_detail.csv
-|       +-- mimic-iv/icu/         # ICU data (NOT USED)
+|
+|-- artifacts/                    # Trained model artifacts (gitignored)
+|   |-- triage/
+|   |   |-- v1/                   # Triage v3b (no vitals)
+|   |   |   |-- acuity_model.joblib
+|   |   |   |-- disposition_model.joblib
+|   |   |   |-- tfidf_vectorizer.joblib
+|   |   |   |-- severity_map.joblib
+|   |   |   +-- model_metadata.json
+|   |   +-- v2/                   # Triage v4 (with vitals — used at runtime)
+|   |       |-- acuity_model.joblib
+|   |       |-- disposition_model.joblib
+|   |       |-- tfidf_vectorizer.joblib
+|   |       |-- severity_map.joblib
+|   |       |-- vital_medians.joblib   # Per-vital training medians for imputation
+|   |       +-- model_metadata.json
+|   +-- doctor/
+|       |-- v1/                   # Doctor v1 (triage data only)
+|       |   |-- diagnosis_model.joblib
+|       |   |-- department_model.joblib
+|       |   +-- metadata.json
+|       +-- v2/                   # Doctor v2 (with nurse vitals + medications)
+|           |-- diagnosis_model.joblib
+|           |-- department_model.joblib
+|           +-- metadata.json
+|
+|-- data/                         # Raw MIMIC-IV CSVs (gitignored)
+|   |-- mimic-iv-ed/              # Emergency Department data (PRIMARY)
+|   |   |-- triage.csv            # 425K rows: complaints, pain, vitals, acuity
+|   |   |-- edstays.csv           # 425K rows: stay tracking, gender, arrival, disposition
+|   |   |-- diagnosis.csv         # 900K rows: ICD-9/10 diagnosis codes per stay
+|   |   |-- vitalsign.csv         # 1.4M rows: longitudinal vital signs during stay
+|   |   |-- medrecon.csv          # 3M rows: medication reconciliation (pre-admission meds)
+|   |   |-- pyxis.csv             # Medications dispensed during stay
+|   |   +-- files_created/
+|   |       +-- categorized_diagnosis.csv  # ICD codes grouped into categories
+|   |-- mimic-iv/hosp/            # Hospital data
+|   |   |-- patients.csv          # Demographics (age, gender, death date)
+|   |   |-- admissions.csv        # Hospital admissions
+|   |   |-- services.csv          # Department assignments (MED, SURG, NEURO, etc.)
+|   |   |-- diagnoses_icd.csv     # Hospital-wide ICD diagnosis codes
+|   |   +-- d_icd_diagnoses.csv   # ICD code dictionary
+|   |-- mimic-iv/note/            # Clinical notes (unused -- see datasets.md)
+|   |   |-- discharge.csv         # ~3.3 GB discharge summaries
+|   |   |-- radiology.csv         # ~2.7 GB radiology reports
+|   |   |-- discharge_detail.csv
+|   |   +-- radiology_detail.csv
+|   +-- mimic-iv/icu/             # ICU data (NOT USED)
+|
++-- src/proiect_licenta/
+    |-- main.py                   # Entry point -- interactive patient input -> crew kickoff
+    |-- crew.py                   # CrewAI crew definition -- 4 agents, 5 tasks, sequential
+    |-- paths.py                  # Canonical project paths (data/, artifacts/, ...)
+    |-- preprocessing.py          # Shared complaint normalization + abbreviation map
+    |-- config/
+    |   |-- agents.yaml           # Agent definitions (nlp_parser, triage, doctor, nurse)
+    |   +-- tasks.yaml            # Task definitions (5 tasks: parse, triage, doctor v1, nurse, doctor v2)
+    |-- training/
+    |   |-- train_triage_v1.py    # Triage ML training pipeline v3b (acuity + disposition, no vitals)
+    |   |-- train_triage_v2.py    # Triage ML training pipeline v4 (+ vital signs, ambulance/helicopter)
+    |   |-- train_doctor.py       # Doctor v1 ML training pipeline (diagnosis + department)
+    |   +-- train_nurse.py        # Doctor v2 ML training pipeline (+ vitals + medications)
+    +-- tools/
+        |-- __init__.py           # Exports all tools
+        |-- triage_tool.py        # CrewAI BaseTool wrapping triage ML models
+        |-- doctor_tool.py        # CrewAI BaseTool wrapping doctor v1 ML models
+        |-- doctor_tool_v2.py     # CrewAI BaseTool wrapping doctor v2 ML models (+ nurse data)
+        |-- nurse_tool.py         # CrewAI BaseTool for interactive vital/medication collection
+        +-- ask_patient_tool.py   # Interactive follow-up question tool
 ```
+
+### Where things live (quick reference)
+
+- **Paths** — `src/proiect_licenta/paths.py` is the single source of truth. Every dataset CSV path and every artifact directory is exported as a constant. Tools, training pipelines, and benchmarks all import from there; no path is hardcoded.
+- **Preprocessing** — `src/proiect_licenta/preprocessing.py` owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1, triage v2, doctor, nurse, and the runtime tools import the same function so training and inference cannot drift.
+- **Doctor v1 vs v2 layout parity** — `artifacts/doctor/v1/` and `artifacts/doctor/v2/` use the same filenames (`diagnosis_model.joblib`, `department_model.joblib`, `metadata.json`). The version is the directory, not the filename.
+- **Doctor v2 still loads triage v1 base artifacts** (TF-IDF vectorizer, severity map, acuity/disposition models). This is intentional: doctor v2's cascading features must match the same TF-IDF/severity space the doctor models were trained on, so it reads from `artifacts/triage/v1/`. Only the diagnosis and department weights differ between v1 and v2.

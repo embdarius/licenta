@@ -19,10 +19,14 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths (canonical layout in proiect_licenta.paths)
+# Doctor v2 also reuses triage v1 base artifacts (for cascading-feature parity
+# with how doctor v2 was trained in training/train_nurse.py).
 # ---------------------------------------------------------------------------
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-DOCTOR_MODELS_DIR = MODELS_DIR / "doctor"
+from proiect_licenta.paths import (
+    TRIAGE_V1_DIR as MODELS_DIR,
+    DOCTOR_V2_DIR as DOCTOR_MODELS_DIR,
+)
 
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
 
@@ -30,7 +34,7 @@ from proiect_licenta.tools.triage_tool import normalize_complaint_text
 # Medication classification — shared vocabulary with the training pipeline
 # ---------------------------------------------------------------------------
 # The drug-name and class-keyword maps live in `tools.med_vocab` so that the
-# training pipeline (nurse_data_pipeline) and this inference tool cannot
+# training pipeline (training/train_nurse.py) and this inference tool cannot
 # drift apart. See `med_vocab.py` for the lists and the audit that motivated
 # centralization (audit_med_vocab.py).
 from proiect_licenta.tools.med_vocab import (
@@ -93,10 +97,10 @@ def get_doctor_v2_models():
         acuity_model = joblib.load(MODELS_DIR / "acuity_model.joblib")
         disposition_model = joblib.load(MODELS_DIR / "disposition_model.joblib")
 
-        diagnosis_model = joblib.load(DOCTOR_MODELS_DIR / "diagnosis_model_v2.joblib")
-        department_model = joblib.load(DOCTOR_MODELS_DIR / "department_model_v2.joblib")
+        diagnosis_model = joblib.load(DOCTOR_MODELS_DIR / "diagnosis_model.joblib")
+        department_model = joblib.load(DOCTOR_MODELS_DIR / "department_model.joblib")
 
-        with open(DOCTOR_MODELS_DIR / "doctor_v2_metadata.json", "r", encoding="utf-8") as f:
+        with open(DOCTOR_MODELS_DIR / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
         _doctor_v2_cache = {

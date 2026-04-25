@@ -5,7 +5,7 @@ Uses TF-IDF + XGBoost models with demographics and vital signs for triage predic
 Takes chief complaints, pain score, age, gender, arrival transport, and optional vitals.
 Returns ESI acuity level (1-5), admission/discharge, confidence scores.
 
-Loads models from models_v2/ (triage pipeline v2 with vital signs).
+Loads models from artifacts/triage/v2/ (triage pipeline v2 with vital signs).
 """
 
 import json
@@ -20,88 +20,24 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths (canonical layout in proiect_licenta.paths)
 # ---------------------------------------------------------------------------
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models_v2"
-
-
-# ---------------------------------------------------------------------------
-# Complaint text normalization (must match training pipeline)
-# ---------------------------------------------------------------------------
-ABBREVIATIONS = {
-    "abd": "abdominal",
-    "n/v": "nausea vomiting",
-    "n v": "nausea vomiting",
-    "s/p": "status post",
-    "s p": "status post",
-    "sob": "shortness of breath",
-    "cp": "chest pain",
-    "ha": "headache",
-    "ams": "altered mental status",
-    "loc": "loss of consciousness",
-    "etoh": "alcohol intoxication",
-    "uti": "urinary tract infection",
-    "uri": "upper respiratory infection",
-    "mv": "motor vehicle",
-    "mva": "motor vehicle accident",
-    "mvc": "motor vehicle collision",
-    "htn": "hypertension",
-    "dm": "diabetes",
-    "chf": "congestive heart failure",
-    "gi": "gastrointestinal",
-    "r/o": "rule out",
-    "w/": "with",
-    "w/o": "without",
-    "fx": "fracture",
-    "lac": "laceration",
-    "inj": "injury",
-    "sx": "symptoms",
-    "dx": "diagnosis",
-    "tx": "treatment",
-    "hx": "history",
-    "bld": "blood",
-    "diff": "difficulty",
-    "eval": "evaluation",
-    "sz": "seizure",
-    "ped": "pediatric",
-    "psych": "psychiatric",
-    "resp": "respiratory",
-    "bilat": "bilateral",
-    "lt": "left",
-    "rt": "right",
-    "pos": "positive",
-    "neg": "negative",
-    "hiv": "hiv",
-    "copd": "chronic obstructive pulmonary disease",
-    "mi": "myocardial infarction",
-    "cva": "cerebrovascular accident stroke",
-    "dvt": "deep vein thrombosis",
-    "pe": "pulmonary embolism",
-    "ble": "bleeding",
-}
-
-
-def normalize_complaint_text(text: str) -> str:
-    """Normalize complaint text to match training pipeline."""
-    if not text or not text.strip():
-        return ""
-    text = text.lower().strip()
-    text = text.replace(",", " ").replace(";", " ").replace("/", " ").replace("-", " ")
-    text = text.replace("(", " ").replace(")", " ").replace(".", " ")
-
-    words = text.split()
-    expanded = []
-    for word in words:
-        word = word.strip()
-        if word in ABBREVIATIONS:
-            expanded.append(ABBREVIATIONS[word])
-        elif len(word) > 1:
-            expanded.append(word)
-    return " ".join(expanded)
+from proiect_licenta.paths import TRIAGE_V2_DIR as MODELS_DIR
 
 
 # ---------------------------------------------------------------------------
-# Vital sign constants (must match triage_pipeline_v2.py)
+# Complaint text normalization — shared with training pipelines.
+# Re-exported here so doctor_tool / doctor_tool_v2 can keep importing
+# `normalize_complaint_text` from triage_tool.
+# ---------------------------------------------------------------------------
+from proiect_licenta.preprocessing import (  # noqa: F401
+    ABBREVIATIONS,
+    normalize_complaint_text,
+)
+
+
+# ---------------------------------------------------------------------------
+# Vital sign constants (must match training/train_triage_v2.py)
 # ---------------------------------------------------------------------------
 VITAL_COLS = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
 

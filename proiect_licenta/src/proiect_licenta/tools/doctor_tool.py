@@ -20,10 +20,13 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths (canonical layout in proiect_licenta.paths)
+# Doctor v1 reuses triage v1 base artifacts for feature engineering.
 # ---------------------------------------------------------------------------
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-DOCTOR_MODELS_DIR = MODELS_DIR / "doctor"
+from proiect_licenta.paths import (
+    TRIAGE_V1_DIR as MODELS_DIR,
+    DOCTOR_V1_DIR as DOCTOR_MODELS_DIR,
+)
 
 # ---------------------------------------------------------------------------
 # Reuse triage preprocessing
@@ -49,7 +52,7 @@ def get_doctor_models():
         diagnosis_model = joblib.load(DOCTOR_MODELS_DIR / "diagnosis_model.joblib")
         department_model = joblib.load(DOCTOR_MODELS_DIR / "department_model.joblib")
 
-        with open(DOCTOR_MODELS_DIR / "doctor_metadata.json", "r", encoding="utf-8") as f:
+        with open(DOCTOR_MODELS_DIR / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
         _doctor_cache = {

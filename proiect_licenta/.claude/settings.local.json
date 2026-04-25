@@ -12,7 +12,9 @@
       "Bash(do echo:*)",
       "Bash(uv run python -c ':*)",
       "Bash(uv sync:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(git mv *)",
+      "Bash(set -e)"
     ]
   }
 }
