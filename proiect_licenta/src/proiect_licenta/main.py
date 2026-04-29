@@ -71,5 +71,17 @@ def train_nurse():
     train_nurse_pipeline()
 
 
+def train_doctor_v3():
+    """Train Doctor v3 base models (catch-all excluded, full dataset, no nurse data)."""
+    from proiect_licenta.training.train_doctor_v3 import main as train_pipeline
+    train_pipeline()
+
+
+def train_nurse_v3():
+    """Train Doctor v3 with nurse data (catch-all excluded, full dataset, snapshot vitals + meds; Phase B adds longitudinal vitals + rhythm)."""
+    from proiect_licenta.training.train_nurse_v3 import main as train_pipeline
+    train_pipeline()
+
+
 if __name__ == "__main__":
     run()

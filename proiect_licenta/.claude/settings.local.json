@@ -14,7 +14,9 @@
       "Bash(uv sync:*)",
       "Bash(uv run:*)",
       "Bash(git mv *)",
-      "Bash(set -e)"
+      "Bash(set -e)",
+      "Bash(powershell -Command \"Get-Content 'D:\\\\Projects\\\\Facultate\\\\licenta\\\\proiect_licenta\\\\data\\\\mimic-iv-ed\\\\vitalsign.csv' -TotalCount 1\")",
+      "PowerShell(uv run python -c \"import pandas as pd; df = pd.read_csv\\('data/mimic-iv-ed/vitalsign.csv', usecols=['rhythm'], nrows=500000\\); rhythms = df['rhythm'].dropna\\(\\); print\\('Total non-null:', len\\(rhythms\\)\\); print\\(rhythms.value_counts\\(\\).head\\(25\\).to_string\\(\\)\\)\")"
     ]
   }
 }

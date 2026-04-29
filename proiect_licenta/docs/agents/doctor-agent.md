@@ -1,10 +1,12 @@
-# Doctor Agent (v1 + v2)
+# Doctor Agent (v1 + v2 + v3)
 
 The Doctor Agent is the only agent in the pipeline that runs **twice**:
 - **Phase 1 (v1):** Initial assessment using triage data only.
 - **Phase 2 (v2):** Enhanced reassessment using triage data **plus** the vital signs and medication list collected by the Nurse Agent.
 
-This two-phase design lets the user see the initial assessment before any nurse data is collected, and then see how the assessment updates once that extra information is available. It also gives the thesis a concrete before/after comparison of the clinical value of vitals + medications.
+A **v3 tier** sits alongside v1/v2 (it does not replace them). v3 drops the "Symptoms, Signs, Ill-Defined" catch-all class so the model trains on a clinically meaningful 13-class label space, runs on the full filtered admitted-patient dataset (no 100K cap), and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm from `vitalsign.csv`. v1 and v2 stay in the repo as the 14-class baselines for direct thesis comparison. See the [v3 section](#phase-3--doctor-v3-13-class-label-space) below.
+
+This three-phase design lets the user see the initial assessment before any nurse data is collected, and then see how the assessment updates once that extra information is available. It also gives the thesis a concrete before/after comparison of the clinical value of vitals + medications, and a separate comparison of the impact of the catch-all exclusion (v1/v2 vs v3).
 
 - **Config:** `src/proiect_licenta/config/agents.yaml` (`doctor_agent`) and `tasks.yaml` (`doctor_assessment_task`, `doctor_reassessment_task`).
 - **Data flow:** v1 receives triage output via the structured-data block emitted by the Triage Agent. v2 additionally receives the JSON block emitted by the Nurse Agent.
@@ -208,21 +210,74 @@ A deeper analysis of why the v2 gains were modest is in [`../future-work.md`](..
 
 ---
 
+## Phase 3 — Doctor v3 (13-class label space)
+
+v3 is structurally a **separate model tier** rather than a replacement for v1/v2. The v1 and v2 training files, tools, and artifacts are left untouched so the thesis can show all four configurations side-by-side. The reasons for v3:
+
+1. **The "Symptoms, Signs, Ill-Defined" class is a labeling artifact.** It absorbs 33.2% of admitted patients and 20-28% of misclassifications from every other category. Many of those rows are ICD codes that restate the chief complaint (e.g., "chest pain NOS") rather than identify a cause, so no feature engineering can separate them from real-cause categories. v3 drops the class entirely. The remaining 13 classes are clinically meaningful.
+2. **The 100K sub-sample cap is no longer needed** after the catch-all rows are filtered out (~102K admitted patients remain). v3 trains on everything.
+3. **Longitudinal vital trends + cardiac rhythm** from `vitalsign.csv` (currently unused) carry signal that the single-snapshot vitals from `triage.csv` (used by v2) miss — particularly for cardiac and respiratory categories.
+
+### v3 base — no nurse data
+
+- **Files:** `src/proiect_licenta/training/train_doctor_v3.py` (training), saved to `artifacts/doctor/v3_base/`.
+- **Label space:** 13 classes (catch-all dropped via `train_doctor.CATCH_ALL_LABEL`).
+- **Sample:** Full filtered admitted dataset (~102K rows, no sub-sampling).
+- **Features:** Same shape as v1 — TF-IDF + structured triage features + cascading triage predictions. ~2025 features. **No nurse-collected data.**
+- **Cascading from triage v1:** Reuses `TRIAGE_V1_DIR` artifacts (TF-IDF vocab, severity map, acuity model, disposition model). Triage is not retrained for v3.
+
+### v3 with-nurse — full nurse data + longitudinal vitals + rhythm
+
+- **Files:** `src/proiect_licenta/training/train_nurse_v3.py` (training), saved to `artifacts/doctor/v3/`.
+- **Label space:** 13 classes (same filter as v3 base).
+- **Sample:** Full filtered admitted dataset (~102K rows).
+- **Features (v3 base + nurse data + longitudinal vitalsign.csv aggregates):**
+  - All 2025 v3-base features.
+  - **Snapshot vitals from triage.csv (20 features):** same as v2 — raw values + missing flags + clinical flags (fever, tachycardia, bradycardia, tachypnea, hypoxia, hypertension, hypotension) + MAP.
+  - **Medications from medrecon.csv (11 features):** same as v2 — `n_medications`, `meds_unknown`, plus 9 binary category flags via the shared `med_vocab.flags_from_row` vocabulary.
+  - **Longitudinal vital trajectory (24 features):** for each of the 6 vitals, `<vital>_min`, `<vital>_max`, `<vital>_last`, `<vital>_delta` aggregated over readings within `[intime, intime + 4h]` (the 4h window guards against late-stay disposition leakage).
+  - **Abnormal-reading counts (7 features):** `n_fever_readings`, `n_tachycardia_readings`, `n_bradycardia_readings`, `n_tachypnea_readings`, `n_hypoxia_readings`, `n_hypertension_readings`, `n_hypotension_readings`.
+  - **Cardiac rhythm (10 features):** one-hot over 8 normalized buckets (`sinus`, `sinus_tachy`, `sinus_brady`, `afib_flutter`, `paced`, `av_block`, `svt`, `other`) plus `rhythm_irregular` (any non-sinus reading) plus `has_longitudinal_vitals` (was the stay covered in `vitalsign.csv` at all).
+  - **Total:** ~2097 features (~72 nurse-derived on top of the v3-base 2025).
+
+### Inference behavior — degraded trajectory at runtime
+
+`vitalsign.csv` is a training-time data source. The Nurse Agent at inference still collects only a single snapshot. `doctor_tool_v3` synthesizes the trajectory features as if `_min == _max == _last == snapshot` and `_delta == 0`; abnormal-reading counts collapse to the corresponding clinical flag (0 or 1). This is the same fallback used at training for stays without `vitalsign.csv` coverage (~5-7% of admitted stays based on early-window filter), so the model learned a consistent representation.
+
+The Nurse Agent now also asks for cardiac rhythm (`nurse_tool.py` has a new prompt; `tasks.yaml` updated). The new `rhythm` field in the nurse JSON is **additive**: v2's tool ignores it, v3's tool consumes it. This means switching the live runtime between v2 and v3 is a one-line change in `crew.py` (which tool to register) plus an edit to `tasks.yaml` (which tool to call) — no nurse-side breakage either way.
+
+### Inference-time consequence of catch-all exclusion
+
+A v3 model can never output "Symptoms, Signs, Ill-Defined" — if a real patient's true category would be that bucket, v3 is *forced* into one of the 13 remaining classes. This is acceptable for the thesis claim ("for patients with a clinically meaningful diagnostic category, v3 achieves X%"), but should be noted in the writeup. v1/v2 remain in the repo as the 14-class fallback if the runtime ever needs to handle catch-all cases. A binary catch-all detector trained on the full 152K could be chained before v3 as a future extension if desired.
+
+### Benchmarks (placeholders — fill in after retrain)
+
+- **v3 base diagnosis:** _top-1: TBD, top-3: TBD, top-5: TBD, kappa: TBD_  (run `uv run train_doctor_v3` then `uv run python benchmarks/benchmark_doctor_v3.py`).
+- **v3 with-nurse diagnosis:** _top-1: TBD, top-3: TBD, top-5: TBD, kappa: TBD_  (run `uv run train_nurse_v3` then `uv run python benchmarks/benchmark_nurse_v3.py`).
+- **Four-way summary table:** `uv run python benchmarks/compare_all_versions.py`.
+
+Estimated lift before retrain: top-1 diagnosis from ~50% (v1, 14-class) to ~65-72% (v3 base, 13-class) just from removing the noisy catch-all. The +longitudinal +rhythm step is expected to add another ~2-4pp on top, with most of that lift on Circulatory + Nervous System (rhythm) and Respiratory + Endocrine (vital trajectories). Surgical departments are not expected to benefit from these additions — see the v2 regression note in [`../future-work.md`](../future-work.md).
+
+---
+
 ## Tools
 
 - **`DoctorPredictionTool` (v1)** — `src/proiect_licenta/tools/doctor_tool.py`. Wraps the diagnosis v1 + department v1 models, rebuilds the 2025-feature vector from triage output.
 - **`DoctorPredictionToolV2` (v2)** — `src/proiect_licenta/tools/doctor_tool_v2.py`. Wraps the diagnosis v2 + department v2 models, builds the 2056-feature vector, applies vital imputation and medication classification, and emits a JSON result that includes a `nurse_data_used` section so the output makes the comparison with v1 explicit.
+- **`DoctorPredictionToolV3` (v3)** — `src/proiect_licenta/tools/doctor_tool_v3.py`. Wraps the v3 diagnosis + department models, accepts the nurse's `rhythm` field, rebuilds the ~2097-feature vector, and uses the snapshot-as-trajectory fallback described above. Output JSON includes `rhythm_raw`, `rhythm_bucket`, and `rhythm_irregular` under `nurse_data_used`, plus a `label_space` note flagging that catch-all is excluded.
 
-Both tools lazy-load their artifacts at first use.
+All three tools lazy-load their artifacts at first use.
 
 ---
 
 ## Training
 
-- **v1 pipeline:** `src/proiect_licenta/doctor_data_pipeline.py`. Run with `uv run train_doctor` (~30 minutes for both v1 models on 80K samples; early stopping typically triggers around iteration 1400-1900).
-- **v2 pipeline:** `src/proiect_licenta/nurse_data_pipeline.py`. Run with `uv run train_nurse` (~45 minutes for both v2 models on 80K samples; medication aggregation over 3M rows from `medrecon.csv` adds ~5 minutes to data loading).
+- **v1 pipeline:** `src/proiect_licenta/training/train_doctor.py`. Run with `uv run train_doctor` (~30 minutes for both v1 models on 80K samples; early stopping typically triggers around iteration 1400-1900).
+- **v2 pipeline:** `src/proiect_licenta/training/train_nurse.py`. Run with `uv run train_nurse` (~45 minutes for both v2 models on 80K samples; medication aggregation over 3M rows from `medrecon.csv` adds ~5 minutes to data loading).
+- **v3 base pipeline:** `src/proiect_licenta/training/train_doctor_v3.py`. Run with `uv run train_doctor_v3`. Same architecture as v1 but filters the catch-all class and trains on the full ~102K filtered admitted-patient set (no sub-sample). Expected runtime ~40 minutes.
+- **v3 with-nurse pipeline:** `src/proiect_licenta/training/train_nurse_v3.py`. Run with `uv run train_nurse_v3`. v3 base + snapshot vitals + medications + longitudinal vitals/rhythm from `vitalsign.csv`. Expected runtime ~70 minutes (the chunked load of the 115 MB `vitalsign.csv` adds ~10 minutes; the 4-hour time-window filter is applied during aggregation).
 
-The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, stratified on `diagnosis_group`) so v1 and v2 can be evaluated on identical test sets for direct comparison.
+The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, stratified on `diagnosis_group`) so v1 and v2 can be evaluated on identical test sets for direct comparison. v3 base and v3 with-nurse share their own filtered split (also `random_state=42`, also stratified on `diagnosis_group`) so they can be compared to each other on identical 13-class test sets. v1/v2 (14-class, sampled) and v3 (13-class, full) are not on identical test sets and should not be compared as if they were — `benchmarks/compare_all_versions.py` flags this in its output.
 
 ---
 

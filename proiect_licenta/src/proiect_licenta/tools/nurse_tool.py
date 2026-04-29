@@ -1,9 +1,12 @@
 """
 Nurse Data Collection Tool — CrewAI Tool
 
-Interactively collects vital signs and medication history from the patient.
-Each field can be skipped if the patient doesn't know.
-Returns structured JSON for the Doctor v2 prediction tool.
+Interactively collects vital signs, cardiac rhythm, and medication history
+from the patient. Each field can be skipped if the patient doesn't know.
+Returns structured JSON consumed by the Doctor prediction tools (v2 and v3).
+
+Output schema is additive: the v2 tool ignores the `rhythm` field added
+for v3, so this tool can drive both pipelines without breakage.
 """
 
 import json
@@ -58,11 +61,12 @@ class NurseCollectionInput(BaseModel):
 class NurseDataCollectionTool(BaseTool):
     name: str = "nurse_data_collection"
     description: str = (
-        "Collects vital signs and medication history from the patient interactively. "
-        "Asks the patient for: temperature, heart rate, respiratory rate, "
-        "oxygen saturation, blood pressure, and current medications. "
-        "The patient can skip any question they don't know the answer to. "
-        "Returns structured JSON with the collected data. "
+        "Collects vital signs, cardiac rhythm, and medication history from the "
+        "patient interactively. Asks for: temperature, heart rate, respiratory "
+        "rate, oxygen saturation, blood pressure, cardiac rhythm (e.g. 'sinus' "
+        "or 'atrial fibrillation'), and current medications. The patient can "
+        "skip any question they don't know. Returns structured JSON consumed "
+        "by the Doctor prediction tools (v2 and v3). "
         "Call this tool with a brief patient context string."
     )
     args_schema: Type[BaseModel] = NurseCollectionInput
@@ -94,6 +98,14 @@ class NurseDataCollectionTool(BaseTool):
         print("\n  [Nurse]: What is your blood pressure? (e.g., 120/80)")
         sbp, dbp = _parse_bp(input("  [You]:   "))
 
+        # Cardiac rhythm
+        print("\n  [Nurse]: Cardiac rhythm — what does the heart monitor show?")
+        print("           (e.g., 'sinus', 'normal sinus rhythm', 'atrial fibrillation',")
+        print("            'afib', 'paced'; skip if no monitor or unknown)")
+        rhythm_raw = input("  [You]:   ").strip()
+        if rhythm_raw.lower() in SKIP_WORDS:
+            rhythm_raw = None
+
         # Medications
         print("\n  [Nurse]: Are you currently taking any medications?")
         print("           (List them separated by commas, or 'none')")
@@ -101,7 +113,8 @@ class NurseDataCollectionTool(BaseTool):
         if meds_raw.lower() in SKIP_WORDS:
             meds_raw = None
 
-        # Build result
+        # Build result. The `rhythm` field is new in v3; the v2 tool ignores
+        # it, so the same nurse output drives both pipelines.
         result = {
             "vital_signs": {
                 "temperature": temp,
@@ -111,11 +124,14 @@ class NurseDataCollectionTool(BaseTool):
                 "sbp": sbp,
                 "dbp": dbp,
             },
+            "rhythm": rhythm_raw,
             "medications_raw": meds_raw,
         }
 
         available = sum(1 for v in result["vital_signs"].values() if v is not None)
         print(f"\n  [Nurse]: Thank you! Collected {available}/6 vital signs.")
+        if rhythm_raw:
+            print(f"           Cardiac rhythm: {rhythm_raw}")
         if meds_raw:
             print(f"           Medications recorded: {meds_raw}")
         else:

@@ -1,13 +1,21 @@
 """
-Data Pipeline for Doctor Agent — MIMIC-IV Emergency Department
+Data Pipeline for Doctor Agent v3 base — MIMIC-IV Emergency Department
 
-Trains two supervised models for admitted patients:
-  1. Diagnosis Category: chief complaints + demographics + triage results → 14 categories
-  2. Department Prediction: same + predicted diagnosis → 11 hospital services
+Same architecture and feature set as Doctor v1, but with two changes:
 
-Uses identical text preprocessing as the triage pipeline.
-Reuses saved triage model artifacts (TF-IDF vectorizer, severity map, acuity/disposition models)
-to generate cascading features.
+  1. The "Symptoms, Signs, Ill-Defined" catch-all class is excluded from
+     training and evaluation. This bucket absorbs ~33% of admitted patients
+     and ~20-28% of misclassifications from every other category. Removing
+     it reframes the task as "given a patient with a clinically meaningful
+     diagnostic category, predict the category and department" — a label
+     space of 13 classes instead of 14.
+
+  2. The 100K stratified sample cap is removed. After exclusion the dataset
+     is ~102K rows, so the pipeline trains on the full filtered set.
+
+Doctor v1 / v2 artifacts and training files are intentionally left unchanged
+so the thesis can present a four-way comparison (v1, v2, v3 base, v3 with
+nurse). Triage stays at v1 — v3 reuses TRIAGE_V1_DIR for cascading features.
 """
 
 import os
@@ -30,93 +38,23 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
 # ---------------------------------------------------------------------------
-# Doctor v1 trains on top of triage v1's tfidf/severity_map/cascading models.
+# Doctor v3 base reuses triage v1's tfidf/severity_map/cascading models
+# (same as v1 and v2 do) and writes artifacts to the new v3_base directory.
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR as TRIAGE_MODELS_DIR,
-    DOCTOR_V1_DIR as DOCTOR_MODELS_DIR,
+    DOCTOR_V3_BASE_DIR as DOCTOR_MODELS_DIR,
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV, SERVICES_CSV,
 )
 
 # ---------------------------------------------------------------------------
-# Category Grouping Maps
+# Reused constants from the v1 pipeline (single source of truth)
 # ---------------------------------------------------------------------------
-
-# Label used for the "Symptoms, Signs, Ill-Defined" catch-all bucket. v1 and
-# v2 keep this class; v3 pipelines (`train_doctor_v3.py`, `train_nurse_v3.py`)
-# import this constant and filter the rows out before training.
-CATCH_ALL_LABEL = "Symptoms, Signs, Ill-Defined"
-
-# 22 raw diagnosis categories → 14 grouped categories
-DIAGNOSIS_GROUP_MAP = {
-    # Keep as-is (large enough)
-    "Symptoms, Signs, Ill-Defined Conditions": "Symptoms, Signs, Ill-Defined",
-    "Circulatory System": "Circulatory",
-    "Digestive System": "Digestive",
-    "Injury and Poisoning": "Injury and Poisoning",
-    "Respiratory System": "Respiratory",
-    "Genitourinary System": "Genitourinary",
-    "Musculoskeletal System": "Musculoskeletal",
-    "Endocrine, Nutritional, Metabolic": "Endocrine, Nutritional, Metabolic",
-    "Mental Disorders": "Mental Disorders",
-    "Skin and Subcutaneous Tissue": "Skin and Subcutaneous Tissue",
-    "Blood and Blood-Forming Organs": "Blood and Blood-Forming Organs",
-    "Infectious and Parasitic Diseases": "Infectious and Parasitic",
-    # Merge: Nervous System variants + Eye + Ear (ICD-9/10 artifact)
-    "Nervous System": "Nervous System and Sense Organs",
-    "Nervous System and Sense Organs": "Nervous System and Sense Organs",
-    "Diseases of the Eye": "Nervous System and Sense Organs",
-    "Diseases of the Ear": "Nervous System and Sense Organs",
-    # Merge small categories into Other
-    "Pregnancy, Childbirth": "Other",
-    "Neoplasms": "Other",
-    "Supplemental / Health Status": "Other",
-    "Congenital Anomalies": "Other",
-    "Invalid Code": "Other",
-    "Perinatal Period Conditions": "Other",
-}
-
-# 19 raw services → 11 grouped services
-SERVICE_GROUP_MAP = {
-    # Keep as-is
-    "MED": "MED",
-    "CMED": "CMED",
-    "NMED": "NMED",
-    "SURG": "SURG",
-    "OMED": "OMED",
-    "ORTHO": "ORTHO",
-    "NSURG": "NSURG",
-    "TRAUM": "TRAUM",
-    # Merge surgical specialties
-    "VSURG": "OTHER_SURG",
-    "TSURG": "OTHER_SURG",
-    "CSURG": "OTHER_SURG",
-    "PSURG": "OTHER_SURG",
-    # Merge OB/GYN
-    "GYN": "OB_GYN",
-    "OBS": "OB_GYN",
-    # Merge small specialties
-    "GU": "OTHER",
-    "PSYCH": "OTHER",
-    "ENT": "OTHER",
-    "EYE": "OTHER",
-    "DENT": "OTHER",
-}
-
-# Human-readable department names (for output)
-DEPARTMENT_NAMES = {
-    "MED": "General Medicine",
-    "CMED": "Cardiac Medicine",
-    "NMED": "Neuro Medicine",
-    "SURG": "General Surgery",
-    "OMED": "Oncology Medicine",
-    "ORTHO": "Orthopedics",
-    "NSURG": "Neurosurgery",
-    "TRAUM": "Trauma",
-    "OTHER_SURG": "Other Surgery (Vascular/Thoracic/Cardiac/Plastic)",
-    "OB_GYN": "Obstetrics / Gynecology",
-    "OTHER": "Other (Urology/Psychiatry/ENT/Eye/Dental)",
-}
-
+from proiect_licenta.training.train_doctor import (
+    CATCH_ALL_LABEL,
+    DIAGNOSIS_GROUP_MAP,
+    SERVICE_GROUP_MAP,
+    DEPARTMENT_NAMES,
+)
 
 # ---------------------------------------------------------------------------
 # Shared complaint preprocessing
@@ -128,9 +66,13 @@ from proiect_licenta.preprocessing import normalize_complaint_text, ABBREVIATION
 # 1. Load & Clean Data — Admitted patients with diagnosis + service
 # ---------------------------------------------------------------------------
 def load_and_clean_data() -> pd.DataFrame:
-    """Load triage + edstays + patients + diagnosis + services for admitted patients."""
+    """Load triage + edstays + patients + diagnosis + services for admitted patients.
+
+    Identical to train_doctor.load_and_clean_data, but filters out the
+    catch-all class after applying the diagnosis grouping.
+    """
     print("=" * 60)
-    print("STEP 1: Loading data (admitted patients only)")
+    print("STEP 1: Loading data (admitted patients only, v3 — catch-all excluded)")
     print("=" * 60)
 
     # Load triage
@@ -195,6 +137,14 @@ def load_and_clean_data() -> pd.DataFrame:
     df["diagnosis_group"] = df["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
     df["service_group"] = df["curr_service"].map(SERVICE_GROUP_MAP).fillna("OTHER")
 
+    # ── v3-specific: drop catch-all class ──
+    before = len(df)
+    df = df[df["diagnosis_group"] != CATCH_ALL_LABEL].reset_index(drop=True)
+    dropped = before - len(df)
+    print(f"\n  [v3] Filtered catch-all '{CATCH_ALL_LABEL}': "
+          f"{before:,} -> {len(df):,} ({dropped:,} dropped, "
+          f"{100 * dropped / before:.1f}%)")
+
     # ── Clean pain ──
     df["pain"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain"].isna().astype(int)
@@ -215,7 +165,7 @@ def load_and_clean_data() -> pd.DataFrame:
     df["admitted"] = 1  # all rows are admitted
 
     # ── Print distributions ──
-    print(f"\n  Diagnosis Category Distribution (grouped):")
+    print(f"\n  Diagnosis Category Distribution (grouped, 13 classes):")
     for cat in df["diagnosis_group"].value_counts().index:
         count = (df["diagnosis_group"] == cat).sum()
         print(f"    {cat:45s} {count:>7,}  ({100 * count / len(df):5.1f}%)")
@@ -345,7 +295,7 @@ def train_diagnosis_model(
 ) -> XGBClassifier:
     """Train diagnosis category model with XGBoost."""
     print("\n" + "=" * 60)
-    print("STEP 4a: Training DIAGNOSIS CATEGORY model (XGBoost)")
+    print("STEP 4a: Training DIAGNOSIS CATEGORY model (XGBoost, v3 base)")
     print("=" * 60)
 
     n_classes = len(label_names)
@@ -408,7 +358,7 @@ def train_department_model(
 ) -> XGBClassifier:
     """Train department prediction model with XGBoost."""
     print("\n" + "=" * 60)
-    print("STEP 4b: Training DEPARTMENT model (XGBoost)")
+    print("STEP 4b: Training DEPARTMENT model (XGBoost, v3 base)")
     print("=" * 60)
 
     n_classes = len(label_names)
@@ -469,10 +419,12 @@ def save_models(
     department_labels: list,
     diagnosis_accuracy: float,
     department_accuracy: float,
+    n_train: int,
+    n_test: int,
 ):
-    """Save trained doctor models and metadata."""
+    """Save trained doctor v3 base models and metadata."""
     print("\n" + "=" * 60)
-    print("STEP 5: Saving doctor model artifacts")
+    print("STEP 5: Saving doctor v3 base model artifacts")
     print("=" * 60)
 
     DOCTOR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -481,7 +433,7 @@ def save_models(
     joblib.dump(department_model, DOCTOR_MODELS_DIR / "department_model.joblib")
 
     metadata = {
-        "version": 1,
+        "version": "3_base",
         "trained_at": datetime.now().isoformat(),
         "diagnosis_labels": diagnosis_labels,
         "department_labels": department_labels,
@@ -491,8 +443,14 @@ def save_models(
         "model_type": "XGBClassifier",
         "n_diagnosis_classes": len(diagnosis_labels),
         "n_department_classes": len(department_labels),
-        "note": "Uses triage model predictions as cascading features. "
-                "Department model also uses predicted diagnosis as input.",
+        "n_train": n_train,
+        "n_test": n_test,
+        "catch_all_excluded": CATCH_ALL_LABEL,
+        "sub_sampled": False,
+        "note": "Doctor v3 base. Catch-all class excluded; full filtered "
+                "dataset (no 100K sub-sample). Same feature set as v1: "
+                "triage TF-IDF + structured + cascading predictions, no "
+                "nurse-collected data. Reuses triage v1 artifacts.",
     }
 
     with open(DOCTOR_MODELS_DIR / "metadata.json", "w", encoding="utf-8") as f:
@@ -509,25 +467,17 @@ def save_models(
 # ---------------------------------------------------------------------------
 def main():
     print("\n" + "#" * 60)
-    print("  Doctor Agent — Model Training Pipeline v1")
-    print("  (Diagnosis Category + Department Prediction)")
+    print("  Doctor Agent — Model Training Pipeline v3 base")
+    print("  (Catch-all excluded, full dataset, no nurse data)")
     print("#" * 60)
 
-    # 1. Load
+    # 1. Load (with catch-all filter applied inside)
     df = load_and_clean_data()
 
-    # 2. Sample 100K rows (stratified by diagnosis)
+    # 2. v3: NO sub-sampling. Train on the full filtered set.
     print("\n" + "=" * 60)
-    print("STEP 2b: Sampling 100K rows (stratified by diagnosis)")
+    print(f"STEP 2b: Using full dataset (no sub-sampling) — {len(df):,} rows")
     print("=" * 60)
-    if len(df) > 100_000:
-        df, _ = train_test_split(
-            df, train_size=100_000, random_state=42,
-            stratify=df["diagnosis_group"],
-        )
-        print(f"  Sampled: {len(df):,} rows")
-    else:
-        print(f"  Using all {len(df):,} rows (under 100K)")
 
     # 3. Build features
     features = build_features(df)
@@ -540,6 +490,11 @@ def main():
 
     y_diagnosis = df["diagnosis_group"].map(diag_label_to_idx).reset_index(drop=True)
     y_department = df["service_group"].map(dept_label_to_idx).reset_index(drop=True)
+
+    # Sanity check: catch-all must really be gone.
+    assert CATCH_ALL_LABEL not in diagnosis_labels, (
+        f"BUG: catch-all label '{CATCH_ALL_LABEL}' is still present in v3 label space"
+    )
 
     print(f"\n  Diagnosis classes ({len(diagnosis_labels)}): {diagnosis_labels}")
     print(f"  Department classes ({len(department_labels)}): {department_labels}")
@@ -579,13 +534,14 @@ def main():
         diagnosis_model, department_model,
         diagnosis_labels, department_labels,
         diag_accuracy, dept_accuracy,
+        n_train=len(X_train), n_test=len(X_test),
     )
 
     print("\n" + "#" * 60)
-    print("  TRAINING COMPLETE!")
+    print("  TRAINING COMPLETE! (v3 base)")
     print("#" * 60)
-    print(f"  Diagnosis accuracy:   {diag_accuracy:.4f}")
-    print(f"  Department accuracy:  {dept_accuracy:.4f}")
+    print(f"  Diagnosis accuracy:   {diag_accuracy:.4f}  ({len(diagnosis_labels)} classes)")
+    print(f"  Department accuracy:  {dept_accuracy:.4f}  ({len(department_labels)} classes)")
     print("#" * 60 + "\n")
 
 

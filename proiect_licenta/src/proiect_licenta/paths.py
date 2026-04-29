@@ -15,8 +15,10 @@ Layout (relative to the project root):
     |   +-- v1/                 # acuity, disposition, tfidf, severity_map, metadata
     |   +-- v2/                 # v1 + vital_medians (with vital signs)
     +-- doctor/
-        +-- v1/                 # diagnosis_model, department_model, metadata
-        +-- v2/                 # same names; trained with nurse data (vitals + meds)
+        +-- v1/                 # diagnosis_model, department_model, metadata (14 classes)
+        +-- v2/                 # same names; trained with nurse data (14 classes)
+        +-- v3_base/            # 13 classes (catch-all dropped), full data, no nurse
+        +-- v3/                 # 13 classes, full data, longitudinal vitals + rhythm + meds
 
 This module sits at src/proiect_licenta/paths.py — `parents[2]` therefore
 resolves to the project root (proiect_licenta/), one level above src/.
@@ -34,6 +36,7 @@ HOSP_DIR = MIMIC_IV_DIR / "hosp"
 
 # Common CSV files
 TRIAGE_CSV = MIMIC_IV_ED_DIR / "triage.csv"
+VITALSIGN_CSV = MIMIC_IV_ED_DIR / "vitalsign.csv"
 EDSTAYS_CSV = MIMIC_IV_ED_DIR / "edstays.csv"
 DIAGNOSIS_CSV = MIMIC_IV_ED_DIR / "files_created" / "categorized_diagnosis.csv"
 MEDRECON_CSV = MIMIC_IV_ED_DIR / "medrecon.csv"
@@ -47,3 +50,8 @@ TRIAGE_V1_DIR = ARTIFACTS_DIR / "triage" / "v1"
 TRIAGE_V2_DIR = ARTIFACTS_DIR / "triage" / "v2"
 DOCTOR_V1_DIR = ARTIFACTS_DIR / "doctor" / "v1"
 DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
+# v3 tier: catch-all class ("Symptoms, Signs, Ill-Defined") excluded, full
+# admitted-patient dataset (no 100K sub-sample), v3_base mirrors v1's
+# feature set, v3 mirrors v2's plus longitudinal vitals + rhythm.
+DOCTOR_V3_BASE_DIR = ARTIFACTS_DIR / "doctor" / "v3_base"
+DOCTOR_V3_DIR = ARTIFACTS_DIR / "doctor" / "v3"

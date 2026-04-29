@@ -161,22 +161,27 @@ doctor_assessment_task:
 
 nurse_data_collection_task:
   description: >
-    The doctor has completed their initial assessment. Now collect vital signs
-    and medication history from the patient to provide additional clinical data.
+    The doctor has completed their initial assessment. Now collect vital signs,
+    cardiac rhythm, and medication history from the patient to provide
+    additional clinical data.
 
     Call the nurse_data_collection tool with a brief patient context string
     summarizing the chief complaints and triage results from prior assessments.
 
     After collecting the data, present a clear summary of what was collected:
     - List each vital sign value (or note which were unavailable)
+    - Note the cardiac rhythm if reported (e.g. sinus, atrial fibrillation, paced)
     - List the medications reported (or note if none/unknown)
-    - Flag any concerning vital sign values
+    - Flag any concerning vital sign values or non-sinus rhythm
 
     Include the FULL JSON output from the tool in your response so the doctor
-    can parse it for the enhanced assessment.
+    can parse it for the enhanced assessment. The JSON now contains a `rhythm`
+    field in addition to `vital_signs` and `medications_raw`; the v2 doctor
+    tool ignores it, the v3 doctor tool consumes it.
   expected_output: >
-    A summary of collected vital signs and medications, plus the full JSON
-    output from the nurse_data_collection tool for the doctor to use.
+    A summary of collected vital signs, cardiac rhythm, and medications, plus
+    the full JSON output from the nurse_data_collection tool for the doctor
+    to use.
   agent: nurse_agent
   context:
     - triage_assessment_task
@@ -195,6 +200,8 @@ doctor_reassessment_task:
        Parse the JSON from the nurse's output to get:
        - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1 if null/missing)
        - medications_raw (the raw medication text, or "unknown" if not provided)
+       - rhythm (the cardiac rhythm string, or "" if not provided) — only
+         used by the v3 tool; the v2 tool ignores this field.
 
     3. IF THE PATIENT IS ADMITTED:
        Call the doctor_prediction_tool_v2 with ALL available data:
@@ -202,6 +209,9 @@ doctor_reassessment_task:
          - predicted_acuity, is_admitted
          - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1.0 for missing)
          - medications_raw
+       (To switch the live runtime to v3: change the tool name above to
+        doctor_prediction_tool_v3, register DoctorPredictionToolV3 in crew.py,
+        and also pass `rhythm` from the nurse JSON.)
 
        Then provide an enhanced assessment that includes:
          - Updated diagnosis category and top alternatives
