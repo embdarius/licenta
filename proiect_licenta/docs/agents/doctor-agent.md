@@ -250,13 +250,81 @@ The Nurse Agent now also asks for cardiac rhythm (`nurse_tool.py` has a new prom
 
 A v3 model can never output "Symptoms, Signs, Ill-Defined" — if a real patient's true category would be that bucket, v3 is *forced* into one of the 13 remaining classes. This is acceptable for the thesis claim ("for patients with a clinically meaningful diagnostic category, v3 achieves X%"), but should be noted in the writeup. v1/v2 remain in the repo as the 14-class fallback if the runtime ever needs to handle catch-all cases. A binary catch-all detector trained on the full 152K could be chained before v3 as a future extension if desired.
 
-### Benchmarks (placeholders — fill in after retrain)
+### Benchmarks
 
-- **v3 base diagnosis:** _top-1: TBD, top-3: TBD, top-5: TBD, kappa: TBD_  (run `uv run train_doctor_v3` then `uv run python benchmarks/benchmark_doctor_v3.py`).
-- **v3 with-nurse diagnosis:** _top-1: TBD, top-3: TBD, top-5: TBD, kappa: TBD_  (run `uv run train_nurse_v3` then `uv run python benchmarks/benchmark_nurse_v3.py`).
-- **Four-way summary table:** `uv run python benchmarks/compare_all_versions.py`.
+Training data: 81,680 stays (test 20,420), random_state=42, 80/20 stratified split on `diagnosis_group`. Best iteration: 1730 (v3 base diagnosis), 1796 (v3 base department), 1709 (v3 nurse diagnosis), 2197 (v3 nurse department).
 
-Estimated lift before retrain: top-1 diagnosis from ~50% (v1, 14-class) to ~65-72% (v3 base, 13-class) just from removing the noisy catch-all. The +longitudinal +rhythm step is expected to add another ~2-4pp on top, with most of that lift on Circulatory + Nervous System (rhythm) and Respiratory + Endocrine (vital trajectories). Surgical departments are not expected to benefit from these additions — see the v2 regression note in [`../future-work.md`](../future-work.md).
+**Headline four-way comparison** (`uv run python benchmarks/compare_all_versions.py`):
+
+| Version    | Diag classes | Top-1 diag | Top-3 diag | Dept classes | Top-1 dept | Top-3 dept | n_train | n_test |
+|------------|--------------|------------|------------|--------------|------------|------------|---------|--------|
+| v1         | 14           | 50.18%     | —          | 11           | 59.13%     | —          | 80K     | 20K    |
+| v2         | 14           | 52.44%     | —          | 11           | 65.04%     | —          | 80K     | 20K    |
+| **v3 base**    | **13**           | **60.09%**     | **82.71%**     | **11**           | **60.66%**     | **92.28%**     | **81,680**  | **20,420** |
+| **v3 nurse**   | **13**           | **63.08%**     | **84.95%**     | **11**           | **67.11%**     | **93.38%**     | **81,680**  | **20,420** |
+
+**Improvement deltas:**
+- v3 base → v3 nurse (same 13-class space, isolates the value of nurse data): **+2.99pp diagnosis, +6.45pp department**. This is slightly larger than the v1→v2 nurse lift (+2.26pp / +5.91pp), suggesting the longitudinal vitals + rhythm features added on top of snapshot vitals are pulling their weight.
+- v1 → v3 base (impact of catch-all exclusion + full dataset, both no-nurse): **+9.91pp diagnosis, +1.53pp department**. Diagnosis benefits massively because the catch-all class was absorbing 20–28% of misclassifications from every other category; department only ticks up because the catch-all was a diagnosis-side problem, not a department-side one.
+- v2 → v3 nurse (full pipeline upgrade — but DIFFERENT label spaces, not apples-to-apples): **+10.64pp diagnosis, +2.07pp department**.
+
+**Top-5 diagnosis accuracy on v3 nurse: 92.43%** — top-5 is essentially the entire useful prediction window, so for clinical decision support where the doctor sees a short ranked list of candidate categories, v3 nurse is near-ceiling on the 13-class task.
+
+**Per-class diagnosis recall — v3 base → v3 nurse (where nurse data moves the needle):**
+
+| Category | v3 base | v3 nurse | Delta | Notes |
+|---|---|---|---|---|
+| Circulatory | 59.2% | 67.8% | **+8.6pp** | Rhythm + HR trends help most |
+| Genitourinary | 37.3% | 42.8% | **+5.5pp** | Often confused with Digestive; vitals help disambiguate |
+| Respiratory | 61.9% | 66.8% | **+4.9pp** | O2 sat / resprate trends help |
+| Endocrine | 35.9% | 39.6% | +3.7pp |  |
+| Injury and Poisoning | 71.0% | 73.0% | +2.0pp |  |
+| Digestive | 78.9% | 80.7% | +1.8pp |  |
+| Infectious | 19.9% | 20.5% | +0.6pp | Still the weakest class |
+| Mental | 80.3% | 79.3% | -1.0pp |  |
+| Musculo | 58.0% | 57.0% | -1.0pp |  |
+| Nervous | 54.8% | 53.7% | -1.1pp |  |
+| Skin | 58.3% | 56.9% | -1.4pp |  |
+| Blood | 40.4% | 36.5% | -3.9pp |  |
+| Other | 23.2% | 18.7% | -4.5pp |  |
+
+**Per-class department recall — v3 base → v3 nurse:**
+
+| Department | v3 base | v3 nurse | Delta |
+|---|---|---|---|
+| MED | 65.4% | 77.2% | **+11.7pp** |
+| OMED | 14.9% | 21.6% | **+6.8pp** |
+| NMED | 69.5% | 73.1% | +3.6pp |
+| CMED | 66.2% | 67.6% | +1.4pp |
+| ORTHO | 65.4% | 64.4% | -1.0pp |
+| NSURG | 41.9% | 40.6% | -1.3pp |
+| TRAUM | 59.5% | 54.8% | -4.7pp |
+| SURG | 56.1% | 51.0% | -5.0pp |
+| OB_GYN | 46.2% | 38.7% | -7.6pp |
+| OTHER | 23.9% | 10.7% | -13.2pp |
+| OTHER_SURG | 36.5% | 23.1% | -13.3pp |
+
+**The "surgical regression" pattern from v2 carries over to v3.** Nurse-collected vitals + medications + rhythm help medical departments (MED, OMED, NMED, CMED) where physiological state directly drives routing, and hurt surgical departments (SURG, TRAUM, OTHER_SURG, OB_GYN, OTHER) where routing depends mostly on injury type already captured in the chief-complaint TF-IDF. This is a structural property of the feature set, not a v3 bug — Phase C of the improvement plan covers a possible fix (specialty-conditional masking of nurse features).
+
+**Top misclassification patterns on v3 base** (the catch-all is gone, so these are *real* category confusions, not labeling noise):
+
+1. Circulatory → Respiratory (14.1% of true Circulatory) — shared symptoms (chest pain, shortness of breath)
+2. Respiratory → Circulatory (12.8%) — same axis
+3. Genitourinary → Digestive (14.8%) — abdominal-pain ambiguity
+4. Skin → Musculoskeletal (14.4%) — limb complaints
+5. Musculoskeletal → Injury (11.3%) — fracture vs musculoskeletal pain
+
+These are the new top error pairs worth attacking next.
+
+**Feature importance:** TF-IDF terms still dominate the top 20 in both v3 base and v3 with-nurse (specific complaint language like "sbo transfer", "pain pregnant", "motor vehicle collision", "sodium level", "sickle cell crisis"). No nurse-specific feature appeared in the top 50 of v3 nurse — yet the model is +3pp diagnosis, +6.5pp department better than v3 base. This means the nurse features contribute through many small interactions rather than as standalone heavy hitters.
+
+**Run the benchmarks yourself:**
+
+```
+uv run python benchmarks/benchmark_doctor_v3.py    # full v3 base report
+uv run python benchmarks/benchmark_nurse_v3.py     # v3 base vs v3 with-nurse
+uv run python benchmarks/compare_all_versions.py   # four-way table
+```
 
 ---
 
