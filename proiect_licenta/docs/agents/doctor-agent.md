@@ -304,7 +304,7 @@ Training data: 81,680 stays (test 20,420), random_state=42, 80/20 stratified spl
 | OTHER | 23.9% | 10.7% | -13.2pp |
 | OTHER_SURG | 36.5% | 23.1% | -13.3pp |
 
-**The "surgical regression" pattern from v2 carries over to v3.** Nurse-collected vitals + medications + rhythm help medical departments (MED, OMED, NMED, CMED) where physiological state directly drives routing, and hurt surgical departments (SURG, TRAUM, OTHER_SURG, OB_GYN, OTHER) where routing depends mostly on injury type already captured in the chief-complaint TF-IDF. This is a structural property of the feature set, not a v3 bug — Phase C of the improvement plan covers a possible fix (specialty-conditional masking of nurse features).
+**The "surgical regression" pattern from v2 carries over to v3.** Nurse-collected vitals + medications + rhythm help medical departments (MED, OMED, NMED, CMED) where physiological state directly drives routing, and hurt surgical departments (SURG, TRAUM, OTHER_SURG, OB_GYN, OTHER) where routing depends mostly on injury type already captured in the chief-complaint TF-IDF. This is a structural property of the feature set, not a v3 bug. See [`../future-work.md`](../future-work.md) for the empirical results of one attempt to address it (specialty-conditional feature gating, reverted) and the architectural two-stage routing direction that remains open.
 
 **Top misclassification patterns on v3 base** (the catch-all is gone, so these are *real* category confusions, not labeling noise):
 

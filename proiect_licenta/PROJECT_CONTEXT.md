@@ -19,7 +19,7 @@ This file is the slim top-level overview. Detailed documentation is split per to
 | [`docs/architecture.md`](docs/architecture.md) | Full agent pipeline diagram, cascading prediction design, shared text preprocessing pipeline, project structure on disk |
 | [`docs/agents/nlp-parser-agent.md`](docs/agents/nlp-parser-agent.md) | NLP Parser Agent (LLM): role, input/output contract, `AskPatientTool` |
 | [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage Agent: acuity + disposition XGBoost models, 2023 features, 66.7% / 75.9% benchmarks, training evolution v1 -> v3b |
-| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2: 4 XGBoost models, diagnosis / department grouping tables, v1 vs v2 comparison, medication classification, vital sign processing |
+| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2 + v3: 6 XGBoost models, diagnosis / department grouping tables, four-way comparison (v1 / v2 / v3 base / v3 with-nurse), medication classification, vital sign processing, longitudinal vitals + rhythm in v3 |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse Agent: interactive collection flow, partial data handling, why a dedicated agent |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference — used tables + inspected-but-unused tables (`vitalsign.csv`, `pyxis.csv`, `admissions.csv`, clinical notes) with leakage considerations |
 | [`docs/future-work.md`](docs/future-work.md) | Why the Doctor v2 gains were modest, prioritized next-step recommendations, Phase 4 Text Generation, Phase 5 Hospital Infrastructure, model-level improvements, known issues |
@@ -28,9 +28,9 @@ This file is the slim top-level overview. Detailed documentation is split per to
 
 ### Repo Conventions (must-knows for editing)
 
-- **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths.
+- **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `DOCTOR_V3_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths.
 - **`src/proiect_licenta/preprocessing.py`** owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1/v2, doctor, nurse, and runtime tools all import from here so training and inference can't drift.
-- **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/{triage,doctor}/{v1,v2}/`. Retrain with `uv run train_*` (see "How to Run").
+- **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/triage/{v1,v2}/` and `artifacts/doctor/{v1,v2,v3_base,v3}/`. Retrain with `uv run train_*` (see "How to Run").
 
 ---
 
@@ -42,22 +42,27 @@ Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
 ```
 
 - **4 agents**, **5 tasks** (the Doctor runs twice).
-- **6 XGBoost models total**: acuity, disposition, diagnosis v1, department v1, diagnosis v2, department v2.
+- **Live runtime uses Doctor v1 + v2** (14-class label space). The diagram above reflects that.
+- **A separate Doctor v3 tier** (catch-all class excluded → 13-class label space, full filtered dataset, longitudinal vitals + rhythm) sits alongside v1/v2 in the repo. Used for training/benchmark comparisons; not currently wired into the live crew.
 - **Cascading:** each model's output feeds the next.
-- See [`docs/architecture.md`](docs/architecture.md) for the full diagram and pipeline design.
+- See [`docs/architecture.md`](docs/architecture.md) for the full diagram and pipeline design, and [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) for the v3 details.
 
 ### Headline Benchmark Numbers
 
 | Model | Top-1 | Top-3 | Notes |
 |---|---|---|---|
-| Triage — Acuity (5 classes) | 66.7% | — | 97.7% within-1-level |
+| Triage — Acuity (5 classes) | 66.7% | — | 97.7% within-1-level (v2: 68.0% with vitals for ambulance/helicopter) |
 | Triage — Disposition (2 classes) | 75.9% | — | ROC AUC 0.84 |
 | Doctor v1 — Diagnosis (14 classes) | 50.2% | 83.6% | 3.05x over random |
 | Doctor v1 — Department (11 classes) | 59.1% | 92.5% | majority baseline 59.9% |
-| Doctor v2 — Diagnosis (14 classes) | **52.4%** | **84.9%** | +2.3pp over v1 |
-| Doctor v2 — Department (11 classes) | **65.0%** | **93.7%** | +5.9pp over v1; beats majority baseline |
+| Doctor v2 — Diagnosis (14 classes) | 52.4% | 84.9% | +2.3pp over v1 |
+| Doctor v2 — Department (11 classes) | 65.0% | 93.7% | +5.9pp over v1; beats majority baseline |
+| Doctor v3 base — Diagnosis (13 classes) | 60.1% | 82.7% | catch-all excluded; full 102K filtered dataset |
+| Doctor v3 base — Department (11 classes) | 60.7% | 92.3% | |
+| Doctor v3 nurse — Diagnosis (13 classes) | **63.1%** | **85.0%** | +3.0pp over v3 base; longitudinal vitals + rhythm |
+| Doctor v3 nurse — Department (11 classes) | **67.1%** | **93.4%** | +6.4pp over v3 base; beats majority baseline |
 
-Full per-class metrics and confusion matrices live in the per-agent docs.
+v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't be compared as if they were. Full per-class metrics and confusion matrices live in the per-agent docs.
 
 ---
 
@@ -71,6 +76,7 @@ Full per-class metrics and confusion matrices live in the per-agent docs.
 6. **100K training cap for doctor models** — To keep training times reasonable while benchmarking. Can be increased to full 157K for production.
 7. **Admitted-only for doctor models** — Diagnosis and department prediction only applies to admitted patients. Discharged patients get a discharge summary instead.
 8. **No ICU data** — Project focuses entirely on the Emergency Department pathway.
+9. **v3 tier (catch-all excluded)** — A separate Doctor v3 model tier excludes the "Symptoms, Signs, Ill-Defined" catch-all class (33% of admitted patients) which acts as a labeling artifact. v3 trains on the full filtered dataset (~102K rows, no 100K cap) and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm aggregated from `vitalsign.csv`. v1/v2 are kept as 14-class baselines for direct thesis comparison.
 
 ---
 
@@ -89,6 +95,12 @@ uv run train_doctor
 # Train/retrain doctor v2 ML models with nurse data (~45 minutes)
 uv run train_nurse
 
+# Train/retrain doctor v3 base (catch-all excluded, full dataset, no nurse) (~40 minutes)
+uv run train_doctor_v3
+
+# Train/retrain doctor v3 with nurse (longitudinal vitals + rhythm + meds) (~70 minutes)
+uv run train_nurse_v3
+
 # Run the full 4-agent, 5-task system interactively
 uv run crewai run
 
@@ -101,6 +113,9 @@ uv run python benchmarks/benchmark_triage_v2.py             # Triage v2 models (
 uv run python benchmarks/benchmark_triage_v2_realistic.py   # Triage v2 under realistic missing-vitals scenario
 uv run python benchmarks/benchmark_doctor.py                # Doctor v1 models
 uv run python benchmarks/benchmark_nurse.py                 # Doctor v1 vs v2 comparison
+uv run python benchmarks/benchmark_doctor_v3.py             # Doctor v3 base (13 classes)
+uv run python benchmarks/benchmark_nurse_v3.py              # Doctor v3 base vs v3 with-nurse
+uv run python benchmarks/compare_all_versions.py            # Four-way table v1/v2/v3-base/v3-nurse
 ```
 
 ### Environment Variables (`.env`)
@@ -116,6 +131,7 @@ GEMINI_API_KEY=<key>
 - **Phase 1 — Triage System:** Complete. See [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md).
 - **Phase 2 — Doctor v1 (initial assessment):** Complete. See [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
 - **Phase 3 — Nurse Agent + Doctor v2:** Complete. See [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) and [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
+- **Doctor v3 tier (catch-all excluded, longitudinal vitals + rhythm):** Complete. See the Phase 3 section of [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md). A separate round of v3 improvements (`is_surgical` flag, Bio_ClinicalBERT embeddings, pairwise refiner) was tried and reverted — see "Empirical findings" in [`docs/future-work.md`](docs/future-work.md).
 - **Phase 4 — Text Generation Agent:** Planned. See [`docs/future-work.md`](docs/future-work.md).
 - **Phase 5 — Hospital Infrastructure:** Planned. See [`docs/future-work.md`](docs/future-work.md).
 
