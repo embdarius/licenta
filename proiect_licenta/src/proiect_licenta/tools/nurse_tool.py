@@ -61,10 +61,12 @@ class NurseCollectionInput(BaseModel):
 class NurseDataCollectionTool(BaseTool):
     name: str = "nurse_data_collection"
     description: str = (
-        "Collects vital signs, cardiac rhythm, and medication history from the "
-        "patient interactively. Asks for: temperature, heart rate, respiratory "
-        "rate, oxygen saturation, blood pressure, cardiac rhythm (e.g. 'sinus' "
-        "or 'atrial fibrillation'), and current medications. The patient can "
+        "Collects vital signs, cardiac rhythm, medication history, and past "
+        "medical history from the patient interactively. Asks for: "
+        "temperature, heart rate, respiratory rate, oxygen saturation, blood "
+        "pressure, cardiac rhythm (e.g. 'sinus' or 'atrial fibrillation'), "
+        "current medications, chronic conditions / PMH (e.g. 'CHF, diabetes'), "
+        "and approximate number of prior hospital admissions. The patient can "
         "skip any question they don't know. Returns structured JSON consumed "
         "by the Doctor prediction tools (v2 and v3). "
         "Call this tool with a brief patient context string."
@@ -113,8 +115,32 @@ class NurseDataCollectionTool(BaseTool):
         if meds_raw.lower() in SKIP_WORDS:
             meds_raw = None
 
-        # Build result. The `rhythm` field is new in v3; the v2 tool ignores
-        # it, so the same nurse output drives both pipelines.
+        # Prior history — Change 1 in v3 nurse. Free-text chronic conditions
+        # / past medical history; parsed against pmh_vocab at inference. The
+        # v2 tool ignores `prior_history` and `n_prior_admissions`, so the
+        # same nurse output still drives the v2 pipeline.
+        print("\n  [Nurse]: Do you have any chronic conditions or past medical")
+        print("           history? (e.g., 'CHF, diabetes, prior stroke'; skip")
+        print("           if none or unknown)")
+        prior_history_raw = input("  [You]:   ").strip()
+        if prior_history_raw.lower() in SKIP_WORDS:
+            prior_history_raw = None
+
+        # Approximate count of prior hospital admissions, optional. -1 means
+        # not collected; 0 means the patient said zero. Both map to the
+        # no_history=1 fallback at the doctor tool unless conditions were
+        # listed above.
+        print("\n  [Nurse]: Roughly how many times have you been admitted to")
+        print("           a hospital before? (a number, or skip)")
+        prior_adm_raw = input("  [You]:   ").strip()
+        if prior_adm_raw.lower() in SKIP_WORDS:
+            n_prior_admissions = -1
+        else:
+            n_prior_admissions = int(_parse_numeric(prior_adm_raw) or -1)
+
+        # Build result. The `rhythm`, `prior_history`, and
+        # `n_prior_admissions` fields are new in v3; the v2 tool ignores
+        # them, so the same nurse output drives both pipelines.
         result = {
             "vital_signs": {
                 "temperature": temp,
@@ -126,6 +152,8 @@ class NurseDataCollectionTool(BaseTool):
             },
             "rhythm": rhythm_raw,
             "medications_raw": meds_raw,
+            "prior_history": prior_history_raw,
+            "n_prior_admissions": n_prior_admissions,
         }
 
         available = sum(1 for v in result["vital_signs"].values() if v is not None)
@@ -136,6 +164,10 @@ class NurseDataCollectionTool(BaseTool):
             print(f"           Medications recorded: {meds_raw}")
         else:
             print("           No medication data provided.")
+        if prior_history_raw:
+            print(f"           Prior history: {prior_history_raw}")
+        if n_prior_admissions >= 0:
+            print(f"           Prior admissions reported: {n_prior_admissions}")
         print(f"{'='*55}")
 
         return json.dumps(result, indent=2)

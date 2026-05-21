@@ -63,6 +63,15 @@ from proiect_licenta.training.train_nurse_v3 import (
     _RHYTHM_BUCKETS,
     _VITAL_COLS_LONG,
     LONG_VITAL_FEATURE_COLS,
+    PMH_FEATURE_COLS,
+    PMH_NO_PRIOR_DAYS,
+)
+
+# PMH vocabulary — same map used at training time. Free-text the patient
+# gives us is parsed against the same keywords so training/inference share
+# the feature space (same parity constraint as med_vocab.py for meds).
+from proiect_licenta.pmh_vocab import (
+    PMH_CATEGORIES, flags_from_text as pmh_flags_from_text,
 )
 
 # Vital sign medians (from training data, used when patient doesn't know)
@@ -214,6 +223,25 @@ class DoctorV3Input(BaseModel):
             "'afib', 'paced', 'sinus tachycardia'. Empty string if unknown."
         ),
     )
+    prior_history: str = Field(
+        default="",
+        description=(
+            "Patient-reported past medical history / chronic conditions / "
+            "prior hospital admissions, free-text. Examples: "
+            "'CHF, type 2 diabetes, prior stroke', 'no significant PMH', "
+            "'asthma and depression'. Empty string if not collected. "
+            "Negations like 'no history of CHF' are handled."
+        ),
+    )
+    n_prior_admissions: int = Field(
+        default=-1,
+        description=(
+            "Number of prior hospital admissions reported by the patient, "
+            "or -1 if not collected. The model treats -1 (or 0 paired with "
+            "an empty prior_history string) as the first-time-patient "
+            "fallback observed at training time."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +277,8 @@ class DoctorPredictionToolV3(BaseTool):
         dbp: float = -1.0,
         medications_raw: str = "unknown",
         rhythm: str = "",
+        prior_history: str = "",
+        n_prior_admissions: int = -1,
     ) -> str:
         """Run v3 doctor prediction with full nurse data."""
 
@@ -463,9 +493,61 @@ class DoctorPredictionToolV3(BaseTool):
             {col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS}
         )
 
+        # ── 10b. PMH features (Change 1) ──
+        # Parse the patient's free-text history through the same PMH
+        # vocabulary used at training time. Empty input -> all flags 0 +
+        # no_history=1, matching the first-time-patient training rows.
+        pmh_text = (prior_history or "").strip()
+        pmh_unknown = pmh_text == "" or pmh_text.lower() in (
+            "skip", "unknown", "no", "none", "n/a", "na", "-",
+            "i don't know", "i dont know", "idk",
+            "no significant", "no significant pmh", "no pmh",
+        )
+        if pmh_unknown:
+            pmh_flags_active: set = set()
+            pmh_no_history = 1
+        else:
+            pmh_flags_active = pmh_flags_from_text(pmh_text)
+            # If the nurse asked but the patient said "no prior admissions",
+            # that's still no_history=1 — vocab gave us zero flags and the
+            # patient self-reports no history.
+            pmh_no_history = 0
+
+        # n_prior_admissions: if the nurse didn't ask, fall back to 0 + no_history;
+        # if the patient reported a number, use it. The same applies to
+        # days_since_last_admission / days_since_last_ed — we can't ask the
+        # patient for an exact date, so we always zero-fill those at
+        # inference. The model sees the same pattern in the no_history=1
+        # training rows.
+        if n_prior_admissions is None or n_prior_admissions < 0:
+            n_prior_adm_val = 0
+            n_prior_ed_val = 0
+            pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
+        else:
+            n_prior_adm_val = int(n_prior_admissions)
+            n_prior_ed_val = 0  # not collected separately at inference
+
+        # If the patient reported conditions, treat them as having history
+        # even if they didn't give a count.
+        if pmh_flags_active and pmh_no_history == 1:
+            pmh_no_history = 0
+
+        pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
+                    for c in PMH_CATEGORIES}
+        pmh_data["n_prior_admissions"] = n_prior_adm_val
+        pmh_data["n_prior_ed_visits"] = n_prior_ed_val
+        pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
+        pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
+        pmh_data["same_complaint_as_prior"] = 0.0
+        pmh_data["no_history"] = pmh_no_history
+
+        pmh_df = pd.DataFrame(
+            {col: [pmh_data[col]] for col in PMH_FEATURE_COLS}
+        )
+
         # ── 11. Assemble full feature vector ──
         features = pd.concat(
-            [triage_features, vitals_df, meds_df, long_df],
+            [triage_features, vitals_df, meds_df, long_df, pmh_df],
             axis=1,
         )
 
@@ -545,6 +627,13 @@ class DoctorPredictionToolV3(BaseTool):
                 "medications_count": med_info["n_medications"],
                 "medication_categories_detected": med_flags_active if med_flags_active else ["None"],
                 "medications_unknown": bool(med_info["meds_unknown"]),
+                "prior_history_raw": prior_history if prior_history else None,
+                "pmh_categories_detected": sorted(pmh_flags_active) if pmh_flags_active else ["None"],
+                "n_prior_admissions_reported": (
+                    n_prior_admissions if n_prior_admissions is not None
+                    and n_prior_admissions >= 0 else None
+                ),
+                "no_history_fallback": bool(pmh_no_history),
             },
             "diagnosis_prediction": {
                 "predicted_category": diag_label,

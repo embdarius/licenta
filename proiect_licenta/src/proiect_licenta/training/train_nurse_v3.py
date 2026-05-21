@@ -17,6 +17,7 @@ those features hook in here, alongside the existing snapshot vitals.
 """
 
 import json
+import re
 import warnings
 from pathlib import Path
 from collections import defaultdict
@@ -32,6 +33,59 @@ from xgboost import XGBClassifier
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------------------------------------------------------------------
+# Optional progress bars (tqdm.auto picks Jupyter widgets in Colab, plain bar
+# in a terminal). If tqdm isn't installed, fall back to a no-op wrapper so
+# local `uv run train_nurse_v3` still works without an extra dependency.
+# ---------------------------------------------------------------------------
+try:
+    from tqdm.auto import tqdm as _tqdm  # type: ignore
+
+    def tqdm(it, **kw):
+        return _tqdm(it, **kw)
+except ImportError:  # pragma: no cover
+
+    def tqdm(it, **kw):  # type: ignore[misc]
+        return it
+
+
+def _make_xgb_progress_callback(n_total: int, desc: str):
+    """Return an XGBoost TrainingCallback that updates a tqdm bar per iteration.
+
+    Falls back to ``None`` if tqdm or the XGBoost callback API isn't available
+    (older XGBoost versions), in which case .fit() runs silently as before.
+    """
+    try:
+        from tqdm.auto import tqdm as _tqdm_cls
+        from xgboost.callback import TrainingCallback
+    except ImportError:
+        return None
+
+    class _TqdmCallback(TrainingCallback):  # type: ignore[misc]
+        def __init__(self):
+            self.pbar = _tqdm_cls(
+                total=n_total, desc=desc, unit="iter", leave=False,
+            )
+
+        def after_iteration(self, model, epoch, evals_log):
+            self.pbar.update(1)
+            # evals_log structure: {'validation_0': {'mlogloss': [v1, v2, ...]}}
+            last_val = None
+            for ds in evals_log:
+                for metric in evals_log[ds]:
+                    vals = evals_log[ds][metric]
+                    if vals:
+                        last_val = vals[-1]
+            if last_val is not None and hasattr(self.pbar, "set_postfix"):
+                self.pbar.set_postfix(mlogloss=f"{last_val:.4f}", refresh=False)
+            return False  # do not stop training
+
+        def after_training(self, model):
+            self.pbar.close()
+            return model
+
+    return _TqdmCallback()
+
+# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
 # ---------------------------------------------------------------------------
 # v3 with-nurse reuses triage v1 base artifacts (tfidf, severity_map,
@@ -42,6 +96,8 @@ from proiect_licenta.paths import (
     DOCTOR_V3_DIR as DOCTOR_MODELS_DIR,
     TRIAGE_CSV, VITALSIGN_CSV, EDSTAYS_CSV, PATIENTS_CSV,
     DIAGNOSIS_CSV, SERVICES_CSV, MEDRECON_CSV,
+    DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
+    DERIVED_DIR,
 )
 
 # ---------------------------------------------------------------------------
@@ -54,6 +110,10 @@ from proiect_licenta.training.train_doctor import (
     DEPARTMENT_NAMES,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
+from proiect_licenta.pmh_vocab import (
+    PMH_CATEGORIES, flags_from_text as pmh_flags_from_text,
+    extract_pmh_section,
+)
 
 # ---------------------------------------------------------------------------
 # Reuse vital + medication helpers from train_nurse (v2)
@@ -176,12 +236,20 @@ def _aggregate_vitalsigns(
     keep_stays = set(stays_df["stay_id"].astype(int).tolist())
 
     # Read in chunks, only keeping the columns + stays we need.
+    # vitalsign.csv has ~1.4M rows; at chunksize=1M that's ~2 chunks.
     chunks = []
-    for chunk in pd.read_csv(
+    vs_reader = pd.read_csv(
         vitalsign_csv_path,
         usecols=["stay_id", "charttime", "temperature", "heartrate",
                  "resprate", "o2sat", "sbp", "dbp", "rhythm"],
         chunksize=1_000_000,
+    )
+    for chunk in tqdm(
+        vs_reader,
+        total=2,
+        desc="    vitalsign.csv",
+        unit="chunk",
+        leave=False,
     ):
         chunk = chunk[chunk["stay_id"].isin(keep_stays)]
         if len(chunk):
@@ -224,7 +292,13 @@ def _aggregate_vitalsigns(
     # ── Per-stay numeric aggregates (skip-NaN) ──
     grouped = vs.groupby("stay_id")
     agg_records = []
-    for stay_id, sub in grouped:
+    for stay_id, sub in tqdm(
+        grouped,
+        total=grouped.ngroups,
+        desc="    long-vitals aggregate",
+        unit="stay",
+        leave=False,
+    ):
         rec = {"stay_id": stay_id}
         for c in _VITAL_COLS_LONG:
             col = sub[c].dropna()
@@ -349,6 +423,349 @@ LONG_VITAL_FEATURE_COLS = (
 
 
 # ---------------------------------------------------------------------------
+# PMH aggregation — Change 1 (prior discharge-note PMH + prior ICD fallback)
+# ---------------------------------------------------------------------------
+# For each stay we emit:
+#   - 13 binary pmh_<group> flags (one per v3 diagnosis class, catch-all
+#     excluded; see PMH_CATEGORIES in pmh_vocab.py).
+#   - n_prior_admissions, n_prior_ed_visits.
+#   - days_since_last_admission, days_since_last_ed (capped at PMH_NO_PRIOR_DAYS
+#     when there is no prior record).
+#   - same_complaint_as_prior (Jaccard on tokenized chief complaint vs the
+#     patient's most recent prior ED visit).
+#   - no_history (1 if the patient has no prior hospital admission AND no
+#     prior ED visit; matches the inference-time zero-fill fallback).
+#
+# Two PMH sources combined with OR:
+#   (a) MIMIC-IV-Note `discharge.csv` — parse the "Past Medical History"
+#       section of each prior discharge summary for the same subject_id.
+#       Map keywords -> diagnosis groups via pmh_vocab.PMH_KEYWORD_MAP.
+#   (b) MIMIC-IV-Hosp `diagnoses_icd.csv` — for prior admissions only,
+#       look up each ICD code in an ICD→category map derived from
+#       `categorized_diagnosis.csv` (the same ED label source used for
+#       supervision). Falls through when the discharge note is missing or
+#       the PMH section was empty.
+#
+# Leakage: zero by construction. Both sources are filtered to
+# prior_admittime < current_intime, so we only ever see history that pre-
+# dates the encounter we're predicting.
+
+# Sentinel for "no prior visit". Picked so the model can distinguish
+# first-time patients (PMH_NO_PRIOR_DAYS) from frequent flyers (small days).
+PMH_NO_PRIOR_DAYS = 9999
+
+# Feature column order. Exposed so doctor_tool_v3 can reproduce the same
+# layout at inference. Sorted PMH categories first (deterministic order
+# matching PMH_CATEGORIES), then the repeat-visit numerics, then the flags.
+PMH_FEATURE_COLS = (
+    [f"pmh_{c}" for c in PMH_CATEGORIES]
+    + [
+        "n_prior_admissions",
+        "n_prior_ed_visits",
+        "days_since_last_admission",
+        "days_since_last_ed",
+        "same_complaint_as_prior",
+        "no_history",
+    ]
+)
+
+
+def _build_icd_to_group(diagnosis_csv_path) -> dict:
+    """Return an ICD code → diagnosis_group lookup derived from the ED label CSV.
+
+    We reuse the same ICD→category mapping that the supervision labels are
+    built from (categorized_diagnosis.csv → DIAGNOSIS_GROUP_MAP). Covers
+    only ICD codes that appear in the ED. Hospital ICDs unique to inpatient
+    encounters will fall through to "no flag" — that's acceptable because
+    the discharge-note PMH path catches most of those anyway.
+    """
+    diag = pd.read_csv(
+        diagnosis_csv_path,
+        usecols=["icd_code", "category"],
+        dtype={"icd_code": str},
+    )
+    diag = diag.dropna(subset=["icd_code", "category"])
+    diag["group"] = diag["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
+    # An ICD code may appear with multiple categories across rows; take the
+    # mode (most common). In practice the mapping is ~1:1, but mode protects
+    # against rare duplicates from typos / coding-system variants.
+    mode = (
+        diag.groupby("icd_code")["group"]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else "Other")
+        .to_dict()
+    )
+    return mode
+
+
+def _normalize_complaint_tokens(text: str) -> set:
+    """Tokenize a normalized chief-complaint string into a token set."""
+    if not isinstance(text, str) or not text:
+        return set()
+    return {tok for tok in re.findall(r"[a-z]+", text.lower()) if len(tok) > 2}
+
+
+def _aggregate_pmh(
+    stays_df: pd.DataFrame,
+    edstays_full: pd.DataFrame,
+    diagnoses_icd_csv_path,
+    admissions_csv_path,
+    discharge_csv_path,
+) -> pd.DataFrame:
+    """Build PMH feature columns for every stay in `stays_df`.
+
+    Parameters
+    ----------
+    stays_df : DataFrame with columns ["stay_id", "subject_id", "intime",
+        "complaint_text_norm"]. `intime` must be datetime64. `complaint_text_norm`
+        is the normalize_complaint_text output for the current stay (used for
+        same_complaint_as_prior).
+    edstays_full : Full edstays DataFrame (every ED visit for every patient,
+        not just admitted). Used to count n_prior_ed_visits and to find the
+        most recent prior chief complaint.
+    diagnoses_icd_csv_path : Path to mimic-iv/hosp/diagnoses_icd.csv
+    admissions_csv_path : Path to mimic-iv/hosp/admissions.csv (for admittime
+        which gates the prior-admission temporal filter).
+    discharge_csv_path : Path to mimic-iv-notes/.../discharge.csv (3.3 GB).
+        Read in chunks; only the subject_ids in `stays_df` are kept.
+
+    Returns
+    -------
+    DataFrame keyed on stay_id with the PMH_FEATURE_COLS columns.
+    """
+    print("  Building PMH features (this is the heaviest step)...")
+    needed_subjects = set(stays_df["subject_id"].astype(int).tolist())
+    print(f"    Target stays: {len(stays_df):,} across {len(needed_subjects):,} patients")
+
+    # ── (1) Prior hospital admissions (subject_id, hadm_id, admittime) ──
+    print("    Loading admissions.csv...")
+    adm = pd.read_csv(
+        admissions_csv_path,
+        usecols=["subject_id", "hadm_id", "admittime"],
+    )
+    adm = adm[adm["subject_id"].isin(needed_subjects)].copy()
+    adm["admittime"] = pd.to_datetime(adm["admittime"], errors="coerce")
+    print(f"    admissions.csv (filtered): {len(adm):,} rows "
+          f"across {adm['subject_id'].nunique():,} subjects")
+
+    # subject_id -> list[(admittime, hadm_id)] sorted by admittime
+    adm_by_subject: dict[int, list] = defaultdict(list)
+    for sid, at, hid in zip(adm["subject_id"], adm["admittime"], adm["hadm_id"]):
+        if pd.notna(at):
+            adm_by_subject[int(sid)].append((at, int(hid)))
+    for sid in adm_by_subject:
+        adm_by_subject[sid].sort()
+
+    # ── (2) Prior ED visits for the same patients (for n_prior_ed_visits and
+    #        same_complaint_as_prior). Build subject -> sorted list of
+    #        (intime, stay_id, chiefcomplaint_norm). ──
+    print("    Indexing prior ED visits...")
+    ed_subset = edstays_full[edstays_full["subject_id"].isin(needed_subjects)].copy()
+    # `intime` from edstays_full may already be datetime; ensure it is.
+    ed_subset["intime"] = pd.to_datetime(ed_subset["intime"], errors="coerce")
+    # Bring chiefcomplaint from triage.csv via a lookup table. The training
+    # pipeline already merged triage into `stays_df` (full chief complaints),
+    # but we need complaints for *every* ED visit, including ones that
+    # weren't admitted. Re-merge from triage.csv.
+    triage_cc = pd.read_csv(TRIAGE_CSV, usecols=["stay_id", "chiefcomplaint"])
+    ed_subset = ed_subset.merge(triage_cc, on="stay_id", how="left")
+    ed_subset["complaint_norm"] = ed_subset["chiefcomplaint"].fillna("").apply(
+        normalize_complaint_text
+    )
+
+    ed_by_subject: dict[int, list] = defaultdict(list)
+    for sid, it, stid, cc in zip(
+        ed_subset["subject_id"], ed_subset["intime"],
+        ed_subset["stay_id"], ed_subset["complaint_norm"],
+    ):
+        if pd.notna(it):
+            ed_by_subject[int(sid)].append((it, int(stid), cc))
+    for sid in ed_by_subject:
+        ed_by_subject[sid].sort()
+
+    # ── (3) ICD-derived PMH flags per hadm_id (fallback / supplement) ──
+    print("    Building ICD->diagnosis_group map from categorized_diagnosis.csv...")
+    icd_to_group = _build_icd_to_group(DIAGNOSIS_CSV)
+    print(f"    ICD codes mapped: {len(icd_to_group):,}")
+
+    print("    Loading diagnoses_icd.csv (181 MB)...")
+    icd_chunks = []
+    for chunk in pd.read_csv(
+        diagnoses_icd_csv_path,
+        usecols=["subject_id", "hadm_id", "icd_code"],
+        dtype={"icd_code": str},
+        chunksize=2_000_000,
+    ):
+        chunk = chunk[chunk["subject_id"].isin(needed_subjects)]
+        if len(chunk):
+            icd_chunks.append(chunk)
+    icd_df = pd.concat(icd_chunks, ignore_index=True) if icd_chunks \
+        else pd.DataFrame(columns=["subject_id", "hadm_id", "icd_code"])
+    print(f"    diagnoses_icd.csv (filtered): {len(icd_df):,} rows")
+
+    # hadm_id -> set of diagnosis_groups
+    icd_pmh_by_hadm: dict[int, set] = defaultdict(set)
+    for hid, code in zip(icd_df["hadm_id"], icd_df["icd_code"]):
+        grp = icd_to_group.get(str(code))
+        if grp and grp != CATCH_ALL_LABEL:
+            icd_pmh_by_hadm[int(hid)].add(grp)
+
+    # ── (4) Discharge-note PMH per hadm_id (richer source) ──
+    print(f"    Parsing discharge.csv ({discharge_csv_path}) — chunked...")
+    if not Path(discharge_csv_path).exists():
+        print(f"    WARNING: {discharge_csv_path} not found — skipping discharge PMH.")
+        note_pmh_by_hadm: dict[int, set] = {}
+    else:
+        note_pmh_by_hadm = _parse_discharge_pmh(discharge_csv_path, needed_subjects)
+    print(f"    Discharge-note PMH parsed for {len(note_pmh_by_hadm):,} admissions")
+
+    # ── (5) Per-stay assembly ──
+    print("    Assembling per-stay PMH features...")
+    out_records = []
+    _iter = zip(
+        stays_df["subject_id"].astype(int),
+        stays_df["stay_id"].astype(int),
+        stays_df["intime"],
+        stays_df["complaint_text_norm"],
+    )
+    for sid, stay_id, intime, complaint_norm in tqdm(
+        _iter,
+        total=len(stays_df),
+        desc="    PMH assembly",
+        unit="stay",
+        leave=False,
+    ):
+        # Prior admissions for this patient (admittime strictly before intime).
+        prior_adm = [(at, hid) for at, hid in adm_by_subject.get(sid, [])
+                     if at < intime]
+        # Prior ED visits (intime strictly before current intime).
+        prior_ed = [(it, _, cc) for it, _, cc in ed_by_subject.get(sid, [])
+                    if it < intime]
+
+        n_prior_adm = len(prior_adm)
+        n_prior_ed = len(prior_ed)
+
+        if prior_adm:
+            days_last_adm = max(
+                0.0,
+                (intime - prior_adm[-1][0]).total_seconds() / 86400.0,
+            )
+            days_last_adm = float(min(days_last_adm, PMH_NO_PRIOR_DAYS))
+        else:
+            days_last_adm = float(PMH_NO_PRIOR_DAYS)
+
+        if prior_ed:
+            days_last_ed = max(
+                0.0,
+                (intime - prior_ed[-1][0]).total_seconds() / 86400.0,
+            )
+            days_last_ed = float(min(days_last_ed, PMH_NO_PRIOR_DAYS))
+        else:
+            days_last_ed = float(PMH_NO_PRIOR_DAYS)
+
+        # Same-complaint Jaccard vs most recent prior ED visit.
+        if prior_ed and complaint_norm:
+            cur_tokens = _normalize_complaint_tokens(complaint_norm)
+            prev_tokens = _normalize_complaint_tokens(prior_ed[-1][2])
+            if cur_tokens and prev_tokens:
+                inter = len(cur_tokens & prev_tokens)
+                union = len(cur_tokens | prev_tokens)
+                same_complaint = inter / union if union else 0.0
+            else:
+                same_complaint = 0.0
+        else:
+            same_complaint = 0.0
+
+        # Union of discharge-note PMH and ICD-derived PMH across all prior
+        # admissions for this patient.
+        flags: set = set()
+        for _, hid in prior_adm:
+            flags |= note_pmh_by_hadm.get(hid, set())
+            flags |= icd_pmh_by_hadm.get(hid, set())
+
+        rec = {"stay_id": stay_id}
+        for cat in PMH_CATEGORIES:
+            rec[f"pmh_{cat}"] = 1 if cat in flags else 0
+        rec["n_prior_admissions"] = n_prior_adm
+        rec["n_prior_ed_visits"] = n_prior_ed
+        rec["days_since_last_admission"] = days_last_adm
+        rec["days_since_last_ed"] = days_last_ed
+        rec["same_complaint_as_prior"] = round(same_complaint, 4)
+        rec["no_history"] = int(n_prior_adm == 0 and n_prior_ed == 0)
+        out_records.append(rec)
+
+    result = pd.DataFrame(out_records)
+    # Coverage stats — how many stays got any PMH flag at all?
+    flag_cols = [c for c in result.columns if c.startswith("pmh_")]
+    any_flag = (result[flag_cols].sum(axis=1) > 0).mean()
+    print(f"    Per-stay PMH coverage: {100*any_flag:.1f}% have ≥1 PMH flag, "
+          f"{100*(1-result['no_history'].mean()):.1f}% have ≥1 prior visit")
+    return result
+
+
+def _parse_discharge_pmh(
+    discharge_csv_path,
+    needed_subjects: set,
+) -> dict:
+    """Chunked parse of discharge.csv -> {hadm_id: set(diagnosis_groups)}.
+
+    Memory-cheap: discharge notes are large but we keep only the
+    PMH-flag set per admission (a few bytes per row). Chunk size is small
+    because each note can be 5-50 KB of text.
+    """
+    note_pmh_by_hadm: dict[int, set] = {}
+    rows_seen = 0
+    rows_kept = 0
+    try:
+        reader = pd.read_csv(
+            discharge_csv_path,
+            usecols=["subject_id", "hadm_id", "text"],
+            chunksize=2000,
+        )
+    except FileNotFoundError:
+        print("    discharge.csv not found — discharge-note PMH skipped.")
+        return note_pmh_by_hadm
+
+    # discharge.csv has ~331K rows; at chunksize=2000 that's ~166 chunks.
+    # `total` is approximate — used only to size the progress bar; tqdm will
+    # gracefully overrun if the count is off.
+    pbar = tqdm(
+        reader,
+        total=170,
+        desc="    discharge.csv",
+        unit="chunk",
+        leave=False,
+    )
+    for i, chunk in enumerate(pbar):
+        rows_seen += len(chunk)
+        # Filter to patients we care about; drop rows without hadm_id (rare).
+        chunk = chunk[chunk["subject_id"].isin(needed_subjects)]
+        chunk = chunk.dropna(subset=["hadm_id", "text"])
+        rows_kept += len(chunk)
+        for hid, text in zip(chunk["hadm_id"], chunk["text"]):
+            section = extract_pmh_section(text)
+            if not section:
+                continue
+            flags = pmh_flags_from_text(section)
+            if flags:
+                # Multiple notes for the same hadm_id (rare): union them.
+                if int(hid) in note_pmh_by_hadm:
+                    note_pmh_by_hadm[int(hid)] |= flags
+                else:
+                    note_pmh_by_hadm[int(hid)] = flags
+        # Live counters on the bar so the user sees PMH coverage growing.
+        if hasattr(pbar, "set_postfix"):
+            pbar.set_postfix(
+                rows=f"{rows_seen:,}",
+                kept=f"{rows_kept:,}",
+                pmh=f"{len(note_pmh_by_hadm):,}",
+                refresh=False,
+            )
+    print(f"    Discharge parse done: {rows_seen:,} rows seen, {rows_kept:,} kept, "
+          f"{len(note_pmh_by_hadm):,} admissions with PMH flags.")
+    return note_pmh_by_hadm
+
+
+# ---------------------------------------------------------------------------
 # 1. Load & Clean Data — admitted patients + vitals + meds, catch-all dropped
 # ---------------------------------------------------------------------------
 def load_and_clean_data() -> pd.DataFrame:
@@ -366,7 +783,9 @@ def load_and_clean_data() -> pd.DataFrame:
     triage = pd.read_csv(TRIAGE_CSV)
     print(f"  triage.csv: {len(triage):,} rows")
 
-    # Load edstays
+    # Load edstays (full file — we need every ED visit per patient for the
+    # PMH features' n_prior_ed_visits / same_complaint_as_prior lookups, not
+    # just admitted stays).
     edstays = pd.read_csv(
         EDSTAYS_CSV,
         usecols=["subject_id", "stay_id", "hadm_id", "intime", "gender",
@@ -469,6 +888,38 @@ def load_and_clean_data() -> pd.DataFrame:
     _fill_longitudinal_vitals(df)
     coverage = (df["has_longitudinal_vitals"] == 1).mean()
     print(f"  Longitudinal vitals coverage: {100*coverage:.1f}% of admitted stays")
+
+    # ── Change 1: PMH features from prior discharge notes + ICDs ──
+    print("\n  Aggregating PMH features from prior encounters...")
+    # The PMH step needs the normalized complaint text on the current row
+    # (for same_complaint_as_prior). Compute it here once so we don't redo
+    # it inside build_features for the merge key.
+    df["complaint_text_norm"] = df["chiefcomplaint"].apply(normalize_complaint_text)
+    pmh_df = _aggregate_pmh(
+        stays_df=df[["stay_id", "subject_id", "intime", "complaint_text_norm"]],
+        edstays_full=edstays,
+        diagnoses_icd_csv_path=DIAGNOSES_ICD_CSV,
+        admissions_csv_path=ADMISSIONS_CSV,
+        discharge_csv_path=DISCHARGE_NOTES_CSV,
+    )
+    df = df.merge(pmh_df, on="stay_id", how="left")
+    # Stays that didn't appear in pmh_df (shouldn't happen, but guard) get
+    # the no_history fallback — identical to the inference-time zero-fill.
+    for col in PMH_FEATURE_COLS:
+        if col not in df.columns:
+            df[col] = 0
+    df["no_history"] = df["no_history"].fillna(1).astype(int)
+    for cat in PMH_CATEGORIES:
+        df[f"pmh_{cat}"] = df[f"pmh_{cat}"].fillna(0).astype(int)
+    df["n_prior_admissions"] = df["n_prior_admissions"].fillna(0).astype(int)
+    df["n_prior_ed_visits"] = df["n_prior_ed_visits"].fillna(0).astype(int)
+    df["days_since_last_admission"] = df["days_since_last_admission"].fillna(
+        PMH_NO_PRIOR_DAYS
+    ).astype(float)
+    df["days_since_last_ed"] = df["days_since_last_ed"].fillna(
+        PMH_NO_PRIOR_DAYS
+    ).astype(float)
+    df["same_complaint_as_prior"] = df["same_complaint_as_prior"].fillna(0.0).astype(float)
 
     # ── Fill missing medication flags (patients with no medrecon data) ──
     med_flag_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
@@ -612,8 +1063,12 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     long_vitals = df[LONG_VITAL_FEATURE_COLS].reset_index(drop=True)
     print(f"  Longitudinal vital + rhythm features: {len(LONG_VITAL_FEATURE_COLS)}")
 
+    # ── Change 1: PMH features (prior discharge notes + prior ICDs) ──
+    pmh = df[PMH_FEATURE_COLS].reset_index(drop=True)
+    print(f"  PMH features: {len(PMH_FEATURE_COLS)}")
+
     # ── Assemble all ──
-    features = pd.concat([triage_features, vitals, meds, long_vitals], axis=1)
+    features = pd.concat([triage_features, vitals, meds, long_vitals, pmh], axis=1)
     print(f"  Total features: {features.shape[1]}")
 
     return features
@@ -637,6 +1092,15 @@ def train_model(
         lambda x: np.sqrt(total / (n_classes * class_counts[x]))
     )
 
+    # Optional tqdm progress bar — one tick per boosting iteration up to
+    # 3000 (early stopping typically lands at 1700-2300). The callback is
+    # None when tqdm isn't installed or XGBoost's callback API is unavailable,
+    # in which case .fit() runs silently as before.
+    progress_cb = _make_xgb_progress_callback(
+        n_total=3000, desc=f"    XGBoost ({model_name})",
+    )
+    callbacks = [progress_cb] if progress_cb is not None else None
+
     model = XGBClassifier(
         n_estimators=3000, max_depth=10, learning_rate=0.02,
         subsample=0.8, colsample_bytree=0.5, colsample_bylevel=0.7,
@@ -644,6 +1108,7 @@ def train_model(
         objective="multi:softprob", num_class=n_classes,
         eval_metric="mlogloss", early_stopping_rounds=100,
         random_state=42, n_jobs=-1, verbosity=0,
+        callbacks=callbacks,
     )
 
     print(f"  Training (up to 3000 trees, lr=0.02, early stopping=100)...")
@@ -708,6 +1173,9 @@ def save_models(
         "longitudinal_window_hours": _LONG_WINDOW_HOURS,
         "rhythm_buckets": _RHYTHM_BUCKETS,
         "long_vital_feature_cols": LONG_VITAL_FEATURE_COLS,
+        "pmh_categories": PMH_CATEGORIES,
+        "pmh_feature_cols": PMH_FEATURE_COLS,
+        "pmh_no_prior_days": PMH_NO_PRIOR_DAYS,
     }
 
     with open(DOCTOR_MODELS_DIR / "metadata.json", "w", encoding="utf-8") as f:

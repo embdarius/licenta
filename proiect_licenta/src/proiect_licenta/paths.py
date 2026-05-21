@@ -43,6 +43,23 @@ MEDRECON_CSV = MIMIC_IV_ED_DIR / "medrecon.csv"
 PATIENTS_CSV = HOSP_DIR / "patients.csv"
 SERVICES_CSV = HOSP_DIR / "services.csv"
 
+# Hospital-wide tables used as PMH sources (Doctor v3 nurse Change 1).
+# diagnoses_icd.csv: ICD codes per prior hospital admission; the ICD->group map
+# is derived from categorized_diagnosis.csv (ED) and reused here.
+DIAGNOSES_ICD_CSV = HOSP_DIR / "diagnoses_icd.csv"
+ADMISSIONS_CSV = HOSP_DIR / "admissions.csv"
+
+# Free-text discharge summaries. The PMH section is parsed per prior admission
+# for the same patient, mapped through pmh_vocab.py, and OR'd with the ICD-
+# derived flags. Nested layout: data/mimic-iv-notes/mimic-iv-notes/note/...
+DISCHARGE_NOTES_CSV = (
+    MIMIC_IV_NOTES_DIR / "mimic-iv-notes" / "note" / "discharge.csv" / "discharge.csv"
+)
+
+# Derived/cached artifacts (e.g., pre-parsed PMH flags) — small files, kept
+# out of memory between training runs. Created on first parse.
+DERIVED_DIR = DATA_DIR / "derived"
+
 # ---- Trained model artifacts --------------------------------------------
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
