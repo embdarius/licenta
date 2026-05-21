@@ -111,9 +111,62 @@ A secondary issue is the renormalization step `sigmoid / sum(sigmoid)` distortin
 2. The blend math should be in **log-space (product-of-experts)** or skip renormalization entirely — both options preserve the multi-label scores' calibration.
 3. For top-3 specifically, taking the top-3 indices from the raw sigmoid vector (no renorm, no blend) might be a stronger baseline than blending — worth a side experiment if Change 2 is ever resurrected.
 
+### 5. Two-stage department head (Change 4) — REVERTED, gate is the bottleneck
+
+Implemented from Tier B item 2 in `plans/analyze-the-project-based-fluttering-charm.md`. The hypothesis: surgical and medical departments need different feature sets — medical routing benefits from nurse-collected vitals (which is why the v1→v2 nurse uplift went +10–13pp on MED/OMED), surgical routing is *hurt* by them (TRAUM, OTHER_SURG, OTHER all regressed −5 to −11pp under v3-nurse vs v3-base). A single binary `is_surgical` flag had already been tried and reverted in an earlier round (entry 1 above). This attempt was the full architectural split — three new XGBoost models alongside the legacy single department head, soft-blended at inference:
+
+- **Gate (binary)** — predicts P(surgical) from base features only (TF-IDF + structured triage + cascading triage preds + cascading diagnosis). No nurse features, no PMH. Trained on the full 81,680-row train split with sqrt-inverse class weighting on the 22.6% / 77.4% surgical / medical split.
+- **Medical head** — 4-class softmax over MED / CMED / NMED / OMED. **Full** v3-nurse feature vector (~2117 cols). Trained on the 63,249 medical-bucket train rows.
+- **Surgical head** — 7-class softmax over SURG / NSURG / ORTHO / TRAUM / OTHER_SURG / OB_GYN / OTHER. **Base + PMH + cascade** only (~2045 cols) — snapshot vitals / meds / longitudinal vitals deliberately omitted on the hypothesis that they hurt surgical routing. Trained on the 18,431 surgical-bucket train rows.
+- **Soft-blend at inference**: `final[c] = P_med * med_softmax(c)` if `c` is medical, `P_surg * surg_softmax(c)` if surgical. Argmax over 11 classes. The legacy single 11-class department model was kept trained alongside as backward-compatible fallback.
+
+Predicted lift per the plan: **+2 to +4pp top-1 department, primarily by recovering TRAUM / OTHER / OTHER_SURG / OB_GYN**.
+
+**Result on the unchanged 20,420-row held-out split (random_state=42):**
+
+| Component | Score |
+|---|---|
+| Department legacy 1-stage (baseline) | **68.61%** top-1, 94.04% top-3, κ=0.5009 |
+| Department Change 4 2-stage (soft-blend) | **67.39%** top-1, 93.41% top-3, κ=0.4856 |
+| **Δ vs legacy** | **−1.22pp top-1, −0.63pp top-3, −0.0152 κ** |
+| Gate binary accuracy | 81.99% |
+| Gate medical recall | 85.9% |
+| Gate surgical recall | 68.3% (31.7% of surgical patients misrouted into the medical head) |
+| Medical head in-bucket top-1 | 82.95% |
+| Surgical head in-bucket top-1 | 69.96% |
+
+**Per-class deltas (2-stage − 1-stage on the same test set):**
+
+| Department | bucket | 1-stage | 2-stage | Δ | n |
+|---|---|---|---|---|---|
+| TRAUM | surgical | 54.4% | 61.1% | **+6.7pp** | 509 |
+| CMED | medical | 68.2% | 69.5% | +1.3pp | 1,683 |
+| OTHER_SURG | surgical | 26.3% | 27.0% | +0.7pp | 540 |
+| NSURG | surgical | 40.7% | 40.9% | +0.2pp | 614 |
+| NMED | medical | 72.3% | 71.4% | −1.0pp | 1,226 |
+| MED | medical | 78.6% | 77.2% | −1.5pp | 12,045 |
+| OMED | medical | 24.9% | 23.4% | −1.6pp | 902 |
+| SURG | surgical | 54.9% | 52.4% | −2.5pp | 1,472 |
+| OB_GYN | surgical | 42.2% | 39.6% | −2.7pp | 225 |
+| ORTHO | surgical | 65.6% | 60.8% | **−4.9pp** | 1,045 |
+| OTHER | surgical | 12.6% | 5.0% | **−7.5pp** | 159 |
+
+**Why it failed.** The gate is the architectural bottleneck. At 82.0% binary accuracy, **31.7% of surgical patients get routed into the medical head**, where they cannot be predicted correctly — the medical head only outputs MED / CMED / NMED / OMED. Soft-blending cannot recover this: even when the gate is uncertain (`p ≈ 0.5`), neither head has any path to a class outside its own bucket, so the blend just averages the two buckets' confident-on-wrong-class predictions. The end-to-end top-1 ceiling is bounded by gate accuracy × in-bucket head accuracy, and that math comes out **below** the legacy single-stage classifier, which has access to all features for an implicit single-step routing+classification decision.
+
+The surgical-recovery hypothesis was *partially* validated — TRAUM did recover +6.7pp under the surgical-only head (consistent with the plan's prediction), and OTHER_SURG / NSURG ticked up slightly. But MED is 12,045 of the 20,420 test rows (59%), and the gate's misrouting cost MED −1.5pp = −181 patients. TRAUM is 509 rows, so +6.7pp = +34 patients. The volume-weighted impact of the medical regressions eats the surgical gains many times over. The architectural split correctly identified *which* patients each model should serve, then immediately lost them at the gate stage.
+
+**Root cause of the gate failure.** The plan deliberately deprived the gate of nurse features (snapshot vitals, meds, longitudinal vitals, rhythm) on the hypothesis that vitals "confuse" surgical routing in the legacy single model. In hindsight this was wrong — vitals are *useful* discriminators for surgical-vs-medical (trauma → tachycardia + hypotension is a distinctive pattern; a sepsis presentation has its own pattern). By denying the gate access to vitals, we created an upstream routing decision strictly worse than what the legacy single-stage classifier implicitly makes. A salvage experiment with a full-feature gate would converge on the legacy model's implicit surgical/medical decision and isn't expected to clear the noise floor — not worth the engineering cost.
+
+**Lessons forward:**
+1. Architectural levers on the routing decision need an **end-to-end gradient** — train the gate jointly with the heads under a single loss (a mixture-of-experts setup with EM-style routing), rather than three independently-fit XGBoost models stitched together at inference.
+2. **Don't deprive a routing classifier of features.** Even if some features are noisy for downstream classes, removing them from the upstream gate is a strictly worse position than the legacy single-stage model that has the same features and just does one classification step.
+3. The −5 to −11pp surgical regression in v3-nurse vs v3-base is **not** a routing problem the gate can fix. It's a feature-information problem (vitals are noisy / uninformative for trauma/ortho/surgical routing) that requires **injury-specific features** (fracture mechanism, MVA detail, fall vs blunt vs penetrating), not architectural surgery on the existing feature set.
+
+The implementation, training pipeline, benchmark wiring, and inference-side soft-blend were all reverted (commit reset to `c40f15b`) — only this writeup is retained.
+
 ### Net assessment
 
-None of the four is worth keeping in its current form. The v3 with-nurse model at commit `34fbe24` (the Change 1 head — TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm + PMH features) remains the best-measured configuration: **64.16% top-1 / 85.71% top-3 / 92.88% top-5 diagnosis, 68.61% top-1 / 94.04% top-3 department**. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag, that the diagnosis ceiling is a labeling problem rather than a text-encoding problem, and that a sibling-head blend needs orthogonal signal to clear the noise floor — feed forward into the recommendations below.
+None of the five experiments above is worth keeping in its current form. The v3 with-nurse model at commit `34fbe24` (the Change 1 head — TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm + PMH features) remains the best-measured configuration: **64.16% top-1 / 85.71% top-3 / 92.88% top-5 diagnosis, 68.61% top-1 / 94.04% top-3 department**. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag *or* a feature-deprived gate, that the diagnosis ceiling is a labeling problem rather than a text-encoding problem, and that a sibling-head blend needs orthogonal signal to clear the noise floor — feed forward into the recommendations below.
 
 ---
 
