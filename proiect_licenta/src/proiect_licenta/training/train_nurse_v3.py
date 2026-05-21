@@ -17,6 +17,7 @@ those features hook in here, alongside the existing snapshot vitals.
 """
 
 import json
+import os
 import re
 import warnings
 from pathlib import Path
@@ -43,6 +44,16 @@ except ImportError:  # pragma: no cover — falls back to legacy "prefit" string
     _HAS_FROZEN = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+# ---------------------------------------------------------------------------
+# XGBoost device / tree method — env-var-driven so the same pipeline runs on
+# Colab GPU without code changes. Defaults reproduce the CPU runtime exactly.
+#   XGB_DEVICE       "cpu" (default) | "cuda" | "cuda:0" ...
+#   XGB_TREE_METHOD  "hist" (default; works on both CPU and GPU in xgboost >= 2.0)
+# Set both via `os.environ` (or `export`) before `uv run train_nurse_v3`.
+# ---------------------------------------------------------------------------
+XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
+XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
 # ---------------------------------------------------------------------------
 # Optional progress bars (tqdm.auto picks Jupyter widgets in Colab, plain bar
@@ -1186,10 +1197,12 @@ def train_model(
         objective="multi:softprob", num_class=n_classes,
         eval_metric="mlogloss", early_stopping_rounds=100,
         random_state=42, n_jobs=-1, verbosity=0,
+        tree_method=XGB_TREE_METHOD, device=XGB_DEVICE,
         callbacks=callbacks,
     )
 
-    print(f"  Training (up to 3000 trees, lr=0.02, early stopping=100)...")
+    print(f"  Training (up to 3000 trees, lr=0.02, early stopping=100, "
+          f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD})...")
     model.fit(
         X_train, y_train, sample_weight=sample_weights,
         eval_set=[(X_test, y_test)], verbose=False,
