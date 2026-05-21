@@ -1075,6 +1075,60 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# A3 — diagnosis softmax cascade helpers
+# ---------------------------------------------------------------------------
+# Replace the legacy single `predicted_diagnosis` int column with 13
+# `diag_proba_<sanitized_label>` float columns (the full softmax over
+# diagnosis classes). The department model can then weight ambiguous
+# predictions ("38% Circulatory, 32% Respiratory") instead of hard-locking
+# to the argmax. Shared between training (where we fit) and inference
+# (where doctor_tool_v3 reproduces the same column layout from the diag
+# model's predict_proba output — XGBoost requires identical column names
+# in identical order between fit and predict).
+import re as _re
+
+
+def _sanitize_label(label: str) -> str:
+    """Convert a diagnosis-group label to a column-name-safe slug.
+
+    "Endocrine, Nutritional, Metabolic" -> "endocrine_nutritional_metabolic"
+    "Nervous System and Sense Organs"   -> "nervous_system_and_sense_organs"
+    """
+    slug = _re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')
+    return slug
+
+
+def build_diag_cascade_cols(diagnosis_labels) -> list:
+    """Return the canonical list of diagnosis-softmax cascade column names.
+
+    Order matches `diagnosis_labels` so the i-th column corresponds to the
+    i-th class in the diagnosis model's predict_proba output.
+    """
+    return [f"diag_proba_{_sanitize_label(l)}" for l in diagnosis_labels]
+
+
+def _attach_diag_cascade(X, diag_model, diag_cascade_cols):
+    """Return X augmented with the diagnosis-softmax cascade columns.
+
+    Uses `predict_proba` then writes 13 float columns into a copy of X.
+    The copy is necessary because we don't want to mutate the caller's
+    feature matrix (the diagnosis model reuses it on a re-fit).
+    """
+    proba = diag_model.predict_proba(X)
+    if proba.shape[1] != len(diag_cascade_cols):
+        raise ValueError(
+            f"Diagnosis model produced {proba.shape[1]} probability columns "
+            f"but {len(diag_cascade_cols)} cascade cols were expected. "
+            f"This usually means the model was trained on a different label "
+            f"space than diagnosis_labels."
+        )
+    Xd = X.copy()
+    for k, col in enumerate(diag_cascade_cols):
+        Xd[col] = proba[:, k]
+    return Xd
+
+
+# ---------------------------------------------------------------------------
 # 3-4. Train models
 # ---------------------------------------------------------------------------
 def train_model(
@@ -1135,6 +1189,7 @@ def save_models(
     diagnosis_accuracy, department_accuracy,
     vital_medians,
     n_train, n_test,
+    diag_cascade_cols=None,
 ):
     """Save v3 doctor (with-nurse) models and metadata."""
     print(f"\n{'='*60}")
@@ -1176,6 +1231,9 @@ def save_models(
         "pmh_categories": PMH_CATEGORIES,
         "pmh_feature_cols": PMH_FEATURE_COLS,
         "pmh_no_prior_days": PMH_NO_PRIOR_DAYS,
+        # A3: department model now cascades the diagnosis softmax (13 cols).
+        # The inference tool reads this list to rebuild the exact same vector.
+        "diag_cascade_cols": diag_cascade_cols,
     }
 
     with open(DOCTOR_MODELS_DIR / "metadata.json", "w", encoding="utf-8") as f:
@@ -1239,10 +1297,15 @@ def main():
     diag_acc = accuracy_score(y_diag_test, diag_model.predict(X_test))
 
     # 6b. Train department model (cascading)
-    X_train_dept = X_train.copy()
-    X_train_dept["predicted_diagnosis"] = diag_model.predict(X_train)
-    X_test_dept = X_test.copy()
-    X_test_dept["predicted_diagnosis"] = diag_model.predict(X_test)
+    # A3 — cascade the diagnosis SOFTMAX (13 probability columns) into the
+    # department model instead of the single argmax integer. The dept model
+    # can then weight "this complaint is 38% Circulatory, 32% Respiratory"
+    # honestly instead of hard-locking to the top-1 diagnosis. Column names
+    # are `diag_proba_<sanitized_label>` so the inference tool can rebuild
+    # the same vector. Persisted in metadata.json as `diag_cascade_cols`.
+    diag_cascade_cols = build_diag_cascade_cols(diagnosis_labels)
+    X_train_dept = _attach_diag_cascade(X_train, diag_model, diag_cascade_cols)
+    X_test_dept = _attach_diag_cascade(X_test, diag_model, diag_cascade_cols)
 
     dept_model = train_model(
         X_train_dept, y_dept_train, X_test_dept, y_dept_test,
@@ -1257,6 +1320,7 @@ def main():
         diag_model, dept_model, diagnosis_labels, department_labels,
         diag_acc, dept_acc, vital_medians,
         n_train=len(X_train), n_test=len(X_test),
+        diag_cascade_cols=diag_cascade_cols,
     )
 
     print(f"\n{'#'*60}")

@@ -65,6 +65,7 @@ from proiect_licenta.training.train_nurse_v3 import (
     LONG_VITAL_FEATURE_COLS,
     PMH_FEATURE_COLS,
     PMH_NO_PRIOR_DAYS,
+    build_diag_cascade_cols,
 )
 
 # PMH vocabulary — same map used at training time. Free-text the patient
@@ -564,8 +565,18 @@ class DoctorPredictionToolV3(BaseTool):
         ]
 
         # ── 13. Predict department (cascading) ──
+        # A3: cascade the full diagnosis softmax (13 probability columns)
+        # instead of the single argmax integer. metadata["diag_cascade_cols"]
+        # gives the canonical column names trained against; we rebuild the
+        # vector here in the same order.
         features_dept = features.copy()
-        features_dept["predicted_diagnosis"] = diag_pred_idx
+        diag_cascade_cols = metadata.get("diag_cascade_cols")
+        if diag_cascade_cols:
+            for k, col in enumerate(diag_cascade_cols):
+                features_dept[col] = float(diag_proba[k])
+        else:
+            # Legacy fallback for older artifacts trained pre-A3 (single int).
+            features_dept["predicted_diagnosis"] = diag_pred_idx
 
         dept_pred_idx = int(department_model.predict(features_dept)[0])
         dept_proba = department_model.predict_proba(features_dept)[0]
