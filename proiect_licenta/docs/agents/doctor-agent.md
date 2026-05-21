@@ -452,8 +452,8 @@ See [`../future-work.md`](../future-work.md) for the full roadmap. Doctor-specif
 - ~~Train on the full 157K admitted rows instead of 100K.~~ **DONE in v3** (~102K filtered).
 - ~~Exploit longitudinal vital signs from `vitalsign.csv`.~~ **DONE in v3 nurse**.
 - ~~Add PMH features from prior discharge notes + ICD codes.~~ **DONE in Change 1 (2026-05-21)**, see the [Change 1 section](#change-1--pmh-features).
-- **Next planned: Change 2** — multi-label seq_num 2, 3 sibling head, blended with the softmax logits at inference. Targets the close-pair confusions (Circ↔Resp, Genit↔Digest). Predicted lift: +1-2pp top-1, +1.5-3pp top-3.
-- **Next planned: Change 3** — Optuna hyperparameter sweep with macro-F1 objective (after Changes 1+2 land).
+- ~~**Change 2** — multi-label seq_num 2, 3 sibling head, blended with the softmax logits at inference.~~ **TRIED AND REVERTED (2026-05-21)**. Lift came in at +0.04pp top-3 best case (well below the +1.5-3pp predicted band). The multilabel head's signal is correlated with the softmax (same features, related labels), not orthogonal — linear blending couldn't extract additional accuracy. See [`../future-work.md`](../future-work.md) "Empirical findings — experiments tried and reverted" entry 4 for the alpha sweep + diagnosis.
+- **Next planned: Change 3** — Optuna hyperparameter sweep with macro-F1 objective. The remaining Tier A lever.
 - Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category.
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue — patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations.
 - Surgical department routing could benefit from injury-specific features rather than vitals.

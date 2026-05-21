@@ -83,9 +83,37 @@ Three small XGBoost discriminators trained to handle the top confusion groups: C
 
 **Conclusion:** the close-call confusion pairs reflect genuine feature ambiguity given the input data, not main-model mistakes that a specialized discriminator can fix. When the main model assigns 38% to Circulatory and 32% to Respiratory, that probability split typically reflects real clinical ambiguity that the discriminator inherits.
 
+### 4. Multi-label sibling head (Change 2) — REVERTED, lift below noise floor
+
+Implemented from Tier A item 2 in `plans/analyze-my-project-based-proud-brooks.md`. A 13-head binary `XGBClassifier(objective="binary:logistic")` sibling — one head per diagnosis category — trained on the same feature matrix as the softmax model, with `scale_pos_weight = sqrt(neg/pos)` for class imbalance. Targets the multi-hot `also_<category>` vector built from `seq_num ∈ {1, 2, 3}` of `categorized_diagnosis.csv`. At inference the sigmoid scores are renormalized (`sigmoid / sum(sigmoid)`) and blended with the softmax via a single scalar α: `p_final = α * p_softmax + (1−α) * sigmoid_renorm`.
+
+Predicted lift band (per the plan): **+1-2pp top-1, +1.5-3pp top-3**.
+
+**Result — α sweep on the unchanged 20,420-row test set (random_state=42 stratified):**
+
+| α | top-1 | Δ vs softmax | top-3 | Δ vs softmax | top-5 | Δ vs softmax |
+|---|---|---|---|---|---|---|
+| 0.00 (multilabel only) | 0.6156 | **−2.60pp** | 0.8317 | **−2.54pp** | 0.9099 | **−1.89pp** |
+| 0.40 (saved default) | 0.6431 | +0.15pp | 0.8494 | **−0.77pp** | 0.9194 | **−0.94pp** |
+| 0.50 (best top-1) | 0.6438 | +0.22pp | 0.8526 | −0.45pp | 0.9220 | −0.68pp |
+| 0.80 | 0.6433 | +0.17pp | 0.8564 | −0.07pp | 0.9285 | −0.03pp |
+| **0.90 (best top-3 / top-5)** | **0.6420** | **+0.04pp** | **0.8575** | **+0.04pp** | **0.9295** | **+0.07pp** |
+| 1.00 (softmax only) | 0.6416 | 0 | 0.8571 | 0 | 0.9288 | 0 |
+
+The 13 binary heads trained cleanly (best_iteration 1182-1499 across the heads; test_logloss 0.09-0.39 by class prevalence), and softmax-only (α=1.0) reproduced the Change 1 baseline exactly (0.6416 / 0.8571 / 0.9288), confirming the softmax pipeline was undisturbed. The lift only shows up at α=0.5 (top-1 +0.22pp, but with top-3 regression −0.45pp) or as noise-floor improvements at α=0.9 (+0.04pp / +0.04pp / +0.07pp).
+
+**Conclusion:** Change 2 didn't deliver the predicted lift because the multilabel head's signal is **highly correlated with the softmax**, not orthogonal to it. Both heads train on the same feature matrix (~2116 cols) over the same 81,680 stays; the multi-hot label is a strict superset of the softmax label (seq_num=1 is in {1, 2, 3} by construction). The blend is two correlated predictors combined linearly — it can't extract much beyond what either does alone.
+
+A secondary issue is the renormalization step `sigmoid / sum(sigmoid)` distorting the multi-label signal: sigmoid scores naturally answer "P(class is present)" and can legitimately sum to >1 for multi-label data, but renormalization compresses them onto a probability simplex they don't live on. The α=0.0 row (−2.5pp top-3) shows the cost of forcing the multilabel scores through this single-class lens.
+
+**Lessons forward:**
+1. If we revisit this, the multilabel head needs **orthogonal signal** — e.g., trained on a different feature subset (only nurse features) or with a different loss (asymmetric / focal for the rare classes).
+2. The blend math should be in **log-space (product-of-experts)** or skip renormalization entirely — both options preserve the multi-label scores' calibration.
+3. For top-3 specifically, taking the top-3 indices from the raw sigmoid vector (no renorm, no blend) might be a stronger baseline than blending — worth a side experiment if Change 2 is ever resurrected.
+
 ### Net assessment
 
-None of the three is worth keeping in its current form. The v3 with-nurse model at commit `0852cff` (TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm) remains the best-measured configuration. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag, and that the diagnosis ceiling is a labeling problem rather than a text-encoding problem — feed forward into the recommendations below.
+None of the four is worth keeping in its current form. The v3 with-nurse model at commit `34fbe24` (the Change 1 head — TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm + PMH features) remains the best-measured configuration: **64.16% top-1 / 85.71% top-3 / 92.88% top-5 diagnosis, 68.61% top-1 / 94.04% top-3 department**. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag, that the diagnosis ceiling is a labeling problem rather than a text-encoding problem, and that a sibling-head blend needs orthogonal signal to clear the noise floor — feed forward into the recommendations below.
 
 ---
 
@@ -110,7 +138,7 @@ Ordered by expected lift per unit of effort.
 ### Tier 3 — architectural changes
 
 9. **Hierarchical diagnosis classifier.** First binary: "Symptoms/Ill-Defined vs real diagnosis". Then, conditional on "real", predict specific category. Addresses the labeling-ceiling issue directly.
-10. **Multi-label training signal.** Use seq_num 2, 3 (secondary and tertiary diagnoses) as additional labels, not just seq_num=1.
+10. ~~**Multi-label training signal.** Use seq_num 2, 3 (secondary and tertiary diagnoses) as additional labels, not just seq_num=1.~~ **TRIED AS CHANGE 2 — REVERTED.** See "Empirical findings — experiments tried and reverted" section above (entry 4). The sibling-head blend lift came in at +0.04pp top-3 best case (noise floor) because the multilabel head shares features and label structure with the softmax — its signal is correlated, not orthogonal. A future attempt would need a different feature subset, a different loss, or a different blend math (log-space / product-of-experts).
 11. **Separate vs unified routing for surgical vs medical departments.** Vitals help MED/CMED/NMED; injury-specific features help SURG/TRAUM/OTHER_SURG. Consider a two-stage department model.
 12. **Radiology reports** — same leakage considerations as `discharge.csv`; useful only as PMH from prior encounters or very early-stay imaging.
 
@@ -129,8 +157,8 @@ Ordered by expected lift per unit of effort.
 - ~~Train on full 157K admitted rows instead of 100K.~~ **DONE in v3** (~102K after catch-all filter, no sub-sample).
 - ~~Explore longitudinal vital signs from `vitalsign.csv` (multiple readings during stay) vs current single triage vitals.~~ **DONE in v3 with-nurse** (4h window aggregation + rhythm bucketing).
 - ~~PMH features from prior encounters (discharge notes + ICD codes).~~ **DONE in Change 1** (2026-05-21) — +1.08pp diagnosis / +1.50pp department.
-- **Next planned: Change 2 — multi-label seq_num 2, 3 sibling head.** Train a 13-d binary "also-this-category" head on the same feature matrix as the softmax model and blend logits at inference. Predicted: +1-2pp top-1, +1.5-3pp top-3 (Tier A item 2 in `plans/analyze-my-project-based-proud-brooks.md`).
-- **Next planned: Change 3 — Optuna hyperparameter sweep with macro-F1 objective.** After Changes 1+2 land. Predicted +0.5-1.5pp top-1, more on minority recall.
+- ~~**Change 2 — multi-label seq_num 2, 3 sibling head.**~~ **TRIED AND REVERTED (2026-05-21).** Lift came in at +0.04pp top-3 best case (well below the +1.5-3pp predicted band). See "Empirical findings — experiments tried and reverted" entry 4 above for the alpha sweep and the diagnosis of why.
+- **Next planned: Change 3 — Optuna hyperparameter sweep with macro-F1 objective.** The remaining Tier A lever. Predicted +0.5-1.5pp top-1, more on minority recall (Tier A item 3 in `plans/analyze-my-project-based-proud-brooks.md`).
 - Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category. (v3 takes the alternate route of excluding the catch-all from training entirely.)
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue, not a model issue — patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations.
 - Surgical department routing could benefit from injury-specific features rather than vitals. *Note: a feature-flag approach (`is_surgical`) was tried in the reverted v3 improvement round — see "Empirical findings" above. The architectural two-stage routing in Tier 3 item 11 remains the open direction.*
