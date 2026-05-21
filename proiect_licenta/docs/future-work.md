@@ -22,6 +22,39 @@ The v1 -> v2 upgrade added 31 new features (20 vital signs + 11 medications) yet
 
 ---
 
+## Empirical findings — experiments shipped
+
+### Change 1 — PMH features from prior discharge notes + ICD fallback (SHIPPED 2026-05-21)
+
+Implemented from the Tier A plan in `plans/analyze-my-project-based-proud-brooks.md`. Added 19 new features to the v3-nurse feature vector (102,100 rows × 2,116 cols):
+
+- 13 binary `pmh_<diagnosis_group>` flags from the "Past Medical History" section of prior MIMIC-IV-Note discharge summaries (3.3 GB), OR'd with prior-admission ICD-derived flags from `mimic-iv/hosp/diagnoses_icd.csv`.
+- 4 repeat-visit numerics (`n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`).
+- 1 same-complaint Jaccard, 1 `no_history` flag.
+
+**Result on the same 20,420-row test split (random_state=42):**
+
+| Metric | v3 nurse pre-PMH | v3 nurse (Change 1) | Δ |
+|---|---|---|---|
+| Top-1 diagnosis | 63.08% | **64.16%** | **+1.08pp** |
+| Top-3 diagnosis | 84.95% | 85.71% | +0.76pp |
+| Top-5 diagnosis | 92.43% | 92.88% | +0.45pp |
+| Top-1 department | 67.11% | **68.61%** | **+1.50pp** |
+| Top-3 department | 93.38% | 94.04% | +0.66pp |
+| Cohen's κ diagnosis | 0.550 | 0.593 | +0.043 |
+| Cohen's κ department | 0.453 | 0.501 | +0.048 |
+
+**Predicted lift band was +2 to +4pp diagnosis**; actual came in below the band. The most likely reason: **~35% of training rows have `no_history=1`** (first-time MIMIC patients with all 13 PMH flags zero). The effective lift on the 65% of rows that do have prior history is closer to +1.7pp diagnosis / +2.3pp department.
+
+Verification gate (per the plan):
+- **19/19 PMH features have non-zero feature-importance gain.** No silent merge failure.
+- **0 PMH features in the top 50.** Matches the existing nurse features' pattern (none of snapshot vitals / meds / longitudinal vitals / rhythm cracked the top 50 either) — features contribute through many small interactions, not as standalone heavy hitters.
+- **No strong class regressed >1.5pp.** Mental Disorders (-0.7pp) and Nervous System (-0.2pp) are within noise. Weakest classes (Other, Genitourinary, Injury, Infectious, Circulatory) gained the most.
+
+Full details, per-class deltas, and implementation pointers live in `docs/agents/doctor-agent.md#change-1--pmh-features`.
+
+---
+
 ## Empirical findings — experiments tried and reverted
 
 A round of v3 improvements was implemented, trained, and benchmarked end-to-end (commit reverted). Three changes were tested together; their cumulative effect on **v3 with-nurse** measured against the unchanged held-out test set (20,420 stays, `random_state=42` stratified split) was **+0.18pp diagnosis** top-1 (63.08% → 63.26%) and **−0.30pp department** top-1 (67.11% → 66.81%). Each experiment, in turn, with the empirical reason for reverting:
@@ -69,7 +102,7 @@ Ordered by expected lift per unit of effort.
 
 ### Tier 2 — medium-lift, needs care
 
-5. **PMH (Past Medical History) features from prior notes.** For each encounter, pull the patient's earlier discharge summaries and extract PMH. Use those as features — not the *current* visit's discharge. This captures chronic conditions far better than `medrecon.csv` alone and has no leakage if restricted to prior encounters.
+5. ~~**PMH (Past Medical History) features from prior notes.**~~ **DONE in Change 1 (2026-05-21)** — see the "Empirical findings — experiments shipped" section above. +1.08pp diagnosis / +1.50pp department on the same held-out test split. The implementation pulls PMH sections from prior discharge summaries via regex + a 397-keyword vocabulary, OR'd with prior-admission ICD-derived flags. Below the predicted +2-4pp band but the lift is real and the verification audit passed.
 6. **`pyxis.csv` (ED meds dispensed)** restricted to the first few minutes after arrival, or used strictly for validation rather than features. Full use risks leaking the working diagnosis.
 7. **Admissions features** (insurance, marital status, language, in-hospital mortality as severity target).
 8. **Race / ethnicity features** from `edstays.csv` — ethically sensitive; should come with a fairness audit.
@@ -94,11 +127,14 @@ Ordered by expected lift per unit of effort.
 
 ### Doctor models
 - ~~Train on full 157K admitted rows instead of 100K.~~ **DONE in v3** (~102K after catch-all filter, no sub-sample).
-- Add second/third diagnoses (seq_num 2, 3) as multi-label training signal.
-- Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category. (v3 takes the alternate route of excluding the catch-all from training entirely.)
 - ~~Explore longitudinal vital signs from `vitalsign.csv` (multiple readings during stay) vs current single triage vitals.~~ **DONE in v3 with-nurse** (4h window aggregation + rhythm bucketing).
+- ~~PMH features from prior encounters (discharge notes + ICD codes).~~ **DONE in Change 1** (2026-05-21) — +1.08pp diagnosis / +1.50pp department.
+- **Next planned: Change 2 — multi-label seq_num 2, 3 sibling head.** Train a 13-d binary "also-this-category" head on the same feature matrix as the softmax model and blend logits at inference. Predicted: +1-2pp top-1, +1.5-3pp top-3 (Tier A item 2 in `plans/analyze-my-project-based-proud-brooks.md`).
+- **Next planned: Change 3 — Optuna hyperparameter sweep with macro-F1 objective.** After Changes 1+2 land. Predicted +0.5-1.5pp top-1, more on minority recall.
+- Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category. (v3 takes the alternate route of excluding the catch-all from training entirely.)
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue, not a model issue — patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations.
 - Surgical department routing could benefit from injury-specific features rather than vitals. *Note: a feature-flag approach (`is_surgical`) was tried in the reverted v3 improvement round — see "Empirical findings" above. The architectural two-stage routing in Tier 3 item 11 remains the open direction.*
+- **PMH vocabulary expansion (Change 1 follow-up, low priority).** The current 397-keyword `pmh_vocab.py` map misses abbreviation variants (`s/p cabg`, `paf`, `chronic afib`, brand-name drugs as condition proxies). Expanding the map is cheap (~30 min effort) and might add another +0.3-0.5pp on top of Change 1.
 
 ---
 
@@ -125,4 +161,11 @@ These are live issues, not roadmap items — fix as opportunity arises.
 3. **Triage training time:** With 3000 trees and 2023 features on 334K samples, training takes ~90 minutes.
 4. **Doctor v1 training time:** With 3000 trees and 2025 features on 80K samples, training takes ~30 minutes (two models). Early stopping typically triggers around iteration 1400-1900.
 5. **Doctor v2 training time:** With 3000 trees and 2056 features on 80K samples, training takes ~45 minutes (two models). The medication aggregation step (3M rows from `medrecon.csv`) adds ~5 minutes to data loading.
-6. **Doctor model accuracy:** Diagnosis accuracy improved from 50.2% (v1) to 52.4% (v2) with vital signs and medications. Department accuracy improved from 59.1% to 65.0%. Further gains likely require richer features (labs, imaging, longitudinal vitals) or a hierarchical classification approach (see Tier 3 above).
+6. **Doctor model accuracy (current state):**
+   - **v1 (14-class baseline):** Diagnosis 50.2% / Department 59.1%.
+   - **v2 (14-class, nurse data):** Diagnosis 52.4% / Department 65.0%.
+   - **v3 base (13-class, catch-all excluded):** Diagnosis 60.1% / Department 60.7%.
+   - **v3 nurse (pre-PMH):** Diagnosis 63.1% / Department 67.1%.
+   - **v3 nurse (Change 1, current):** **Diagnosis 64.2% / Department 68.6%**.
+   - Cumulative v3 base → v3 nurse Change 1: **+4.07pp diagnosis / +7.96pp department**.
+   - Further gains require: Change 2 (multi-label sibling head), Change 3 (Optuna), cleaner labels from discharge summaries, or the architectural two-stage surgical/medical split. See the Tier 1-3 roadmap above.

@@ -59,10 +59,12 @@ Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
 | Doctor v2 — Department (11 classes) | 65.0% | 93.7% | +5.9pp over v1; beats majority baseline |
 | Doctor v3 base — Diagnosis (13 classes) | 60.1% | 82.7% | catch-all excluded; full 102K filtered dataset |
 | Doctor v3 base — Department (11 classes) | 60.7% | 92.3% | |
-| Doctor v3 nurse — Diagnosis (13 classes) | **63.1%** | **85.0%** | +3.0pp over v3 base; longitudinal vitals + rhythm |
-| Doctor v3 nurse — Department (11 classes) | **67.1%** | **93.4%** | +6.4pp over v3 base; beats majority baseline |
+| Doctor v3 nurse — Diagnosis (13 classes) | **64.2%** | **85.7%** | +4.1pp over v3 base; longitudinal vitals + rhythm + PMH (Change 1) |
+| Doctor v3 nurse — Department (11 classes) | **68.6%** | **94.0%** | +8.0pp over v3 base; beats majority baseline |
 
 v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't be compared as if they were. Full per-class metrics and confusion matrices live in the per-agent docs.
+
+> **Note on v3 nurse history:** The current v3 nurse numbers above include **Change 1** (PMH features added 2026-05-21). The pre-Change-1 v3 nurse benchmark (longitudinal vitals + rhythm only, no PMH) was **63.1% diagnosis / 67.1% department**. The +1.1pp diagnosis / +1.5pp department deltas are attributable entirely to the PMH features. See [`docs/agents/doctor-agent.md#change-1--pmh-features`](docs/agents/doctor-agent.md#change-1--pmh-features) for the full breakdown.
 
 ---
 
@@ -77,6 +79,7 @@ v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't 
 7. **Admitted-only for doctor models** — Diagnosis and department prediction only applies to admitted patients. Discharged patients get a discharge summary instead.
 8. **No ICU data** — Project focuses entirely on the Emergency Department pathway.
 9. **v3 tier (catch-all excluded)** — A separate Doctor v3 model tier excludes the "Symptoms, Signs, Ill-Defined" catch-all class (33% of admitted patients) which acts as a labeling artifact. v3 trains on the full filtered dataset (~102K rows, no 100K cap) and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm aggregated from `vitalsign.csv`. v1/v2 are kept as 14-class baselines for direct thesis comparison.
+10. **Change 1 — PMH features (Doctor v3 nurse, 2026-05-21)** — Past Medical History features are derived from prior MIMIC encounters: 13 binary `pmh_<diagnosis_group>` flags parsed from the "Past Medical History" section of prior discharge summaries (`mimic-iv-notes/discharge.csv`, ~3.3 GB) and OR'd with ICD-derived flags from `hosp/diagnoses_icd.csv`, plus 6 repeat-visit numerics (`n_prior_admissions`, `days_since_last_admission`, `same_complaint_as_prior`, etc.). Leakage-free by construction (`prior_admittime < current_intime`). +1.08pp diagnosis / +1.50pp department over the pre-Change-1 v3 nurse baseline. The Nurse Agent now also asks the patient about chronic conditions at inference — zero-fill fallback identical to first-time-patient training rows.
 
 ---
 
@@ -132,6 +135,7 @@ GEMINI_API_KEY=<key>
 - **Phase 2 — Doctor v1 (initial assessment):** Complete. See [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
 - **Phase 3 — Nurse Agent + Doctor v2:** Complete. See [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) and [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
 - **Doctor v3 tier (catch-all excluded, longitudinal vitals + rhythm):** Complete. See the Phase 3 section of [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md). A separate round of v3 improvements (`is_surgical` flag, Bio_ClinicalBERT embeddings, pairwise refiner) was tried and reverted — see "Empirical findings" in [`docs/future-work.md`](docs/future-work.md).
+- **Doctor v3 nurse — Change 1 (PMH features):** Complete (2026-05-21). +1.08pp diagnosis / +1.50pp department on the same held-out test split. All 19 new PMH features show non-zero feature-importance gain (verification gate passed); none crack the top 50, matching the existing nurse features' "many small interactions" contribution pattern. See [Change 1 section](docs/agents/doctor-agent.md#change-1--pmh-features) in the doctor agent doc.
 - **Phase 4 — Text Generation Agent:** Planned. See [`docs/future-work.md`](docs/future-work.md).
 - **Phase 5 — Hospital Infrastructure:** Planned. See [`docs/future-work.md`](docs/future-work.md).
 

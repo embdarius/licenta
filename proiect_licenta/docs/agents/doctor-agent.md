@@ -4,7 +4,7 @@ The Doctor Agent is the only agent in the pipeline that runs **twice**:
 - **Phase 1 (v1):** Initial assessment using triage data only.
 - **Phase 2 (v2):** Enhanced reassessment using triage data **plus** the vital signs and medication list collected by the Nurse Agent.
 
-A **v3 tier** sits alongside v1/v2 (it does not replace them). v3 drops the "Symptoms, Signs, Ill-Defined" catch-all class so the model trains on a clinically meaningful 13-class label space, runs on the full filtered admitted-patient dataset (no 100K cap), and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm from `vitalsign.csv`. v1 and v2 stay in the repo as the 14-class baselines for direct thesis comparison. See the [v3 section](#phase-3--doctor-v3-13-class-label-space) below.
+A **v3 tier** sits alongside v1/v2 (it does not replace them). v3 drops the "Symptoms, Signs, Ill-Defined" catch-all class so the model trains on a clinically meaningful 13-class label space, runs on the full filtered admitted-patient dataset (no 100K cap), and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm from `vitalsign.csv`, plus — as of **Change 1 (2026-05-21)** — Past Medical History features parsed from prior `discharge.csv` notes and `diagnoses_icd.csv`. v1 and v2 stay in the repo as the 14-class baselines for direct thesis comparison. See the [v3 section](#phase-3--doctor-v3-13-class-label-space) below and the [Change 1 section](#change-1--pmh-features) for the PMH details.
 
 This three-phase design lets the user see the initial assessment before any nurse data is collected, and then see how the assessment updates once that extra information is available. It also gives the thesis a concrete before/after comparison of the clinical value of vitals + medications, and a separate comparison of the impact of the catch-all exclusion (v1/v2 vs v3).
 
@@ -238,7 +238,8 @@ v3 is structurally a **separate model tier** rather than a replacement for v1/v2
   - **Longitudinal vital trajectory (24 features):** for each of the 6 vitals, `<vital>_min`, `<vital>_max`, `<vital>_last`, `<vital>_delta` aggregated over readings within `[intime, intime + 4h]` (the 4h window guards against late-stay disposition leakage).
   - **Abnormal-reading counts (7 features):** `n_fever_readings`, `n_tachycardia_readings`, `n_bradycardia_readings`, `n_tachypnea_readings`, `n_hypoxia_readings`, `n_hypertension_readings`, `n_hypotension_readings`.
   - **Cardiac rhythm (10 features):** one-hot over 8 normalized buckets (`sinus`, `sinus_tachy`, `sinus_brady`, `afib_flutter`, `paced`, `av_block`, `svt`, `other`) plus `rhythm_irregular` (any non-sinus reading) plus `has_longitudinal_vitals` (was the stay covered in `vitalsign.csv` at all).
-  - **Total:** ~2097 features (~72 nurse-derived on top of the v3-base 2025).
+  - **PMH features (19 features, added by Change 1 — see dedicated [Change 1 section](#change-1--pmh-features) below):** 13 binary `pmh_<diagnosis_group>` flags from prior discharge-note PMH sections + ICD-derived fallback, plus 4 repeat-visit numerics (`n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`), `same_complaint_as_prior` Jaccard, and `no_history` flag.
+  - **Total:** **~2116 features** (~91 nurse-derived on top of the v3-base 2025).
 
 ### Inference behavior — degraded trajectory at runtime
 
@@ -261,48 +262,53 @@ Training data: 81,680 stays (test 20,420), random_state=42, 80/20 stratified spl
 | v1         | 14           | 50.18%     | —          | 11           | 59.13%     | —          | 80K     | 20K    |
 | v2         | 14           | 52.44%     | —          | 11           | 65.04%     | —          | 80K     | 20K    |
 | **v3 base**    | **13**           | **60.09%**     | **82.71%**     | **11**           | **60.66%**     | **92.28%**     | **81,680**  | **20,420** |
-| **v3 nurse**   | **13**           | **63.08%**     | **84.95%**     | **11**           | **67.11%**     | **93.38%**     | **81,680**  | **20,420** |
+| v3 nurse (pre-PMH) | 13           | 63.08%     | 84.95%     | 11           | 67.11%     | 93.38%     | 81,680  | 20,420 |
+| **v3 nurse (Change 1, PMH)**   | **13**           | **64.16%**     | **85.71%**     | **11**           | **68.61%**     | **94.04%**     | **81,680**  | **20,420** |
 
 **Improvement deltas:**
-- v3 base → v3 nurse (same 13-class space, isolates the value of nurse data): **+2.99pp diagnosis, +6.45pp department**. This is slightly larger than the v1→v2 nurse lift (+2.26pp / +5.91pp), suggesting the longitudinal vitals + rhythm features added on top of snapshot vitals are pulling their weight.
+- v3 base → v3 nurse (pre-PMH) — same 13-class space, isolates the value of snapshot vitals + meds + longitudinal vitals + rhythm: **+2.99pp diagnosis, +6.45pp department**. Slightly larger than the v1→v2 nurse lift (+2.26pp / +5.91pp).
+- v3 nurse (pre-PMH) → v3 nurse (Change 1) — isolates the value of PMH features: **+1.08pp diagnosis, +1.50pp department**. See the [Change 1 section](#change-1--pmh-features) below.
+- v3 base → v3 nurse (Change 1) — cumulative impact of all nurse data: **+4.07pp diagnosis, +7.96pp department**.
 - v1 → v3 base (impact of catch-all exclusion + full dataset, both no-nurse): **+9.91pp diagnosis, +1.53pp department**. Diagnosis benefits massively because the catch-all class was absorbing 20–28% of misclassifications from every other category; department only ticks up because the catch-all was a diagnosis-side problem, not a department-side one.
-- v2 → v3 nurse (full pipeline upgrade — but DIFFERENT label spaces, not apples-to-apples): **+10.64pp diagnosis, +2.07pp department**.
+- v2 → v3 nurse (Change 1) — full pipeline upgrade, but DIFFERENT label spaces, not apples-to-apples: **+11.72pp diagnosis, +3.57pp department**.
 
-**Top-5 diagnosis accuracy on v3 nurse: 92.43%** — top-5 is essentially the entire useful prediction window, so for clinical decision support where the doctor sees a short ranked list of candidate categories, v3 nurse is near-ceiling on the 13-class task.
+**Top-5 diagnosis accuracy on v3 nurse (Change 1): 92.88%** (up from 92.43% pre-PMH) — top-5 is essentially the entire useful prediction window, so for clinical decision support where the doctor sees a short ranked list of candidate categories, v3 nurse is near-ceiling on the 13-class task.
 
-**Per-class diagnosis recall — v3 base → v3 nurse (where nurse data moves the needle):**
+**Per-class diagnosis recall — v3 base → v3 nurse (Change 1):**
 
-| Category | v3 base | v3 nurse | Delta | Notes |
+| Category | v3 base | v3 nurse (pre-PMH) | v3 nurse (Change 1) | base → Change 1 | pre-PMH → Change 1 |
+|---|---|---|---|---|---|
+| Circulatory | 59.2% | 67.8% | 69.3% | **+10.1pp** | +1.5pp |
+| Respiratory | 61.9% | 66.8% | 67.8% | +5.9pp | +1.0pp |
+| Endocrine | 35.9% | 39.6% | 40.9% | +5.0pp | +1.3pp |
+| Genitourinary | 37.3% | 42.8% | 44.5% | **+7.2pp** | +1.7pp |
+| Injury and Poisoning | 71.0% | 73.0% | 74.7% | +3.7pp | +1.7pp |
+| Digestive | 78.9% | 80.7% | 81.6% | +2.7pp | +0.9pp |
+| Infectious | 19.9% | 20.5% | 22.1% | +2.2pp | +1.6pp |
+| Mental | 80.3% | 79.3% | 78.6% | -1.7pp | -0.7pp |
+| Musculo | 58.0% | 57.0% | 57.7% | -0.3pp | +0.7pp |
+| Nervous | 54.8% | 53.7% | 53.5% | -1.3pp | -0.2pp |
+| Skin | 58.3% | 56.9% | 57.1% | -1.2pp | +0.2pp |
+| Blood | 40.4% | 36.5% | 37.3% | -3.1pp | +0.8pp |
+| Other | 23.2% | 18.7% | 21.0% | -2.2pp | **+2.3pp** |
+
+The "pre-PMH → Change 1" column shows where Change 1 (PMH features) specifically moved the needle. The weakest classes — Other, Genitourinary, Injury, Infectious — gained the most; Blood partially recovered from a pre-PMH regression. Strong classes (Mental, Digestive) saw small noise-level changes. See the [Change 1 section](#change-1--pmh-features) for the per-class delta analysis.
+
+**Per-class department recall — v3 base → v3 nurse (Change 1):**
+
+| Department | v3 base | v3 nurse (pre-PMH) | v3 nurse (Change 1) | base → Change 1 |
 |---|---|---|---|---|
-| Circulatory | 59.2% | 67.8% | **+8.6pp** | Rhythm + HR trends help most |
-| Genitourinary | 37.3% | 42.8% | **+5.5pp** | Often confused with Digestive; vitals help disambiguate |
-| Respiratory | 61.9% | 66.8% | **+4.9pp** | O2 sat / resprate trends help |
-| Endocrine | 35.9% | 39.6% | +3.7pp |  |
-| Injury and Poisoning | 71.0% | 73.0% | +2.0pp |  |
-| Digestive | 78.9% | 80.7% | +1.8pp |  |
-| Infectious | 19.9% | 20.5% | +0.6pp | Still the weakest class |
-| Mental | 80.3% | 79.3% | -1.0pp |  |
-| Musculo | 58.0% | 57.0% | -1.0pp |  |
-| Nervous | 54.8% | 53.7% | -1.1pp |  |
-| Skin | 58.3% | 56.9% | -1.4pp |  |
-| Blood | 40.4% | 36.5% | -3.9pp |  |
-| Other | 23.2% | 18.7% | -4.5pp |  |
-
-**Per-class department recall — v3 base → v3 nurse:**
-
-| Department | v3 base | v3 nurse | Delta |
-|---|---|---|---|
-| MED | 65.4% | 77.2% | **+11.7pp** |
-| OMED | 14.9% | 21.6% | **+6.8pp** |
-| NMED | 69.5% | 73.1% | +3.6pp |
-| CMED | 66.2% | 67.6% | +1.4pp |
-| ORTHO | 65.4% | 64.4% | -1.0pp |
-| NSURG | 41.9% | 40.6% | -1.3pp |
-| TRAUM | 59.5% | 54.8% | -4.7pp |
-| SURG | 56.1% | 51.0% | -5.0pp |
-| OB_GYN | 46.2% | 38.7% | -7.6pp |
-| OTHER | 23.9% | 10.7% | -13.2pp |
-| OTHER_SURG | 36.5% | 23.1% | -13.3pp |
+| MED | 65.4% | 77.2% | 78.6% | **+13.2pp** |
+| OMED | 14.9% | 21.6% | 24.9% | **+10.0pp** |
+| NMED | 69.5% | 73.1% | 72.3% | +2.8pp |
+| CMED | 66.2% | 67.6% | 68.2% | +2.0pp |
+| ORTHO | 65.4% | 64.4% | 65.6% | +0.2pp |
+| NSURG | 41.9% | 40.6% | 40.7% | -1.2pp |
+| TRAUM | 59.5% | 54.8% | 54.4% | -5.1pp |
+| SURG | 56.1% | 51.0% | 54.9% | -1.2pp |
+| OB_GYN | 46.2% | 38.7% | 42.2% | -4.0pp |
+| OTHER | 23.9% | 10.7% | 12.6% | -11.3pp |
+| OTHER_SURG | 36.5% | 23.1% | 26.3% | -10.2pp |
 
 **The "surgical regression" pattern from v2 carries over to v3.** Nurse-collected vitals + medications + rhythm help medical departments (MED, OMED, NMED, CMED) where physiological state directly drives routing, and hurt surgical departments (SURG, TRAUM, OTHER_SURG, OB_GYN, OTHER) where routing depends mostly on injury type already captured in the chief-complaint TF-IDF. This is a structural property of the feature set, not a v3 bug. See [`../future-work.md`](../future-work.md) for the empirical results of one attempt to address it (specialty-conditional feature gating, reverted) and the architectural two-stage routing direction that remains open.
 
@@ -316,7 +322,7 @@ Training data: 81,680 stays (test 20,420), random_state=42, 80/20 stratified spl
 
 These are the new top error pairs worth attacking next.
 
-**Feature importance:** TF-IDF terms still dominate the top 20 in both v3 base and v3 with-nurse (specific complaint language like "sbo transfer", "pain pregnant", "motor vehicle collision", "sodium level", "sickle cell crisis"). No nurse-specific feature appeared in the top 50 of v3 nurse — yet the model is +3pp diagnosis, +6.5pp department better than v3 base. This means the nurse features contribute through many small interactions rather than as standalone heavy hitters.
+**Feature importance:** TF-IDF terms still dominate the top 20 in both v3 base and v3 with-nurse (specific complaint language like "sbo transfer", "pain pregnant", "motor vehicle collision", "sodium level", "sickle cell crisis"). **No nurse-specific feature has ever appeared in the top 50 of v3 nurse** — including the 19 new PMH features from Change 1 — yet the model is +4.07pp diagnosis, +7.96pp department better than v3 base. Nurse features contribute through many small interactions rather than as standalone heavy hitters; an importance-rank-only audit would understate their value.
 
 **Run the benchmarks yourself:**
 
@@ -328,11 +334,102 @@ uv run python benchmarks/compare_all_versions.py   # four-way table
 
 ---
 
+## Change 1 — PMH features
+
+Added to v3 nurse on **2026-05-21**. The first lever from the four-way analytical-improvement plan (`plans/analyze-my-project-based-proud-brooks.md`).
+
+### What it adds (19 new feature columns)
+
+For each training stay, the pipeline looks at the same `subject_id`'s **strictly prior** hospital admissions and ED visits and computes:
+
+- **13 binary `pmh_<diagnosis_group>` flags** — one per v3 diagnosis class (catch-all excluded). A flag is 1 if the patient has any prior admission documented as that diagnosis group. Two PMH sources OR'd together:
+  - **Prior discharge-summary PMH sections** (richer). Streamed from `data/mimic-iv-notes/.../discharge.csv` (~3.3 GB), regex-extracted via `extract_pmh_section()` in `pmh_vocab.py`, run through a 397-keyword vocabulary mapping conditions (CHF, T2DM, COPD, sickle cell, etc.) to diagnosis groups, with negation handling ("no history of CHF" / "denies seizures" do not flag).
+  - **Prior ICD-derived flags** (fallback / supplement). For patients without prior discharge notes, prior `hadm_id`s in `hosp/diagnoses_icd.csv` get mapped through the same ICD→category map used for supervision labels.
+- **4 repeat-visit numerics**: `n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`. Capped at `PMH_NO_PRIOR_DAYS = 9999` for first-time patients.
+- **1 same-complaint Jaccard**: `same_complaint_as_prior` — token-set Jaccard between the current normalized chief complaint and the patient's most recent prior ED chief complaint.
+- **1 no-history flag**: `no_history` — 1 if the patient has no prior MIMIC encounters at all.
+
+Total new features: **19** (was ~2097 pre-PMH → ~2116 post-PMH).
+
+**Leakage:** zero by construction. The discharge-note PMH section is established at the patient's *prior* discharge, before the encounter being predicted. The filter is `prior_admittime < current_intime` for ICD-derived flags and `prior_dischtime < current_intime` for discharge-note PMH.
+
+### Inference behavior
+
+The Nurse Agent gained two new prompts in [`nurse_tool.py`](../../src/proiect_licenta/tools/nurse_tool.py): "Do you have any chronic conditions or past medical history?" and "Roughly how many times have you been admitted before?" The patient can skip either; `doctor_tool_v3` parses the answer through the same 397-keyword vocab and zero-fills if absent. A patient who skips the prompt produces the same all-zero PMH vector as a first-time-patient training row, so the model learned a consistent representation.
+
+### Benchmark results — pre-PMH vs Change 1
+
+Same held-out 20,420-row test split (random_state=42 stratified). v3 base = same artifact (no PMH, identical training data).
+
+| Metric | v3 nurse (pre-PMH) | v3 nurse (Change 1) | Δ |
+|---|---|---|---|
+| **Top-1 diagnosis** | 63.08% | **64.16%** | **+1.08pp** |
+| **Top-3 diagnosis** | 84.95% | **85.71%** | +0.76pp |
+| **Top-5 diagnosis** | 92.43% | **92.88%** | +0.45pp |
+| Cohen's κ diagnosis | 0.550 | **0.593** | +0.043 |
+| **Top-1 department** | 67.11% | **68.61%** | **+1.50pp** |
+| **Top-3 department** | 93.38% | **94.04%** | +0.66pp |
+| Cohen's κ department | 0.453 | **0.501** | +0.048 |
+
+PMH coverage during training: **61% of admitted stays had ≥1 PMH flag set**; 64.8% had ≥1 prior MIMIC encounter (i.e., ~35% of training rows are first-time MIMIC patients with all PMH flags zero — those rows contribute nothing to Change 1). The effective lift on the 65% of rows that *do* have prior history is closer to **+1.7pp diagnosis / +2.3pp department**.
+
+### Per-class lift attributable to Change 1 (pre-PMH → Change 1)
+
+Most weak classes gained; one previously-regressing class (Blood) partially recovered; strong classes saw small noise-level changes.
+
+| Category | Pre-PMH | Change 1 | Δ | Notes |
+|---|---|---|---|---|
+| Other | 18.7% | 21.0% | **+2.3pp** | Biggest gain; the most-heterogeneous class benefits from chronic-condition priors |
+| Genitourinary | 42.8% | 44.5% | +1.7pp | Recurrent UTI / CKD / dialysis PMH disambiguates from Digestive |
+| Injury | 73.0% | 74.7% | +1.7pp | Prior trauma / fracture / mva history |
+| Infectious | 20.5% | 22.1% | +1.6pp | Sickle cell / immunocompromised / HIV history matters |
+| Circulatory | 67.8% | 69.3% | +1.5pp | Prior CHF / CAD / MI admissions are strong priors |
+| Endocrine | 39.6% | 40.9% | +1.3pp | Prior DM / thyroid / adrenal disease |
+| Respiratory | 66.8% | 67.8% | +1.0pp | Prior COPD / asthma / OSA |
+| Digestive | 80.7% | 81.6% | +0.9pp | Already strong; small gain |
+| Blood | 36.5% | 37.3% | +0.8pp | Recovers ~20% of the pre-PMH regression vs v3 base (40.4%) |
+| Musculo | 57.0% | 57.7% | +0.7pp | |
+| Skin | 56.9% | 57.1% | +0.2pp | |
+| Nervous | 53.7% | 53.5% | -0.2pp | Noise |
+| Mental | 79.3% | 78.6% | -0.7pp | Already strong; small noise drop |
+
+No class regressed >1.5pp — verification gate from the plan passes.
+
+### Feature-importance audit (verification gate)
+
+| Check | Result |
+|---|---|
+| PMH features with non-zero gain | **19 / 19** (no silent merge failure) |
+| PMH features in top 50 by gain | 0 (matches pre-PMH nurse features' pattern — top 50 is TF-IDF-dominated) |
+| PMH coverage in training | 61% have ≥1 flag set; 35% are first-time patients (no_history=1) |
+
+The fact that no `pmh_*` column cracks the top 50 by gain is **expected**, not a bug — none of the existing nurse features (snapshot vitals, meds, longitudinal vitals, rhythm) ever did either. All 19 having non-zero gain confirms the merge is healthy and the trees are using the features through many small interactions.
+
+### Implementation
+
+- **Vocabulary:** [`src/proiect_licenta/pmh_vocab.py`](../../src/proiect_licenta/pmh_vocab.py) — 397 keyword → diagnosis-group entries, regex-based section extractor for MIMIC discharge notes (handles both `PMH: CHF, DM` same-line layouts and `PMH:\n1. CHF\n2. DM` own-line layouts), negation neutralizer ("no history of", "denies", "negative for").
+- **Aggregator:** `_aggregate_pmh()` and `_parse_discharge_pmh()` in [`src/proiect_licenta/training/train_nurse_v3.py`](../../src/proiect_licenta/training/train_nurse_v3.py). Chunked discharge.csv pass (~166 chunks of 2000 rows; tqdm-wrapped progress bar in Colab).
+- **Inference:** [`src/proiect_licenta/tools/doctor_tool_v3.py`](../../src/proiect_licenta/tools/doctor_tool_v3.py) parses the new `prior_history` and `n_prior_admissions` fields from the Nurse Agent's JSON output, builds the 19-column PMH vector, falls back to all-zeros + `no_history=1` if absent.
+- **Nurse prompts:** [`src/proiect_licenta/tools/nurse_tool.py`](../../src/proiect_licenta/tools/nurse_tool.py) and [`src/proiect_licenta/config/tasks.yaml`](../../src/proiect_licenta/config/tasks.yaml).
+- **Paths added:** `DISCHARGE_NOTES_CSV`, `DIAGNOSES_ICD_CSV`, `ADMISSIONS_CSV` in [`paths.py`](../../src/proiect_licenta/paths.py).
+
+### Result vs prediction, and why
+
+The plan's predicted band was +2 to +4pp diagnosis. Actual: **+1.08pp** — about 1pp below the midpoint. Likely reasons:
+
+1. **~35% of rows are first-time MIMIC patients** (`no_history=1`). For those rows all 13 PMH flags are zero, and Change 1 contributes nothing. The plan assumed broader prior-encounter coverage.
+2. **PMH keyword vocabulary has gaps.** 397 keywords cover the common conditions but miss many abbreviation variants (`s/p cabg`, `paf`, brand-name drugs as condition proxies). Expanding the vocab is a cheap follow-up if Change 2 underdelivers.
+3. **The numeric features (`days_since_*`, `n_prior_*`) are coarse.** The XGBoost trees probably use them mostly as the "is it 9999? (= no_history)" split, leaving subtler dose-response signal on the table.
+
+None of these block moving to Change 2 (multi-label seq_num 2,3 sibling head) — Change 1's verification gate has passed and the lift is real.
+
+---
+
 ## Tools
 
 - **`DoctorPredictionTool` (v1)** — `src/proiect_licenta/tools/doctor_tool.py`. Wraps the diagnosis v1 + department v1 models, rebuilds the 2025-feature vector from triage output.
 - **`DoctorPredictionToolV2` (v2)** — `src/proiect_licenta/tools/doctor_tool_v2.py`. Wraps the diagnosis v2 + department v2 models, builds the 2056-feature vector, applies vital imputation and medication classification, and emits a JSON result that includes a `nurse_data_used` section so the output makes the comparison with v1 explicit.
-- **`DoctorPredictionToolV3` (v3)** — `src/proiect_licenta/tools/doctor_tool_v3.py`. Wraps the v3 diagnosis + department models, accepts the nurse's `rhythm` field, rebuilds the ~2097-feature vector, and uses the snapshot-as-trajectory fallback described above. Output JSON includes `rhythm_raw`, `rhythm_bucket`, and `rhythm_irregular` under `nurse_data_used`, plus a `label_space` note flagging that catch-all is excluded.
+- **`DoctorPredictionToolV3` (v3)** — `src/proiect_licenta/tools/doctor_tool_v3.py`. Wraps the v3 diagnosis + department models, accepts the nurse's `rhythm`, `prior_history`, and `n_prior_admissions` fields, rebuilds the ~2116-feature vector (including the 19 Change 1 PMH columns), and uses the snapshot-as-trajectory fallback for longitudinal vitals plus the all-zero + `no_history=1` fallback for PMH when the nurse doesn't collect it. Output JSON includes `rhythm_raw`, `rhythm_bucket`, `rhythm_irregular`, `prior_history_raw`, `pmh_categories_detected`, `n_prior_admissions_reported`, and `no_history_fallback` under `nurse_data_used`, plus a `label_space` note flagging that catch-all is excluded.
 
 All three tools lazy-load their artifacts at first use.
 
@@ -343,7 +440,7 @@ All three tools lazy-load their artifacts at first use.
 - **v1 pipeline:** `src/proiect_licenta/training/train_doctor.py`. Run with `uv run train_doctor` (~30 minutes for both v1 models on 80K samples; early stopping typically triggers around iteration 1400-1900).
 - **v2 pipeline:** `src/proiect_licenta/training/train_nurse.py`. Run with `uv run train_nurse` (~45 minutes for both v2 models on 80K samples; medication aggregation over 3M rows from `medrecon.csv` adds ~5 minutes to data loading).
 - **v3 base pipeline:** `src/proiect_licenta/training/train_doctor_v3.py`. Run with `uv run train_doctor_v3`. Same architecture as v1 but filters the catch-all class and trains on the full ~102K filtered admitted-patient set (no sub-sample). Expected runtime ~40 minutes.
-- **v3 with-nurse pipeline:** `src/proiect_licenta/training/train_nurse_v3.py`. Run with `uv run train_nurse_v3`. v3 base + snapshot vitals + medications + longitudinal vitals/rhythm from `vitalsign.csv`. Expected runtime ~70 minutes (the chunked load of the 115 MB `vitalsign.csv` adds ~10 minutes; the 4-hour time-window filter is applied during aggregation).
+- **v3 with-nurse pipeline:** `src/proiect_licenta/training/train_nurse_v3.py`. Run with `uv run train_nurse_v3`. v3 base + snapshot vitals + medications + longitudinal vitals/rhythm from `vitalsign.csv` + **PMH features (Change 1)** parsed from prior `discharge.csv` notes and `diagnoses_icd.csv`. Expected runtime ~40 minutes on Colab CPU / ~70 minutes locally (the chunked discharge.csv parse adds ~15-25 minutes on top of the prior ~70-minute pipeline; the 4-hour time-window filter is applied during longitudinal-vital aggregation; PMH is gated by `prior_admittime < current_intime` for leakage safety). tqdm progress bars cover the discharge.csv parse, PMH assembly, longitudinal-vitals aggregation, and each XGBoost boosting iteration.
 
 The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, stratified on `diagnosis_group`) so v1 and v2 can be evaluated on identical test sets for direct comparison. v3 base and v3 with-nurse share their own filtered split (also `random_state=42`, also stratified on `diagnosis_group`) so they can be compared to each other on identical 13-class test sets. v1/v2 (14-class, sampled) and v3 (13-class, full) are not on identical test sets and should not be compared as if they were — `benchmarks/compare_all_versions.py` flags this in its output.
 
@@ -352,9 +449,12 @@ The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, str
 ## Open Improvements
 
 See [`../future-work.md`](../future-work.md) for the full roadmap. Doctor-specific headline items:
-- Train on the full 157K admitted rows instead of 100K.
-- Add second/third diagnoses (seq_num 2, 3) as multi-label training signal.
+- ~~Train on the full 157K admitted rows instead of 100K.~~ **DONE in v3** (~102K filtered).
+- ~~Exploit longitudinal vital signs from `vitalsign.csv`.~~ **DONE in v3 nurse**.
+- ~~Add PMH features from prior discharge notes + ICD codes.~~ **DONE in Change 1 (2026-05-21)**, see the [Change 1 section](#change-1--pmh-features).
+- **Next planned: Change 2** — multi-label seq_num 2, 3 sibling head, blended with the softmax logits at inference. Targets the close-pair confusions (Circ↔Resp, Genit↔Digest). Predicted lift: +1-2pp top-1, +1.5-3pp top-3.
+- **Next planned: Change 3** — Optuna hyperparameter sweep with macro-F1 objective (after Changes 1+2 land).
 - Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category.
-- Exploit longitudinal vital signs from `vitalsign.csv` (1.4M readings during stay) vs the current single triage vitals.
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue — patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations.
 - Surgical department routing could benefit from injury-specific features rather than vitals.
+- Cleaner labels from `discharge.csv` (extract physician's discharge diagnosis) — highest-ceiling deferred lever per `future-work.md` Tier 1 #3.
