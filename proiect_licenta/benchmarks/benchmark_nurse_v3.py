@@ -188,16 +188,35 @@ def main():
     print_section(f"DEPARTMENT — v3 base vs v3 with-nurse "
                   f"({len(department_labels)} classes)")
 
+    # v3 base — legacy single-int cascade (predicted_diagnosis). Unchanged.
     Xb_test_dept = Xb_test.copy()
     Xb_test_dept["predicted_diagnosis"] = base_diag.predict(Xb_test)
 
+    # v3 nurse — A3 added a 13-col softmax cascade (diag_proba_<label>).
+    # Build it from metadata.diag_cascade_cols if present, else fall back to
+    # the legacy single-int cascade so older artifacts still benchmark.
     Xn_test_dept = Xn_test.copy()
-    Xn_test_dept["predicted_diagnosis"] = nurse_diag.predict(Xn_test)
+    nurse_cascade_cols = meta_nurse.get("diag_cascade_cols")
+    if nurse_cascade_cols:
+        nurse_proba_test = nurse_diag.predict_proba(Xn_test)
+        if nurse_proba_test.shape[1] != len(nurse_cascade_cols):
+            raise ValueError(
+                f"Diag model produced {nurse_proba_test.shape[1]} probability "
+                f"columns but metadata records {len(nurse_cascade_cols)} "
+                f"cascade columns."
+            )
+        for k, col in enumerate(nurse_cascade_cols):
+            Xn_test_dept[col] = nurse_proba_test[:, k]
+    else:
+        Xn_test_dept["predicted_diagnosis"] = nurse_diag.predict(Xn_test)
 
-    db_pred = base_dept.predict(Xb_test_dept)
+    # Department predictions. CalibratedClassifierCV.predict_proba may
+    # return shape (n,) labels from .predict() but (n, K) from
+    # .predict_proba(), so derive top-1 via argmax for safety.
     db_prob = base_dept.predict_proba(Xb_test_dept)
-    dn_pred = nurse_dept.predict(Xn_test_dept)
+    db_pred = np.argmax(db_prob, axis=1)
     dn_prob = nurse_dept.predict_proba(Xn_test_dept)
+    dn_pred = np.argmax(dn_prob, axis=1)
 
     db_acc = accuracy_score(y_dept_test, db_pred)
     db_top3 = top_k_accuracy_score(y_dept_test, db_prob, k=3)
