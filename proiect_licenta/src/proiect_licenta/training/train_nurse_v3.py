@@ -26,9 +26,21 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import joblib
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from xgboost import XGBClassifier
+
+# A4 — use FrozenEstimator + cv=None for the calibration wrapper. The older
+# `cv="prefit"` shortcut is deprecated in sklearn 1.6 and removed in newer
+# versions; FrozenEstimator + cv=None is the forward-compatible replacement
+# (Colab currently ships sklearn 1.6.x which already errors on "prefit").
+try:
+    from sklearn.frozen import FrozenEstimator  # sklearn >= 1.6
+    _HAS_FROZEN = True
+except ImportError:  # pragma: no cover — falls back to legacy "prefit" string
+    FrozenEstimator = None  # type: ignore[assignment]
+    _HAS_FROZEN = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -1107,6 +1119,18 @@ def build_diag_cascade_cols(diagnosis_labels) -> list:
     return [f"diag_proba_{_sanitize_label(l)}" for l in diagnosis_labels]
 
 
+def _predict_labels(model, X):
+    """Return 1-D class labels from any sklearn-API classifier.
+
+    Robust to the XGBoost GPU + `multi:softprob` quirk where `predict()`
+    can return a 2-D probability matrix instead of class indices. Uses
+    `predict_proba` + argmax universally so the helper works identically
+    for XGBClassifier, CalibratedClassifierCV, or any sklearn classifier.
+    """
+    proba = model.predict_proba(X)
+    return np.argmax(proba, axis=1)
+
+
 def _attach_diag_cascade(X, diag_model, diag_cascade_cols):
     """Return X augmented with the diagnosis-softmax cascade columns.
 
@@ -1172,7 +1196,17 @@ def train_model(
     )
     print(f"  Best iteration: {model.best_iteration}")
 
-    y_pred = model.predict(X_test)
+    # Strip the tqdm callback from the model so joblib.dump can pickle it
+    # (the tqdm bar holds an open file handle, which pickle chokes on). The
+    # callback only matters during fit(); predict()/predict_proba() don't
+    # touch it. Required for A4 calibration (the CalibratedClassifierCV
+    # wrapper carries a reference to this raw model and gets pickled too).
+    try:
+        model.set_params(callbacks=None)
+    except Exception:
+        pass
+
+    y_pred = _predict_labels(model, X_test)
     accuracy = accuracy_score(y_test, y_pred)
     print(f"\n  Accuracy: {accuracy:.4f}")
     print(classification_report(y_test, y_pred, target_names=label_names, digits=3))
@@ -1190,8 +1224,15 @@ def save_models(
     vital_medians,
     n_train, n_test,
     diag_cascade_cols=None,
+    department_calibration=None,
 ):
-    """Save v3 doctor (with-nurse) models and metadata."""
+    """Save v3 doctor (with-nurse) models and metadata.
+
+    `department_calibration`, when provided, is a dict recording the A4
+    isotonic-calibration setup: `{"method": "isotonic", "n_cal": N,
+    "uncalibrated_accuracy": ..., "calibrated_accuracy": ...}`. Written to
+    metadata so the audit can confirm the wrapped model is in use.
+    """
     print(f"\n{'='*60}")
     print("  Saving Doctor v3 with-nurse model artifacts")
     print(f"{'='*60}")
@@ -1234,6 +1275,8 @@ def save_models(
         # A3: department model now cascades the diagnosis softmax (13 cols).
         # The inference tool reads this list to rebuild the exact same vector.
         "diag_cascade_cols": diag_cascade_cols,
+        # A4: isotonic calibration on department model (when present).
+        "department_calibration": department_calibration,
     }
 
     with open(DOCTOR_MODELS_DIR / "metadata.json", "w", encoding="utf-8") as f:
@@ -1294,7 +1337,7 @@ def main():
         X_train, y_diag_train, X_test, y_diag_test,
         diagnosis_labels, "DIAGNOSIS v3",
     )
-    diag_acc = accuracy_score(y_diag_test, diag_model.predict(X_test))
+    diag_acc = accuracy_score(y_diag_test, _predict_labels(diag_model, X_test))
 
     # 6b. Train department model (cascading)
     # A3 — cascade the diagnosis SOFTMAX (13 probability columns) into the
@@ -1307,11 +1350,48 @@ def main():
     X_train_dept = _attach_diag_cascade(X_train, diag_model, diag_cascade_cols)
     X_test_dept = _attach_diag_cascade(X_test, diag_model, diag_cascade_cols)
 
-    dept_model = train_model(
-        X_train_dept, y_dept_train, X_test_dept, y_dept_test,
-        department_labels, "DEPARTMENT v3",
+    # A4 — isotonic calibration. Hold out 10% of the train split as a
+    # calibration set so the underlying XGBoost never sees it during fit,
+    # then wrap with CalibratedClassifierCV(prefit) to learn one isotonic
+    # regressor per class on the held-out probabilities. The wrapped object
+    # exposes the same predict / predict_proba interface, so the inference
+    # tool needs no change to consume it.
+    X_dept_fit, X_dept_cal, y_dept_fit, y_dept_cal = train_test_split(
+        X_train_dept, y_dept_train, test_size=0.1, random_state=42,
+        stratify=y_dept_train,
     )
-    dept_acc = accuracy_score(y_dept_test, dept_model.predict(X_test_dept))
+    print(f"\n  A4 setup: fit on {len(X_dept_fit):,} rows, "
+          f"calibrate on {len(X_dept_cal):,} held-out rows")
+
+    dept_model_raw = train_model(
+        X_dept_fit, y_dept_fit, X_test_dept, y_dept_test,
+        department_labels, "DEPARTMENT v3 (uncalibrated)",
+    )
+    dept_acc_uncal = accuracy_score(
+        y_dept_test, _predict_labels(dept_model_raw, X_test_dept),
+    )
+
+    # A4 — calibrate. Isotonic over softmax outputs is a monotone transform
+    # that sharpens the probability ordering; expected top-1 lift is small
+    # (+0.1-0.3pp) but downstream "trustworthy probabilities" matters for UX.
+    print(f"\n  A4: fitting isotonic calibration (one regressor per class)...")
+    if _HAS_FROZEN:
+        dept_model = CalibratedClassifierCV(
+            FrozenEstimator(dept_model_raw), method="isotonic", cv=None,
+        )
+    else:
+        # Legacy fallback for sklearn < 1.6 (where FrozenEstimator wasn't
+        # available); kept so the script doesn't break on older installs.
+        dept_model = CalibratedClassifierCV(
+            dept_model_raw, method="isotonic", cv="prefit",
+        )
+    dept_model.fit(X_dept_cal, y_dept_cal)
+    dept_acc = accuracy_score(
+        y_dept_test, _predict_labels(dept_model, X_test_dept),
+    )
+    print(f"  Department v3 uncalibrated top-1: {dept_acc_uncal:.4f}")
+    print(f"  Department v3 calibrated   top-1: {dept_acc:.4f}  "
+          f"(delta {dept_acc - dept_acc_uncal:+.4f})")
 
     # 7. Save
     vital_medians = {"temperature": 98.1, "heartrate": 84, "resprate": 18,
@@ -1321,6 +1401,14 @@ def main():
         diag_acc, dept_acc, vital_medians,
         n_train=len(X_train), n_test=len(X_test),
         diag_cascade_cols=diag_cascade_cols,
+        department_calibration={
+            "method": "isotonic",
+            "cv": "prefit",
+            "n_cal": int(len(X_dept_cal)),
+            "n_fit": int(len(X_dept_fit)),
+            "uncalibrated_accuracy": round(float(dept_acc_uncal), 4),
+            "calibrated_accuracy": round(float(dept_acc), 4),
+        },
     )
 
     print(f"\n{'#'*60}")
