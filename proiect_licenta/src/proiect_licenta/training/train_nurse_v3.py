@@ -1166,10 +1166,29 @@ def _attach_diag_cascade(X, diag_model, diag_cascade_cols):
 # ---------------------------------------------------------------------------
 # 3-4. Train models
 # ---------------------------------------------------------------------------
+# A1-tuned hyperparameter set (when scripts/tune_doctor_v3.py has produced a
+# tuned_params.json under artifacts/doctor/v3/). XGBoost-side keys override
+# the hand-picked defaults below; `class_weight_exponent` swaps in for the
+# default sqrt(inverse-frequency) sample weighting.
+_TUNABLE_XGB_KEYS = {
+    "max_depth", "learning_rate", "colsample_bytree", "colsample_bylevel",
+    "min_child_weight", "gamma", "reg_alpha", "reg_lambda", "subsample",
+}
+
+
 def train_model(
     X_train, y_train, X_test, y_test, label_names, model_name,
+    tuned_params=None,
 ) -> XGBClassifier:
-    """Train an XGBoost multiclass model with sqrt-inverse class weighting."""
+    """Train an XGBoost multiclass model with sqrt-inverse class weighting.
+
+    If `tuned_params` is provided (typically the dict loaded from
+    `artifacts/doctor/v3/tuned_params.json` by `scripts/tune_doctor_v3.py`),
+    the relevant hyperparameters override the hand-picked defaults, and the
+    `class_weight_exponent` overrides the default 0.5 (sqrt). Only intended
+    for the v3 DIAGNOSIS model — the department model retains hand-picked
+    defaults unless the caller also wants tuning there.
+    """
     print(f"\n{'='*60}")
     print(f"  Training {model_name} ({len(label_names)} classes, XGBoost)")
     print(f"{'='*60}")
@@ -1177,8 +1196,35 @@ def train_model(
     n_classes = len(label_names)
     class_counts = y_train.value_counts()
     total = len(y_train)
+
+    # Default hand-picked params and class-weight exponent (sqrt = 0.5).
+    xgb_params = dict(
+        n_estimators=3000, max_depth=10, learning_rate=0.02,
+        subsample=0.8, colsample_bytree=0.5, colsample_bylevel=0.7,
+        min_child_weight=3, gamma=0.05, reg_alpha=0.5, reg_lambda=2.0,
+    )
+    cw_exponent = 0.5
+
+    if tuned_params:
+        params_block = tuned_params.get("params", {}) or {}
+        applied = {}
+        for k, v in params_block.items():
+            if k == "class_weight_exponent":
+                cw_exponent = float(v)
+            elif k in _TUNABLE_XGB_KEYS:
+                xgb_params[k] = v
+                applied[k] = v
+        print(f"  A1: tuned_params loaded "
+              f"(study={tuned_params.get('study_name', '?')}, "
+              f"best macro_f1={tuned_params.get('best_macro_f1', '?'):.4f}, "
+              f"trial #{tuned_params.get('best_trial', '?')})")
+        print(f"  A1: applying {len(applied)} XGBoost overrides + "
+              f"cw_exponent={cw_exponent:.3f}")
+        for k, v in applied.items():
+            print(f"    {k:25s} = {v}")
+
     sample_weights = y_train.map(
-        lambda x: np.sqrt(total / (n_classes * class_counts[x]))
+        lambda x: (total / (n_classes * class_counts[x])) ** cw_exponent
     )
 
     # Optional tqdm progress bar — one tick per boosting iteration up to
@@ -1191,9 +1237,7 @@ def train_model(
     callbacks = [progress_cb] if progress_cb is not None else None
 
     model = XGBClassifier(
-        n_estimators=3000, max_depth=10, learning_rate=0.02,
-        subsample=0.8, colsample_bytree=0.5, colsample_bylevel=0.7,
-        min_child_weight=3, gamma=0.05, reg_alpha=0.5, reg_lambda=2.0,
+        **xgb_params,
         objective="multi:softprob", num_class=n_classes,
         eval_metric="mlogloss", early_stopping_rounds=100,
         random_state=42, n_jobs=-1, verbosity=0,
@@ -1201,7 +1245,8 @@ def train_model(
         callbacks=callbacks,
     )
 
-    print(f"  Training (up to 3000 trees, lr=0.02, early stopping=100, "
+    print(f"  Training (up to {xgb_params['n_estimators']} trees, "
+          f"lr={xgb_params['learning_rate']}, early stopping=100, "
           f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD})...")
     model.fit(
         X_train, y_train, sample_weight=sample_weights,
@@ -1238,6 +1283,7 @@ def save_models(
     n_train, n_test,
     diag_cascade_cols=None,
     department_calibration=None,
+    tuned_params_applied=None,
 ):
     """Save v3 doctor (with-nurse) models and metadata.
 
@@ -1290,6 +1336,9 @@ def save_models(
         "diag_cascade_cols": diag_cascade_cols,
         # A4: isotonic calibration on department model (when present).
         "department_calibration": department_calibration,
+        # A1: tuned hyperparameters applied to the diagnosis model (when
+        # tuned_params.json was present at training time).
+        "tuned_params_applied": tuned_params_applied,
     }
 
     with open(DOCTOR_MODELS_DIR / "metadata.json", "w", encoding="utf-8") as f:
@@ -1346,9 +1395,22 @@ def main():
     print(f"  Train: {len(X_train):,} | Test: {len(X_test):,}")
 
     # 6a. Train diagnosis model
+    # A1 — apply tuned hyperparameters if scripts/tune_doctor_v3.py has
+    # already produced a tuned_params.json (the macro-F1-optimal config
+    # from the Optuna sweep). Falls back silently to hand-picked defaults
+    # if the file is absent.
+    tuned_diag_params = None
+    tuned_path = DOCTOR_MODELS_DIR / "tuned_params.json"
+    if tuned_path.exists():
+        try:
+            tuned_diag_params = json.loads(tuned_path.read_text())
+        except Exception as e:
+            print(f"  WARN: could not parse {tuned_path}: {e}. Using defaults.")
+
     diag_model = train_model(
         X_train, y_diag_train, X_test, y_diag_test,
         diagnosis_labels, "DIAGNOSIS v3",
+        tuned_params=tuned_diag_params,
     )
     diag_acc = accuracy_score(y_diag_test, _predict_labels(diag_model, X_test))
 
@@ -1422,6 +1484,16 @@ def main():
             "uncalibrated_accuracy": round(float(dept_acc_uncal), 4),
             "calibrated_accuracy": round(float(dept_acc), 4),
         },
+        tuned_params_applied=(
+            {
+                "study_name": tuned_diag_params.get("study_name"),
+                "best_trial": tuned_diag_params.get("best_trial"),
+                "best_macro_f1": tuned_diag_params.get("best_macro_f1"),
+                "n_trials": tuned_diag_params.get("n_trials"),
+                "params": tuned_diag_params.get("params"),
+            }
+            if tuned_diag_params else None
+        ),
     )
 
     print(f"\n{'#'*60}")
