@@ -490,6 +490,253 @@ PMH_KEYWORD_MAP = {
     "down syndrome": "Other",
     "trisomy": "Other",
     "congenital heart disease": ("Other", "Circulatory"),
+
+    # ──────────────────────────────────────────────────────────────────
+    # A2 VOCABULARY EXPANSION (2026-05-22)
+    # ──────────────────────────────────────────────────────────────────
+    # Targets gaps identified in the post-Change-1 audit (doctor-agent.md):
+    # `s/p` surgical histories, abbreviation variants, brand-name drugs as
+    # PMH condition proxies. Drug names are only matched inside the PMH
+    # section (extract_pmh_section bounds them above the Medications block),
+    # so they don't leak from Medications-on-Admission.
+    # ──────────────────────────────────────────────────────────────────
+
+    # ── Circulatory: s/p surgical histories and abbreviations ──
+    "s/p cabg": "Circulatory",
+    "s/p stent": "Circulatory",
+    "s/p pci": "Circulatory",
+    "s/p mi": "Circulatory",
+    "s/p stemi": "Circulatory",
+    "s/p nstemi": "Circulatory",
+    "status post cabg": "Circulatory",
+    "status post stent": "Circulatory",
+    "status post mi": "Circulatory",
+    "avr": "Circulatory",
+    "aortic valve replacement": "Circulatory",
+    "mvr": "Circulatory",
+    "mitral valve replacement": "Circulatory",
+    "valve replacement": "Circulatory",
+    "valvuloplasty": "Circulatory",
+    "aicd": "Circulatory",
+    "automatic implantable defibrillator": "Circulatory",
+    "ihd": "Circulatory",
+    "ascvd": "Circulatory",
+    "chf exacerbation": "Circulatory",
+    "acute on chronic chf": "Circulatory",
+    "decompensated chf": "Circulatory",
+
+    # ── Circulatory: rhythm / conduction variants ──
+    "paf": "Circulatory",
+    "paroxysmal atrial fibrillation": "Circulatory",
+    "chronic afib": "Circulatory",
+    "persistent afib": "Circulatory",
+    "permanent afib": "Circulatory",
+    "chronic atrial fibrillation": "Circulatory",
+    "first degree av block": "Circulatory",
+    "second degree av block": "Circulatory",
+    "third degree av block": "Circulatory",
+    "complete heart block": "Circulatory",
+    "chb": "Circulatory",
+    "long qt": "Circulatory",
+    "wolff-parkinson-white": "Circulatory",
+    "wpw": "Circulatory",
+
+    # ── Endocrine: diabetes variants ──
+    "dm-ii": "Endocrine, Nutritional, Metabolic",
+    "dm-i": "Endocrine, Nutritional, Metabolic",
+    "dm type 2": "Endocrine, Nutritional, Metabolic",
+    "dm type 1": "Endocrine, Nutritional, Metabolic",
+    "diabetes type ii": "Endocrine, Nutritional, Metabolic",
+    "diabetes type i": "Endocrine, Nutritional, Metabolic",
+    "gestational diabetes": "Endocrine, Nutritional, Metabolic",
+    "gdm": "Endocrine, Nutritional, Metabolic",
+    "prediabetes": "Endocrine, Nutritional, Metabolic",
+    "insulin dependent": "Endocrine, Nutritional, Metabolic",
+
+    # ── Genitourinary: CKD staging ──
+    "ckd 3": "Genitourinary",
+    "ckd 4": "Genitourinary",
+    "ckd 5": "Genitourinary",
+    "ckd stage 3": "Genitourinary",
+    "ckd stage 4": "Genitourinary",
+    "ckd stage 5": "Genitourinary",
+    "ckd iii": "Genitourinary",
+    "ckd iv": "Genitourinary",
+    "ckd v": "Genitourinary",
+    "stage 3 ckd": "Genitourinary",
+    "stage 4 ckd": "Genitourinary",
+    "stage 5 ckd": "Genitourinary",
+    "transplant recipient": "Genitourinary",
+
+    # ── Respiratory: exacerbation patterns and home-O2 dependence ──
+    "copd exacerbation": "Respiratory",
+    "asthma exacerbation": "Respiratory",
+    "pulmonary nodule": "Respiratory",
+    "recurrent pneumonia": "Respiratory",
+    "chronic cough": "Respiratory",
+    "home o2": "Respiratory",
+    "on oxygen": "Respiratory",
+
+    # ── Digestive: chronic liver disease variants ──
+    "chronic gerd": "Digestive",
+    "liver disease": "Digestive",
+    "chronic liver disease": "Digestive",
+    "alcoholic liver disease": "Digestive",
+    "non-alcoholic fatty liver disease": "Digestive",
+    "esld": "Digestive",
+    "end stage liver disease": "Digestive",
+    "end-stage liver disease": "Digestive",
+
+    # ── Mental: SI/HI, mood-disorder variants ──
+    "mood disorder": "Mental Disorders",
+    "borderline personality": "Mental Disorders",
+    "bpd": "Mental Disorders",
+    "suicidal ideation": "Mental Disorders",
+    "chronic anxiety": "Mental Disorders",
+    "chronic depression": "Mental Disorders",
+
+    # ── Nervous System ──
+    "chronic migraine": "Nervous System and Sense Organs",
+    "chronic headache": "Nervous System and Sense Organs",
+    "essential tremor": "Nervous System and Sense Organs",
+    "restless legs": "Nervous System and Sense Organs",
+    "rls": "Nervous System and Sense Organs",
+    "diabetic neuropathy": ("Nervous System and Sense Organs",
+                             "Endocrine, Nutritional, Metabolic"),
+
+    # ── Musculoskeletal ──
+    "chronic back pain": "Musculoskeletal",
+    "chronic low back pain": "Musculoskeletal",
+    "degenerative joint disease": "Musculoskeletal",
+    "djd": "Musculoskeletal",
+    "chronic pain syndrome": "Musculoskeletal",
+    "chronic pain": "Musculoskeletal",
+
+    # ── Injury (recurrent falls, prior trauma) ──
+    "s/p fall": "Injury and Poisoning",
+    "recurrent falls": "Injury and Poisoning",
+    "history of trauma": "Injury and Poisoning",
+
+    # ── Infectious (covid, hepA, on ART) ──
+    "hepatitis a": "Infectious and Parasitic",
+    "hav": "Infectious and Parasitic",
+    "hiv positive": "Infectious and Parasitic",
+    "on art": "Infectious and Parasitic",
+    "on haart": "Infectious and Parasitic",
+    "covid": "Infectious and Parasitic",
+    "post-covid": "Infectious and Parasitic",
+    "long covid": "Infectious and Parasitic",
+
+    # ── Blood ──
+    "hemolytic anemia": "Blood and Blood-Forming Organs",
+    "aplastic anemia": "Blood and Blood-Forming Organs",
+    "pernicious anemia": "Blood and Blood-Forming Organs",
+
+    # ── Other (oncology / OB-GYN history) ──
+    "history of cancer": "Other",
+    "prior malignancy": "Other",
+    "hospice care": "Other",
+    "palliative care": "Other",
+    "on chemo": "Other",
+    "on chemotherapy": "Other",
+    "prior c-section": "Other",
+    "prior cesarean": "Other",
+    "endometrial cancer": ("Other", "Genitourinary"),
+    "thyroid cancer": ("Other", "Endocrine, Nutritional, Metabolic"),
+    "head and neck cancer": "Other",
+
+    # ── Brand-name drug proxies ──
+    # Statins → cardiovascular + lipid disorder
+    "atorvastatin": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
+    "lipitor": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
+    "simvastatin": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
+    "crestor": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
+    "rosuvastatin": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
+    # Diabetes
+    "metformin": "Endocrine, Nutritional, Metabolic",
+    "glipizide": "Endocrine, Nutritional, Metabolic",
+    "insulin": "Endocrine, Nutritional, Metabolic",
+    "ozempic": "Endocrine, Nutritional, Metabolic",
+    "jardiance": "Endocrine, Nutritional, Metabolic",
+    "januvia": "Endocrine, Nutritional, Metabolic",
+    # Antihypertensives / cardiac
+    "metoprolol": "Circulatory",
+    "atenolol": "Circulatory",
+    "carvedilol": "Circulatory",
+    "lisinopril": "Circulatory",
+    "losartan": "Circulatory",
+    "amlodipine": "Circulatory",
+    "hctz": "Circulatory",
+    "hydrochlorothiazide": "Circulatory",
+    "furosemide": "Circulatory",
+    "lasix": "Circulatory",
+    # Antiplatelet / anticoagulant
+    "plavix": "Circulatory",
+    "clopidogrel": "Circulatory",
+    "eliquis": "Circulatory",
+    "apixaban": "Circulatory",
+    "xarelto": "Circulatory",
+    "rivaroxaban": "Circulatory",
+    "warfarin": "Circulatory",
+    "coumadin": "Circulatory",
+    # Psychiatric
+    "prozac": "Mental Disorders",
+    "fluoxetine": "Mental Disorders",
+    "zoloft": "Mental Disorders",
+    "sertraline": "Mental Disorders",
+    "lexapro": "Mental Disorders",
+    "escitalopram": "Mental Disorders",
+    "citalopram": "Mental Disorders",
+    "celexa": "Mental Disorders",
+    "venlafaxine": "Mental Disorders",
+    "effexor": "Mental Disorders",
+    "duloxetine": "Mental Disorders",
+    "cymbalta": "Mental Disorders",
+    "trazodone": "Mental Disorders",
+    "abilify": "Mental Disorders",
+    "aripiprazole": "Mental Disorders",
+    "olanzapine": "Mental Disorders",
+    "zyprexa": "Mental Disorders",
+    "quetiapine": "Mental Disorders",
+    "seroquel": "Mental Disorders",
+    "lithium carbonate": "Mental Disorders",
+    # Antiepileptics / neuropathic pain agents (some dual-category)
+    "valproate": ("Mental Disorders", "Nervous System and Sense Organs"),
+    "depakote": ("Mental Disorders", "Nervous System and Sense Organs"),
+    "lamictal": ("Mental Disorders", "Nervous System and Sense Organs"),
+    "lamotrigine": ("Mental Disorders", "Nervous System and Sense Organs"),
+    "keppra": "Nervous System and Sense Organs",
+    "levetiracetam": "Nervous System and Sense Organs",
+    "phenytoin": "Nervous System and Sense Organs",
+    "dilantin": "Nervous System and Sense Organs",
+    "gabapentin": ("Nervous System and Sense Organs", "Musculoskeletal"),
+    "neurontin": ("Nervous System and Sense Organs", "Musculoskeletal"),
+    "pregabalin": ("Nervous System and Sense Organs", "Musculoskeletal"),
+    "lyrica": ("Nervous System and Sense Organs", "Musculoskeletal"),
+    "levodopa": "Nervous System and Sense Organs",
+    "sinemet": "Nervous System and Sense Organs",
+    # GI (PPIs / H2 blockers)
+    "omeprazole": "Digestive",
+    "prilosec": "Digestive",
+    "pantoprazole": "Digestive",
+    "protonix": "Digestive",
+    "esomeprazole": "Digestive",
+    "nexium": "Digestive",
+    "famotidine": "Digestive",
+    "pepcid": "Digestive",
+    # Thyroid
+    "levothyroxine": "Endocrine, Nutritional, Metabolic",
+    "synthroid": "Endocrine, Nutritional, Metabolic",
+    "methimazole": "Endocrine, Nutritional, Metabolic",
+    # Respiratory inhalers / leukotriene
+    "albuterol": "Respiratory",
+    "ventolin": "Respiratory",
+    "advair": "Respiratory",
+    "symbicort": "Respiratory",
+    "spiriva": "Respiratory",
+    "fluticasone": "Respiratory",
+    "montelukast": "Respiratory",
+    "singulair": "Respiratory",
 }
 
 
