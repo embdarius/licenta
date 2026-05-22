@@ -194,28 +194,42 @@ code("cell-tune", """# Cell 6: Run N more trials (resumable). Persistent SQLite 
 # Drive at artifacts/doctor/v3/optuna_study.db; re-running this cell adds
 # to the same study. Safe to ctrl-C mid-trial; the failing trial is marked
 # FAIL and the study moves on.
+#
+# The tune script is called in-process (runpy) rather than as a subprocess
+# so stdout streams live to the notebook output AND any error surfaces with
+# a full traceback. Tqdm bars + per-trial start lines provide progress.
 
 N_TRIALS_THIS_SESSION = 10    # <- adjust per session (e.g. 5, 10, 20)
 TIMEOUT_SECONDS       = None  # <- or e.g. 3600 for 1-hour bound
 REBUILD_FEATURES      = False # <- True only if you suspect cache is stale
 
-import os, subprocess, sys
+import os, sys, runpy
 os.environ['XGB_DEVICE'] = 'cuda'
 os.environ['XGB_TREE_METHOD'] = 'hist'
 
-cmd = [
-    sys.executable,
-    f'{PROJECT_PATH}/scripts/tune_doctor_v3.py',
+argv = [
+    'tune_doctor_v3.py',
     '--n-trials', str(N_TRIALS_THIS_SESSION),
 ]
 if TIMEOUT_SECONDS is not None:
-    cmd += ['--timeout', str(TIMEOUT_SECONDS)]
+    argv += ['--timeout', str(TIMEOUT_SECONDS)]
 if REBUILD_FEATURES:
-    cmd += ['--rebuild-features']
+    argv += ['--rebuild-features']
 
-# Run as a subprocess so stdout streams live and ctrl-C kills cleanly.
-print(' '.join(cmd))
-subprocess.run(cmd, check=True, cwd=PROJECT_PATH)""")
+# Save sys.argv so subsequent cells (or restarts) aren't polluted.
+_saved_argv = sys.argv
+try:
+    sys.argv = argv
+    print(f'running: {\" \".join(argv)}')
+    print(f'(ctrl-C to stop early; SQLite study persists on Drive)\\n')
+    runpy.run_path(
+        f'{PROJECT_PATH}/scripts/tune_doctor_v3.py',
+        run_name='__main__',
+    )
+except KeyboardInterrupt:
+    print('\\n[stopped by user. Current trial marked FAIL; study persists.]')
+finally:
+    sys.argv = _saved_argv""")
 
 
 md("section3-md", """---

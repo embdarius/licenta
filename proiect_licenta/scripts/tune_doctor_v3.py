@@ -112,6 +112,41 @@ def load_or_build_cache(cache_dir: Path, rebuild: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# Per-trial XGBoost iteration progress bar (tqdm). Optional — falls back to
+# silent training when tqdm isn't installed or XGBoost's callback API is
+# unavailable. Mirrors the helper used by train_nurse_v3._make_xgb_progress_callback.
+# ---------------------------------------------------------------------------
+def _make_trial_progress_callback(n_total: int, desc: str):
+    try:
+        from tqdm.auto import tqdm as _tqdm
+        from xgboost.callback import TrainingCallback
+    except ImportError:
+        return None
+
+    class _TqdmTrialCallback(TrainingCallback):  # type: ignore[misc]
+        def __init__(self):
+            self.pbar = _tqdm(total=n_total, desc=desc, unit="iter", leave=False)
+
+        def after_iteration(self, model, epoch, evals_log):
+            self.pbar.update(1)
+            last_val = None
+            for ds in evals_log:
+                for metric in evals_log[ds]:
+                    vals = evals_log[ds][metric]
+                    if vals:
+                        last_val = vals[-1]
+            if last_val is not None and hasattr(self.pbar, "set_postfix"):
+                self.pbar.set_postfix(mlogloss=f"{last_val:.4f}", refresh=False)
+            return False
+
+        def after_training(self, model):
+            self.pbar.close()
+            return model
+
+    return _TqdmTrialCallback()
+
+
+# ---------------------------------------------------------------------------
 # Optuna objective
 # ---------------------------------------------------------------------------
 def make_objective(
@@ -143,10 +178,27 @@ def make_objective(
         # full inverse-freq (heavier minority weighting); p=0.0 is uniform.
         cw_exponent = trial.suggest_float("class_weight_exponent", 0.4, 1.0)
 
+        # Trial-start announcement so the user sees something is happening
+        # right away, especially during the first ~30s of XGBoost set-up.
+        print(
+            f"\n  >>> trial #{trial.number:3d} starting | "
+            f"max_depth={params['max_depth']:2d} "
+            f"lr={params['learning_rate']:.4f} "
+            f"min_child_weight={params['min_child_weight']:2d} "
+            f"reg_a={params['reg_alpha']:.3f} reg_l={params['reg_lambda']:.3f} "
+            f"cw_exp={cw_exponent:.2f}",
+            flush=True,
+        )
+
         class_counts = y_inner_train.value_counts()
         sample_weights = y_inner_train.map(
             lambda x: (n_train / (n_classes * class_counts[x])) ** cw_exponent
         )
+
+        progress_cb = _make_trial_progress_callback(
+            n_total=3000, desc=f"    trial #{trial.number} XGBoost",
+        )
+        callbacks = [progress_cb] if progress_cb is not None else None
 
         model = XGBClassifier(
             n_estimators=3000,
@@ -155,6 +207,7 @@ def make_objective(
             random_state=42, n_jobs=-1, verbosity=0,
             subsample=0.8,
             tree_method=XGB_TREE_METHOD, device=XGB_DEVICE,
+            callbacks=callbacks,
             **params,
         )
         model.fit(
