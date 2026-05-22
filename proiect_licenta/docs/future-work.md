@@ -53,6 +53,63 @@ Verification gate (per the plan):
 
 Full details, per-class deltas, and implementation pointers live in `docs/agents/doctor-agent.md#change-1--pmh-features`.
 
+### Tier A (A2 + A3 + A4) — vocab expansion + softmax cascade + isotonic calibration (SHIPPED 2026-05-22)
+
+Implemented from the Tier A plan in `plans/analyze-the-project-based-fluttering-charm.md`. Three independent, stackable changes retrained together in one v3-nurse training cycle on Colab T4 GPU (~36 min):
+
+- **A2** — Grew `pmh_vocab.py` from 397 → 596 keywords (+199): s/p surgical histories, abbreviation variants (paf, ihd, ascvd, aicd), CKD staging (ckd 3/4/5), diabetes variants (gdm, prediabetes, dm-ii), and ~90 brand-name drugs as PMH proxies (lipitor → Circulatory+Endocrine, metformin → Endocrine, eliquis → Circulatory, prozac → Mental, omeprazole → Digestive, etc.). Drug names matched only inside the PMH section so they don't leak from Medications-on-Admission.
+- **A3** — Replaced the department model's single `predicted_diagnosis` int column with 13 `diag_proba_<sanitized_label>` float columns (the full softmax distribution from the diagnosis model). Lets the dept model weight ambiguous diagnoses honestly.
+- **A4** — Wrapped the department model with `CalibratedClassifierCV(FrozenEstimator(model), method="isotonic", cv=None)` using a 10% held-out calibration set. One isotonic regressor per class; interface-compatible with `XGBClassifier`.
+
+**Result on the same 20,420-row test split (random_state=42):**
+
+| Metric | v3 nurse pre-Tier-A (Change 1) | v3 nurse + Tier A | Δ |
+|---|---|---|---|
+| Top-1 diagnosis | 64.16% | **64.07%** | −0.09pp (flat) |
+| Top-3 diagnosis | 85.71% | 85.72% | +0.01pp |
+| Top-1 department | 68.61% | **70.79%** | **+2.18pp** |
+| Top-3 department | 94.04% | 94.07% | +0.03pp |
+| Cohen's κ diagnosis | 0.593 | 0.591 | −0.001 |
+| Cohen's κ department | 0.501 | 0.495 | **−0.006** |
+
+**Per-lever attribution (department top-1)**, decomposed using the uncalibrated dept top-1 logged before A4 wraps the model (69.33%):
+
+| Lever | Predicted (dept) | Actual (dept) |
+|---|---|---|
+| A2 vocab expansion (diag side) | 0pp | ~0pp |
+| A3 softmax cascade | +0.3 to +0.8pp | **+0.72pp** (A2+A3 combined: 68.61% → 69.33%). Mid-band. |
+| A4 isotonic calibration | +0.1 to +0.3pp | **+1.46pp** (69.33% → 70.79%). **4-5× the predicted band.** |
+
+**Important caveat — the dept gain is MED-dominant.** Per-class department recall vs v3 base:
+
+| Department | v3 base | v3 nurse + Tier A | Δ vs base | n |
+|---|---|---|---|---|
+| **MED** | 65.4% | **87.3%** | **+21.8pp** | **12,045** |
+| OMED | 14.9% | 16.2% | +1.3pp | 902 |
+| NMED | 69.5% | 70.2% | +0.7pp | 1,226 |
+| CMED | 66.2% | 61.7% | −4.5pp | 1,683 |
+| TRAUM | 59.5% | 54.0% | −5.5pp | 509 |
+| OB_GYN | 46.2% | 40.0% | −6.2pp | 225 |
+| OTHER_SURG | 36.5% | 29.8% | −6.7pp | 540 |
+| ORTHO | 65.4% | 58.6% | −6.8pp | 1,045 |
+| NSURG | 41.9% | 34.7% | −7.2pp | 614 |
+| OTHER | 23.9% | 8.2% | **−15.7pp** | 159 |
+| SURG | 56.0% | 36.5% | **−19.6pp** | 1,472 |
+
+MED is 59% of the test set, so its +21.8pp recall lift adds ~2,629 correct predictions — enough to dominate the top-1 metric on its own. Every other department either ticked up by <1.5pp or regressed (SURG −19.6pp, OTHER −15.7pp the worst). Cohen's κ dropping from 0.501 to 0.495 confirms the non-uniform pattern: κ penalises agreement that's driven by one dominant class.
+
+This is a known dynamic with isotonic calibration on imbalanced multiclass softmax: per-class isotonic regressors aren't jointly monotone — they can compress minority probabilities (because the underlying XGBoost is over-confident on MED) and amplify the dominant class's argmax wins. Top-1 goes up because MED is half the test set; minority routing gets worse.
+
+**Why it's still shippable:**
+- Top-1 and top-3 both ticked up.
+- Top-3 (94.07%) is near the ceiling for the 11-class problem already.
+- The minority-routing regression isn't *introduced* by Tier A — pre-Tier-A v3 nurse already had SURG at 54.9% and OTHER at 12.6%. Tier A widens the gap rather than creating it.
+- **A1 (Optuna macro-F1 sweep) is the next planned lever and is explicitly designed to recover minority recall** — its objective is macro-F1 (not flat top-1), and its search space includes `class_weight_exponent ∈ [0.4, 1.0]` so the optimiser can dial up minority weighting.
+
+**A2 didn't move diagnosis top-1.** All per-class diagnosis deltas vs the pre-Tier-A baseline were within ±0.6pp — within measurement noise. Brand-drug PMH proxies appear to overlap with what current-stay TF-IDF already captures; minority classes that should benefit (Infectious / Other / Blood / Endocrine) are capacity-limited at the architecture / class-weight level, not feature-coverage limited. A1's class-weight-exponent search is the right tool for these.
+
+Full per-lever attribution, per-class tables, implementation pointers, and the "shippable anyway" rationale live in `docs/agents/doctor-agent.md#tier-a--vocab-expansion--softmax-cascade--isotonic-calibration`.
+
 ---
 
 ## Empirical findings — experiments tried and reverted

@@ -425,6 +425,100 @@ None of these block moving to Change 2 (multi-label seq_num 2,3 sibling head) �
 
 ---
 
+## Tier A — vocab expansion + softmax cascade + isotonic calibration
+
+Shipped 2026-05-22 on top of Change 1. Three stackable, independent changes designed to be retrained together in one v3-nurse training cycle:
+
+- **A2 — PMH vocabulary expansion.** Grew `pmh_vocab.py` from 397 to 596 keywords (+199). Added s/p surgical histories (`s/p cabg`, `s/p stent`, `s/p mi`), abbreviation variants (`paf`, `chronic afib`, `ihd`, `ascvd`, `aicd`), CKD staging (`ckd 3/4/5`, `ckd iii/iv/v`), diabetes variants (`gdm`, `prediabetes`, `dm-ii`), and ~90 brand-name drugs as PMH proxies (lipitor → Circulatory+Endocrine, metformin → Endocrine, eliquis → Circulatory, prozac → Mental, omeprazole → Digestive, keppra → Nervous, etc.). Brand-name drugs are matched only inside the PMH section (bounded above by `Medications on Admission` header) so they don't leak from the Medications block.
+
+- **A3 — diagnosis-softmax cascade.** The department model's cascade column was a single `predicted_diagnosis` integer (argmax over 13 classes). A3 replaces it with 13 `diag_proba_<sanitized_label>` float columns — the full softmax distribution from the diagnosis model. The department model can now weight ambiguous predictions ("38% Circulatory, 32% Respiratory") instead of hard-locking to top-1. Column list persisted in `metadata.json` under `diag_cascade_cols` so `doctor_tool_v3` reproduces the exact column layout at inference.
+
+- **A4 — isotonic calibration on the department model.** Hold out 10% of the train split as a calibration set; fit XGBoost on the remaining 90%; wrap with `CalibratedClassifierCV(FrozenEstimator(model), method="isotonic", cv=None)` (the `cv="prefit"` shortcut is deprecated in sklearn 1.6+). Saved as `department_model.joblib` (replaces the bare XGBClassifier); `predict` / `predict_proba` interface is unchanged so the inference tool needs no edit.
+
+### Benchmark results — pre-Tier-A (Change 1) vs Tier A on the same 20,420-row test split (random_state=42)
+
+| Metric | v3 nurse pre-Tier-A | v3 nurse + Tier A | Δ |
+|---|---|---|---|
+| **Top-1 diagnosis** | 64.16% | **64.07%** | **−0.09pp (flat)** |
+| **Top-3 diagnosis** | 85.71% | 85.72% | +0.01pp |
+| **Top-5 diagnosis** | 92.88% | 92.77% | −0.11pp |
+| Cohen's κ diagnosis | 0.5925 | 0.5915 | −0.001 |
+| **Top-1 department** | 68.61% | **70.79%** | **+2.18pp** |
+| **Top-3 department** | 94.04% | 94.07% | +0.03pp |
+| Cohen's κ department | 0.5009 | 0.4948 | **−0.006** |
+
+### Per-lever attribution (department top-1)
+
+The training log records the uncalibrated department top-1 (69.33%) before A4 wraps the model, so the decomposition is unambiguous:
+
+| Lever | Predicted (dept) | Actual (dept) | Notes |
+|---|---|---|---|
+| A2 vocab expansion | 0pp dept (diag-only lever) | ~0pp dept | A2 affects PMH features in the dept input matrix indirectly. Diag side flat. |
+| A3 softmax cascade | +0.3 to +0.8pp dept | **+0.72pp dept (A2+A3 combined: 68.61% → 69.33%)** | Mid-band. No cascade column hit dept top-30 by gain — contributes through many small interactions, same pattern as PMH features. |
+| A4 isotonic calibration | +0.1 to +0.3pp dept | **+1.46pp dept (69.33% → 70.79%)** | **4-5× the predicted band.** Per-class isotonic fits aren't jointly monotone — they can redistribute probability mass between classes. |
+
+### Per-class diagnosis recall — v3 base → v3 nurse + Tier A
+
+| Category | v3 base | v3 nurse + Tier A | Δ vs base | n |
+|---|---|---|---|---|
+| Circulatory | 59.2% | 69.2% | **+10.0pp** | 3,731 |
+| Genitourinary | 37.3% | 44.5% | +7.2pp | 1,754 |
+| Respiratory | 61.9% | 67.2% | +5.3pp | 2,211 |
+| Endocrine, Nutritional, Metabolic | 35.9% | 40.4% | +4.5pp | 1,055 |
+| Injury and Poisoning | 71.0% | 74.9% | +3.9pp | 2,864 |
+| Digestive | 78.9% | 81.5% | +2.6pp | 3,612 |
+| Infectious and Parasitic | 19.9% | 22.3% | +2.3pp | 512 |
+| Musculoskeletal | 58.0% | 57.2% | −0.8pp | 1,195 |
+| Nervous System and Sense Organs | 54.8% | 53.8% | −1.0pp | 795 |
+| Skin and Subcutaneous Tissue | 58.3% | 57.2% | −1.1pp | 849 |
+| Mental Disorders | 80.3% | 78.8% | −1.6pp | 899 |
+| Other | 23.2% | 21.3% | −1.9pp | 310 |
+| Blood and Blood-Forming Organs | 40.4% | 37.0% | −3.5pp | 633 |
+
+A2 didn't move the diagnosis needle measurably — every per-class delta vs the pre-Tier-A Change-1 baseline was within ±0.6pp. The A2 PMH expansion sharpens specific keyword matches but doesn't change category-level argmax, mostly because:
+1. Brand-drug PMH proxies overlap with what TF-IDF already captures from current-stay complaint text.
+2. Minority classes (Infectious, Other, Blood) where prior history should matter most are capacity-limited at the model architecture level, not feature-coverage limited.
+3. A1's class-weight-exponent search is the lever that should actually move minority recall.
+
+### Per-class department recall — v3 base → v3 nurse + Tier A — the MED-dominance caveat
+
+| Department | v3 base | v3 nurse + Tier A | Δ vs base | n |
+|---|---|---|---|---|
+| **MED** | 65.4% | **87.3%** | **+21.8pp** | **12,045** |
+| OMED | 14.9% | 16.2% | +1.3pp | 902 |
+| NMED | 69.5% | 70.2% | +0.7pp | 1,226 |
+| CMED | 66.2% | 61.7% | −4.5pp | 1,683 |
+| TRAUM | 59.5% | 54.0% | −5.5pp | 509 |
+| OB_GYN | 46.2% | 40.0% | −6.2pp | 225 |
+| OTHER_SURG | 36.5% | 29.8% | −6.7pp | 540 |
+| ORTHO | 65.4% | 58.6% | −6.8pp | 1,045 |
+| NSURG | 41.9% | 34.7% | −7.2pp | 614 |
+| OTHER | 23.9% | 8.2% | **−15.7pp** | 159 |
+| SURG | 56.0% | 36.5% | **−19.6pp** | 1,472 |
+
+**The +2.18pp top-1 department gain is concentrated almost entirely on MED.** MED is 59% of the test set (12,045 of 20,420), so its +21.8pp recall lift translates to +2,629 additional correct predictions — enough to dominate the top-1 metric. Every other department either ticked up by <1.5pp or regressed; SURG fell −19.6pp and OTHER fell −15.7pp.
+
+This pattern is consistent with what isotonic calibration does on imbalanced multiclass softmax: the per-class isotonic regressors can compress minority-class probabilities downward (because the underlying XGBoost over-confidence on MED gives the calibrator a strong "trust MED more" signal). Cohen's κ on department dropping from 0.5009 to 0.4948 confirms this — the κ statistic penalises non-uniform improvement, and a single-class-dominant shift like this lowers it even when raw top-1 rises.
+
+### Why this is shippable anyway
+
+- Top-1 and top-3 both ticked up. Top-3 (94.07%) is essentially the ceiling on this 11-class problem already; for clinical decision support where the doctor sees a ranked short list, the calibrated probabilities are now more honest.
+- The MED-dominance is *not* introduced by Tier A in absolute terms — pre-Tier-A v3 nurse already had MED at 78.6% recall vs SURG at 54.9% and OTHER at 12.6%. Tier A widens the gap rather than creating it.
+- A1 (Optuna macro-F1 sweep) is the next planned lever and is *explicitly designed to recover minority recall*: its objective is macro-F1 (not flat top-1), and its search space includes `class_weight_exponent ∈ [0.4, 1.0]` which lets the optimiser dial up minority weighting if that lifts macro-F1.
+
+### Implementation
+
+- **A2 vocab:** [`src/proiect_licenta/pmh_vocab.py`](../../src/proiect_licenta/pmh_vocab.py) lines 459-695. No code change needed — the existing `_aggregate_pmh` aggregator picks up the new keywords at training time.
+- **A3 cascade:** new helpers `build_diag_cascade_cols` and `_attach_diag_cascade` in [`src/proiect_licenta/training/train_nurse_v3.py`](../../src/proiect_licenta/training/train_nurse_v3.py). Inference-side cascade in [`src/proiect_licenta/tools/doctor_tool_v3.py`](../../src/proiect_licenta/tools/doctor_tool_v3.py) reads `metadata["diag_cascade_cols"]`. Legacy `predicted_diagnosis` single-int fallback retained for pre-A3 artifacts.
+- **A4 calibration:** see the A4 block in `train_nurse_v3.main()` after the dept fit. Uses `FrozenEstimator` (sklearn 1.6+) with `cv=None` because `cv="prefit"` is deprecated in sklearn 1.6+; legacy `cv="prefit"` fallback retained for sklearn < 1.6.
+- **Metadata audit fields:** `diag_cascade_cols` (A3), `department_calibration` block (A4) with uncalibrated_accuracy, calibrated_accuracy, n_fit, n_cal.
+
+### What's next
+
+**A1 — Optuna macro-F1 sweep.** The only Tier A lever not yet shipped. Expected lift: +0.5-1.5pp diagnosis with more impact on minority recall (Infectious / Other / Blood / Endocrine / Genitourinary). The class-weight-exponent dimension in the search space directly addresses the minority-class regressions that A4 introduced on the department side. After A1 lands, the full Tier A stack should be re-evaluated end-to-end.
+
+---
+
 ## Tools
 
 - **`DoctorPredictionTool` (v1)** — `src/proiect_licenta/tools/doctor_tool.py`. Wraps the diagnosis v1 + department v1 models, rebuilds the 2025-feature vector from triage output.
@@ -454,7 +548,8 @@ See [`../future-work.md`](../future-work.md) for the full roadmap. Doctor-specif
 - ~~Add PMH features from prior discharge notes + ICD codes.~~ **DONE in Change 1 (2026-05-21)**, see the [Change 1 section](#change-1--pmh-features).
 - ~~**Change 2** — multi-label seq_num 2, 3 sibling head, blended with the softmax logits at inference.~~ **TRIED AND REVERTED (2026-05-21)**. Lift came in at +0.04pp top-3 best case (well below the +1.5-3pp predicted band). The multilabel head's signal is correlated with the softmax (same features, related labels), not orthogonal — linear blending couldn't extract additional accuracy. See [`../future-work.md`](../future-work.md) "Empirical findings — experiments tried and reverted" entry 4 for the alpha sweep + diagnosis.
 - ~~**Change 4** — Two-stage surgical-vs-medical department routing (binary gate + 4-class medical head + 7-class surgical head, soft-blended at inference).~~ **TRIED AND REVERTED (2026-05-21)**. Net delta vs the legacy single-head model was **−1.22pp top-1 / −0.63pp top-3** on the same 20,420-row test split. Gate binary accuracy landed at 82.0%, which bounds the end-to-end ceiling — soft-blending cannot recover the 18% of patients misrouted at stage 1. TRAUM did recover +6.7pp under the surgical-only head (validating part of the hypothesis), but the volume-weighted impact of MED's −1.5pp regression (12,045 stays) ate the surgical gains many times over. Root cause: the plan deprived the gate of nurse features (snapshot vitals, meds, longitudinal); empirically those features *help* surgical-vs-medical discrimination, so the deprivation strictly hurt routing vs the legacy single model. See [`../future-work.md`](../future-work.md) "Empirical findings — experiments tried and reverted" entry 5 for the per-class delta table and post-mortem.
-- **Next planned: Change 3** — Optuna hyperparameter sweep with macro-F1 objective. The remaining Tier A lever.
+- ~~**Tier A — A2 (PMH vocab expansion, 397 → 596 keywords) + A3 (diagnosis-softmax cascade, 13 `diag_proba_*` columns into the dept model) + A4 (isotonic department calibration via FrozenEstimator + CalibratedClassifierCV).**~~ **SHIPPED (2026-05-22)**. Net Tier A deltas vs the pre-Tier-A Change-1 baseline: **diagnosis −0.09pp top-1 (flat), department +2.18pp top-1 (68.61% → 70.79%)**. A4 calibration delivered +1.46pp on its own — 4-5× the predicted band. Caveat: the dept top-1 gain is concentrated almost entirely on MED (+21.8pp vs v3 base, 12,045 stays); most non-MED departments regressed and Cohen's κ slipped from 0.5009 to 0.4948. See the [Tier A section](#tier-a--vocab-expansion--softmax-cascade--isotonic-calibration) above for the full per-lever attribution and per-class table.
+- **Next planned: A1 — Optuna macro-F1 sweep + class-weight exponent tuning.** The only remaining Tier A lever, intended to recover minority-class recall that A4 calibration suppressed on the department side and to lift the still-flat diagnosis top-1.
 - Hierarchical approach: first classify "Symptoms/Ill-Defined vs real diagnosis", then predict specific category.
 - The "Symptoms, Signs, Ill-Defined" catch-all (33%) is a labeling issue — patients coded with symptom-level ICD codes vs disease-level codes may have identical presentations.
 - Surgical department routing could benefit from **injury-specific features** (fracture mechanism, MVA detail, blunt vs penetrating) rather than vitals — Change 4 confirmed that a feature-set or routing-only fix isn't enough; the surgical-bucket regression is a feature-information problem.
