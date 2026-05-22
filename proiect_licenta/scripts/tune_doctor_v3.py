@@ -33,6 +33,30 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+
+# Python 3.12 / pydantic / optuna compatibility shim. Pydantic (pulled in by
+# CrewAI) monkey-patches warnings.warn with a filter that predates Python
+# 3.12's new skip_file_prefixes kwarg. Optuna's optuna_warn passes that kwarg
+# on 3.12, causing TypeError. Wrap the patched warn with a kwargs-tolerant
+# shim — preserves pydantic's filtering while accepting unknown kwargs. Must
+# run before `import optuna` (which it does — optuna is imported lazily inside
+# main()).
+import warnings as _w
+if not getattr(_w, "_optuna_compat_patched", False):
+    _patched_warn = _w.warn
+
+    def _compatible_warn(message, category=Warning, stacklevel=1, source=None, **kwargs):
+        try:
+            return _patched_warn(message, category=category, stacklevel=stacklevel,
+                                 source=source, **kwargs)
+        except TypeError:
+            return _patched_warn(message, category=category, stacklevel=stacklevel,
+                                 source=source)
+
+    _w.warn = _compatible_warn
+    _w._optuna_compat_patched = True
+
+
 import numpy as np
 import pandas as pd
 import joblib
