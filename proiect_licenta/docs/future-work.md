@@ -112,6 +112,65 @@ Full per-lever attribution, per-class tables, implementation pointers, and the "
 
 ---
 
+## Experiments in progress
+
+### A1 — Optuna macro-F1 sweep (10/30 trials, paused 2026-05-22)
+
+`scripts/tune_doctor_v3.py` runs an Optuna TPE sampler against the v3-nurse 13-class diagnosis model, optimising macro-F1 on a 16,336-row inner-val split (random_state=1, drawn from the train_nurse_v3 outer-train of 81,680 rows so it doesn't overlap with the held-out test). Storage: persistent SQLite at `artifacts/doctor/v3/optuna_study.db` (Drive-symlinked, so the study survives Colab session reclaim). Study name `diag_v3_macro_f1`. Seed 42, multivariate sampler.
+
+**Search space** (per the Tier A plan):
+
+| Param | Range | Current default |
+|---|---|---|
+| `max_depth` | int [6, 12] | 10 |
+| `learning_rate` | log [0.005, 0.05] | 0.02 |
+| `colsample_bytree` | uniform [0.3, 0.9] | 0.5 |
+| `colsample_bylevel` | uniform [0.5, 1.0] | 0.7 |
+| `min_child_weight` | int [1, 20] | 3 |
+| `gamma` | log [0.01, 1.0] | 0.05 |
+| `reg_alpha` | log [0.01, 5.0] | 0.5 |
+| `reg_lambda` | log [0.5, 10.0] | 2.0 |
+| `class_weight_exponent` | uniform [0.4, 1.0] | 0.5 (sqrt) |
+
+**First 10 trials** (sorted by inner-val macro_f1):
+
+| Trial | macro_f1 | top1 | best_iter | depth | lr | min_child | reg_a | reg_l | cw_exp |
+|---|---|---|---|---|---|---|---|---|---|
+| **2 (best)** | **0.5536** | 0.6306 | 2999 | 9 | 0.0098 | 6 | 0.170 | 5.254 | 0.52 |
+| 9 | 0.5490 | 0.6254 | 2999 | 10 | 0.0107 | 7 | 0.526 | 7.133 | 0.68 |
+| 6 | 0.5490 | 0.6276 | 883 | 10 | 0.0418 | 1 | 0.112 | 1.127 | 0.90 |
+| 1 | 0.5488 | 0.6222 | 2999 | 10 | 0.0052 | 5 | 0.031 | 1.244 | 0.71 |
+| 0 | 0.5485 | 0.6251 | 1193 | 8 | 0.0446 | 4 | 0.014 | 6.697 | 0.76 |
+| 4 | 0.5475 | 0.6220 | 2999 | 8 | 0.0063 | 3 | 0.012 | 7.621 | 0.56 |
+| 3 | 0.5460 | 0.6219 | 2960 | 9 | 0.0196 | 4 | 3.639 | 9.022 | 0.89 |
+| 5 | 0.5457 | 0.6167 | 2999 | 10 | 0.0102 | 4 | 1.236 | 8.342 | 0.94 |
+| 7 | 0.5409 | 0.6164 | 2999 | 8 | 0.0095 | 17 | 4.609 | 5.055 | 0.52 |
+| 8 | 0.5383 | 0.6104 | 2805 | 6 | 0.0327 | 16 | 0.093 | 0.707 | 0.92 |
+
+Hand-picked-defaults baseline on the OUTER test split (the current production v3 nurse model from the Tier A retrain): macro_f1 = **0.5529**. Inner-val and outer-test aren't directly comparable but should be close on a 16K-row stratified sample — **the +0.0007 macro_f1 gap is within sampling noise**.
+
+**Patterns observed after 10 trials:**
+
+- **`class_weight_exponent` is converging toward the sqrt default.** Best three trials have cw_exp ∈ {0.52, 0.68, 0.90}; the 0.90 trial scored 0.5490, while the 0.52 trial scored 0.5536. Heavier minority weighting (0.85-0.95) consistently underperformed. The minority-recall lever that A1 was supposed to be **isn't paying off at this point** — TPE is converging toward the existing default.
+- **Low-`learning_rate` trials (< 0.01) hit the 3000-iteration cap without converging.** Their `best_iter = 2999` flags them as undertrained, so their macro_f1 is a pessimistic estimate. The implicit budget seems to favour either `lr ≈ 0.01` with `n_estimators = 3000` or `lr ≈ 0.04` with `best_iter ≈ 1000-1500`.
+- **The loss surface is flat.** Trials #6 (lr=0.04, cw=0.90, depth=10) and #9 (lr=0.011, cw=0.68, depth=10) both score macro_f1 = 0.549 with very different params. Many configurations give similar metrics — there's no single "right" config.
+- **Best trial's params are close to the hand-picked defaults.** Suggests the defaults are already near a local optimum.
+- **`min_child_weight ≥ 16` is bad.** Trials #7 (mcw=17) and #8 (mcw=16) are the two worst. The promising region is mcw ∈ [1, 10].
+
+**State on disk:** `artifacts/doctor/v3/tuned_params.json` has been written with trial #2's config. **No final retrain has been applied** — the production v3 nurse model still uses the hand-picked defaults. `train_nurse_v3.train_model` reads `tuned_params.json` automatically when it exists, so the next `uv run train_nurse_v3` invocation would apply trial #2's config; the user has explicitly deferred that until tuning is complete.
+
+**Resume plan:**
+
+1. Run 20 more trials (`N_TRIALS_THIS_SESSION = 20` in the Optuna notebook's Cell 6) for 30 trials total. Cost: ~3 hours on T4 GPU, splittable across sessions thanks to SQLite resume.
+2. After trial 30, decide based on best macro_f1:
+   - **≥ 0.560 (+0.7pp over baseline)** → real improvement. Run the final retrain via `train_and_benchmark_v3.ipynb` Cell 8 (the script auto-reads `tuned_params.json`), benchmark, document as A1 shipped.
+   - **0.550-0.555** → defaults are near-optimal. Either accept the noise-floor result and document as "A1 attempted, marginal lift", OR narrow the search space (lr to [0.015, 0.05], cw_exp to [0.4, 0.75], mcw to [1, 10]) and run another focused 15 trials.
+   - **No clear winner after 30** → move to higher-ceiling work (B1 cleaner discharge-summary labels, predicted +2-5pp top-1 from clean labels, is the highest remaining lever).
+
+**Interpretation framing for the thesis:** even if A1 ends up flat, the result is informative — it confirms that the v3-nurse diagnosis ceiling around 64% top-1 / 55% macro-F1 is **structural** (TF-IDF feature dominance + minority classes lacking distinctive complaint vocabulary + ICD-as-restated-symptoms labeling noise) rather than tunable. The class-weight-exponent dimension specifically was added to test whether minority recall could be lifted via heavier weighting; the answer so far is "no, not at this feature set."
+
+---
+
 ## Empirical findings — experiments tried and reverted
 
 A round of v3 improvements was implemented, trained, and benchmarked end-to-end (commit reverted). Three changes were tested together; their cumulative effect on **v3 with-nurse** measured against the unchanged held-out test set (20,420 stays, `random_state=42` stratified split) was **+0.18pp diagnosis** top-1 (63.08% → 63.26%) and **−0.30pp department** top-1 (67.11% → 66.81%). Each experiment, in turn, with the empirical reason for reverting:
