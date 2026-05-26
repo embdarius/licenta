@@ -59,6 +59,12 @@ def train_triage_v2():
     train_pipeline_v2()
 
 
+def train_triage_v3():
+    """Train the triage ML models v3 (v2 features + PMH; training/train_triage_v3.py)."""
+    from proiect_licenta.training.train_triage_v3 import main as train_pipeline_v3
+    train_pipeline_v3()
+
+
 def train_doctor():
     """Train the doctor v1 ML models (training/train_doctor.py)."""
     from proiect_licenta.training.train_doctor import main as train_doctor_pipeline

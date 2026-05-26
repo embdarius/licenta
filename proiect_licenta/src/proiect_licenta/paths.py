@@ -14,6 +14,7 @@ Layout (relative to the project root):
     +-- triage/
     |   +-- v1/                 # acuity, disposition, tfidf, severity_map, metadata
     |   +-- v2/                 # v1 + vital_medians (with vital signs)
+    |   +-- v3/                 # v2 + PMH features (Doctor Change 1 recipe)
     +-- doctor/
         +-- v1/                 # diagnosis_model, department_model, metadata (14 classes)
         +-- v2/                 # same names; trained with nurse data (14 classes)
@@ -65,6 +66,9 @@ ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
 TRIAGE_V1_DIR = ARTIFACTS_DIR / "triage" / "v1"
 TRIAGE_V2_DIR = ARTIFACTS_DIR / "triage" / "v2"
+# Triage v3 adds the same 19-feature PMH block used by Doctor v3 nurse
+# (Change 1) on top of the v2 vital-augmented feature set.
+TRIAGE_V3_DIR = ARTIFACTS_DIR / "triage" / "v3"
 DOCTOR_V1_DIR = ARTIFACTS_DIR / "doctor" / "v1"
 DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # v3 tier: catch-all class ("Symptoms, Signs, Ill-Defined") excluded, full
