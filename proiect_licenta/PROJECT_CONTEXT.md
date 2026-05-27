@@ -51,8 +51,12 @@ Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
 
 | Model | Top-1 | Top-3 | Notes |
 |---|---|---|---|
-| Triage — Acuity (5 classes) | 66.7% | — | 97.7% within-1-level (v2: 68.0% with vitals for ambulance/helicopter) |
-| Triage — Disposition (2 classes) | 75.9% | — | ROC AUC 0.84 |
+| Triage v1 — Acuity (5 classes) | 66.7% | — | 97.7% within-1-level (no vitals) |
+| Triage v2 — Acuity (5 classes) | 68.0% | — | 98.0% within-1-level; vitals added for ambulance/helicopter |
+| **Triage v3 — Acuity (5 classes)** | **68.6%** | — | **98.2% within-1-level; + 19 PMH features (Doctor v3 Change 1 recipe). +0.60pp vs v2; walk-in patients gain +0.72pp (vs +0.34pp for ambulance — PMH fills the vitals-masked signal gap).** |
+| Triage v1 — Disposition (2 classes) | 75.9% | — | ROC AUC 0.84 (no vitals) |
+| Triage v2 — Disposition (2 classes) | 76.2% | — | ROC AUC 0.84 |
+| **Triage v3 — Disposition (2 classes)** | **78.0%** | — | **ROC AUC 0.86. +1.80pp vs v2; `pmh_Blood and Blood-Forming Organs` is rank 5 in the disposition model — PMH is materially driving the admit/discharge signal.** |
 | Doctor v1 — Diagnosis (14 classes) | 50.2% | 83.6% | 3.05x over random |
 | Doctor v1 — Department (11 classes) | 59.1% | 92.5% | majority baseline 59.9% |
 | Doctor v2 — Diagnosis (14 classes) | 52.4% | 84.9% | +2.3pp over v1 |
@@ -89,8 +93,15 @@ v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't 
 # Install dependencies
 uv sync
 
-# Train/retrain triage ML models (~90 minutes)
+# Train/retrain triage v1 ML models (~90 minutes CPU; pre-vital baseline)
 uv run train_models
+
+# Train/retrain triage v2 ML models with vital signs (~90 minutes CPU)
+uv run train_triage_v2
+
+# Train/retrain triage v3 ML models with vital signs + PMH (~30-45 min Colab T4 GPU,
+# ~120 min CPU; the discharge.csv PMH parse dominates). See notebooks/train_triage_v3.ipynb.
+uv run train_triage_v3
 
 # Train/retrain doctor v1 ML models (~30 minutes)
 uv run train_doctor
@@ -114,6 +125,7 @@ uv run run_crew
 uv run python benchmarks/benchmark_triage_v1.py             # Triage v1 models
 uv run python benchmarks/benchmark_triage_v2.py             # Triage v2 models (with vitals)
 uv run python benchmarks/benchmark_triage_v2_realistic.py   # Triage v2 under realistic missing-vitals scenario
+uv run python benchmarks/benchmark_triage_v3.py             # Triage v3 (PMH) — head-to-head vs v2 on the same test rows
 uv run python benchmarks/benchmark_doctor.py                # Doctor v1 models
 uv run python benchmarks/benchmark_nurse.py                 # Doctor v1 vs v2 comparison
 uv run python benchmarks/benchmark_doctor_v3.py             # Doctor v3 base (13 classes)
@@ -131,7 +143,8 @@ GEMINI_API_KEY=<key>
 
 ## Status Summary
 
-- **Phase 1 — Triage System:** Complete. See [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md).
+- **Phase 1 — Triage System:** Complete (v1, v2, v3). See [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md).
+- **Triage v3 — PMH features (2026-05-26):** Complete (training + benchmark). Reuses Doctor v3 Change 1's 19-feature PMH block on the full triage dataset. **Acuity +0.60pp / Disposition +1.80pp** on the same held-out test rows; walk-in patients gain ~2× the ambulance lift on acuity (+0.72pp vs +0.34pp) — validates the "PMH fills the signal gap where vitals are masked" hypothesis. The PMH aggregator was extracted from `train_nurse_v3.py` into a shared `pmh_features.py` module so triage and doctor pipelines share code. Inference rewiring (adding a PMH prompt to the NLP Parser, updating `triage_tool.py` to load v3 artifacts) is the next staged change. See ["Triage v3 — PMH features" in triage-agent.md](docs/agents/triage-agent.md#triage-v3--pmh-features) and ["Triage v3" in future-work.md](docs/future-work.md#triage-v3--pmh-features-at-triage-time-shipped-2026-05-26).
 - **Phase 2 — Doctor v1 (initial assessment):** Complete. See [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
 - **Phase 3 — Nurse Agent + Doctor v2:** Complete. See [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) and [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md).
 - **Doctor v3 tier (catch-all excluded, longitudinal vitals + rhythm):** Complete. See the Phase 3 section of [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md). A separate round of v3 improvements (`is_surgical` flag, Bio_ClinicalBERT embeddings, pairwise refiner) was tried and reverted — see "Empirical findings" in [`docs/future-work.md`](docs/future-work.md).

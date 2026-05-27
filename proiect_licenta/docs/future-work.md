@@ -24,6 +24,55 @@ The v1 -> v2 upgrade added 31 new features (20 vital signs + 11 medications) yet
 
 ## Empirical findings — experiments shipped
 
+### Triage v3 — PMH features at triage time (SHIPPED 2026-05-26)
+
+Implemented from the Triage Improvements + Doctor-Level Discharge Prediction plan in `plans/read-the-documentation-of-tidy-scone.md` (section 1.4). Reuses the Doctor v3 nurse Change 1 recipe — same 19-feature PMH block — applied to the full triage dataset (admitted + discharged, 418K rows, not just admitted).
+
+To enable cross-pipeline reuse without duplication, `_aggregate_pmh` and its helpers were **extracted from `train_nurse_v3.py` into a new shared module `src/proiect_licenta/pmh_features.py`** during this shipment. The doctor v3 nurse pipeline now imports `aggregate_pmh` and `fill_missing_pmh_columns` from there instead of defining them locally; behavior is unchanged (verified by import + symbol checks). The new triage v3 pipeline imports from the same module.
+
+**Result on the held-out 83,617-row test split (random_state=42, stratified on acuity):**
+
+| Metric | v2 | v3 | Δ |
+|---|---|---|---|
+| **Acuity exact accuracy** | 68.01% | **68.61%** | **+0.60pp** |
+| Acuity within-1-level | 98.04% | **98.24%** | +0.20pp |
+| Cohen's κ (quadratic) | 0.6381 | **0.6477** | +0.0096 |
+| Under-triage rate | 17.67% | **17.24%** | −0.43pp |
+| **Disposition accuracy** | 76.17% | **77.96%** | **+1.80pp** |
+| Disposition ROC AUC | 0.8440 | **0.8643** | +0.0203 |
+
+**Predicted bands** (from the recommendation plan): +1-2pp acuity, +1.5-2.5pp disposition. Acuity came in **below** the band, disposition came in **in-band**.
+
+**Walk-in asymmetric lift confirms the design hypothesis.** PMH lifts walk-in / other-transport patients (where vitals are masked) more than ambulance / helicopter patients (who already have EMS vitals):
+
+| Arrival transport | n | v2 exact | v3 exact | Δ |
+|---|---|---|---|---|
+| Ambulance/Helicopter (real vitals) | 30,187 | 70.40% | 70.74% | +0.34pp |
+| Walk-in (vitals masked) | 50,327 | 66.80% | **67.51%** | **+0.72pp** |
+| Other/Unknown (vitals masked) | 3,103 | 64.42% | **65.68%** | **+1.26pp** |
+
+Walk-ins gain ~2× the ambulance lift; "other" gains ~4×. Exactly the pattern we wanted: PMH fills the signal gap where vital signs are unavailable.
+
+**Per-head PMH importance audit:**
+
+| Check | Acuity model | Disposition model |
+|---|---|---|
+| PMH features with non-zero gain | 19 / 19 | 19 / 19 |
+| PMH features in top 50 by gain | 0 | **4** |
+| Highest-ranked PMH feature | `pmh_Circulatory` at rank 170 | **`pmh_Blood and Blood-Forming Organs` at rank 5** |
+
+The asymmetry is real and clinically interpretable: chronic-condition flags are stronger predictors of *admission* than of *acuity*. ESI is largely about the acute presentation; the admit/discharge decision is much more influenced by prior cardiac / blood / endocrine history. This is also exactly why disposition matched the predicted band and acuity didn't.
+
+**Why acuity came in below the predicted band:**
+
+1. **PMH is more about chronic disease than acute presentation.** Prior CHF tells you the patient has cardiac history; it doesn't reliably tell you if today's visit is ESI 2 or ESI 3.
+2. **~39% of test rows are first-time MIMIC patients** (`no_history=1`). For those rows all PMH flags are zero — Change 1 contributes nothing on acuity beyond noise. The effective lift on the 61% of test rows with prior history is closer to **+1.0pp acuity / +2.9pp disposition** (back-of-envelope: 0.60 / 0.61 and 1.80 / 0.61).
+3. **The acuity model's `best_iteration` is still 2999/3000** — same as v2. The training didn't converge; lowering lr to 0.01 with n_estimators=5000 is the cheapest remaining lift (still open under Triage open items below).
+
+**Inference status:** v3 is benchmark-only as of shipment. The runtime `triage_tool.py` still loads `artifacts/triage/v2/`. Wiring the v3 model into the live crew requires adding a PMH prompt to the NLP Parser (so the patient self-reports chronic conditions) and updating the inference tool to load v3 artifacts. This is the next staged change.
+
+Full implementation, per-class numbers, and the "result vs prediction" analysis live in [`docs/agents/triage-agent.md#triage-v3--pmh-features`](agents/triage-agent.md#triage-v3--pmh-features). Colab GPU training: `notebooks/train_triage_v3.ipynb` (~30-45 min end-to-end on T4).
+
 ### Change 1 — PMH features from prior discharge notes + ICD fallback (SHIPPED 2026-05-21)
 
 Implemented from the Tier A plan in `plans/analyze-my-project-based-proud-brooks.md`. Added 19 new features to the v3-nurse feature vector (102,100 rows × 2,116 cols):
@@ -292,7 +341,8 @@ Ordered by expected lift per unit of effort.
 
 ### Tier 1 — high-lift, mostly low-risk
 
-1. ~~**Add triage vitals to the triage model itself.**~~ **DONE (triage v2).** Vital signs from `triage.csv` are now used for ambulance/helicopter patients (~36%). The training pipeline masks vitals for walk-ins to match inference behavior. Acuity improved from 66.7% → 68.0% overall, and ambulance/helicopter patients specifically score 70.4%. Best iteration hit 2999/3000 — adding more trees is the next free lift for this model.
+1. ~~**Add triage vitals to the triage model itself.**~~ **DONE (triage v2).** Vital signs from `triage.csv` are now used for ambulance/helicopter patients (~36%). The training pipeline masks vitals for walk-ins to match inference behavior. Acuity improved from 66.7% → 68.0% overall, and ambulance/helicopter patients specifically score 70.4%.
+1b. ~~**Add PMH features to the triage model.**~~ **DONE (triage v3, 2026-05-26).** Same 19-feature PMH block Doctor v3 nurse uses. Acuity 68.01% → 68.61% (+0.60pp); disposition 76.17% → 77.96% (+1.80pp); under-triage rate 17.67% → 17.24% (−0.43pp). Walk-in patients gain ~2× the ambulance lift (+0.72pp vs +0.34pp), validating the "PMH fills the signal gap where vitals are masked" hypothesis. See ["Triage v3 — PMH features at triage time"](#triage-v3--pmh-features-at-triage-time-shipped-2026-05-26) above. Best iteration still 2999/3000 — more trees / lower lr is the next free lift.
 2. ~~**Use longitudinal vitals from `vitalsign.csv` for Doctor v2.**~~ **DONE in Doctor v3 with-nurse.** The v3 with-nurse pipeline aggregates per-stay min / max / last / delta over the first 4h after `intime` for each of the 6 vitals, plus 7 abnormal-reading counts and a normalized `rhythm` one-hot bucket. The 4h window guards against late-stay disposition leakage. See `docs/agents/doctor-agent.md` for the full feature list.
 3. **Use discharge-note diagnosis as cleaner training labels.** Extract a normalized diagnosis from `discharge.csv` to replace the ICD-coded primary diagnosis. This directly attacks the 33% "Symptoms/Ill-Defined" labeling ceiling.
 4. ~~**Train on the full 157K admitted rows** instead of the 100K sample.~~ **DONE in Doctor v3.** v3 trains on the full filtered admitted dataset (~102K rows after the catch-all exclusion). The 100K sub-sample cap is no longer applied.
@@ -316,8 +366,11 @@ Ordered by expected lift per unit of effort.
 ## Model-level improvement opportunities
 
 ### Triage models
-- Add more trees — best_iteration was 2999/3000 on the full dataset, model has not converged.
+- **Add more trees / lower lr.** best_iteration was 2999/3000 on the v2 *and* v3 full datasets — model has not converged in either version. n_estimators=5000 with lr=0.01 is the cheapest untapped lift; predicted +0.3-0.8pp on acuity. Highest-confidence next step.
 - ~~Include triage vital signs from `triage.csv`.~~ **DONE in triage v2.**
+- ~~Add PMH features at triage time (mirror Doctor Change 1 recipe).~~ **DONE in triage v3 (2026-05-26).** +0.60pp acuity / +1.80pp disposition; see [shipped experiments](#triage-v3--pmh-features-at-triage-time-shipped-2026-05-26).
+- **Wire v3 into runtime inference.** v3 is benchmark-only as of shipment — `triage_tool.py` still loads v2. Requires a PMH prompt at the NLP Parser stage so the patient self-reports chronic conditions before triage runs.
+- **Ordinal acuity objective + ESI 1/5 reweighting.** ESI is an ordered scale 1-5 but the current `multi:softprob` treats all class-confusion the same. Custom asymmetric weights (penalize errors by `|y_true − y_pred|` distance) or a QWK-objective Optuna sweep on `class_weight_exponent` should improve κ and the still-broken ESI 5 recall (14% on v3).
 - Try LightGBM as an alternative to XGBoost.
 - Ensemble methods (stacking multiple models).
 - Neural network with learned embeddings for complaint text.
