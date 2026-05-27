@@ -37,14 +37,32 @@ def code(cell_id: str, src: str) -> None:
 
 md("intro-md", """# Triage v3 Training on Colab GPU
 
-Trains `artifacts/triage/v3/` from the current HEAD of the repo on Colab GPU. As of this notebook the v3 pipeline produces:
+Trains `artifacts/triage/v3/` from the current HEAD of the repo on Colab GPU.
 
-- The triage v2 baseline - acuity (ESI 1-5) and disposition (admit/discharge) on TF-IDF + structured triage features + 6 vital signs + 8 abnormality flags + vital-transport / vital-age interactions. Vitals are masked to NaN for non-ambulance / non-helicopter patients during training to match inference behavior.
-- **PMH features (Doctor v3 nurse Change 1 recipe, applied to the full triage dataset)** - 13 binary `pmh_<group>` flags parsed from the "Past Medical History" section of prior MIMIC discharge summaries (OR'd with ICD-derived flags from prior admissions) + 6 prior-encounter numerics: `n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`, `same_complaint_as_prior`, `no_history`.
+## v3 iteration history
 
-Leakage is zero by construction: both PMH sources are filtered to `prior_*time < current_intime`, so a stay never sees its own discharge note or admission.
+**Iteration 1 (2026-05-26):** Initial v3. v2 features (vital signs, abnormality flags, walk-in masking) + 19 PMH features parsed from prior MIMIC discharge summaries + ICD codes (Doctor v3 nurse Change 1 recipe). Acuity 68.01% -> 68.61%, disposition 76.17% -> 77.96%. See `docs/agents/triage-agent.md#triage-v3--pmh-features`.
+
+**Iteration 2 (current):** Two stacked improvements on top of iteration 1:
+- **Section 1.1 - longer training (both heads).** lr 0.02 -> 0.01, n_estimators 3000 -> 5000, early_stopping_rounds 100 -> 150. Iteration 1's `best_iteration` was 2999/3000 on the acuity head and 2983/3000 on the disposition head - neither had converged. Lower lr + more trees gives the booster room to actually find the minimum.
+- **Section 1.2 - ordinal-aware acuity (acuity head only).** Two changes that approximate an ordinal objective without a custom loss function:
+  1. **Extreme-class sample-weight boost.** Multiply the existing sqrt-balanced weights by `ESI_EXTREME_BOOST = {1: 1.5, 2: 1.3, 3: 1.0, 4: 1.0, 5: 2.0}`. Pushes the gradient updates toward the clinically critical extremes (ESI 1 = resuscitation; ESI 5 = currently catastrophic 14% recall) and toward ESI 2 (the most clinically dangerous to under-triage).
+  2. **QWK eval metric for early stopping.** Replace `eval_metric="mlogloss"` with a custom `neg_quadratic_kappa` callable. The booster still trains via the standard multi:softprob loss (proper, smooth) but early stopping now picks the iteration with the highest quadratic-weighted κ - rewarding ordinal-friendly iterations over flat-class-confusion iterations.
+
+The disposition head only gets section 1.1 (binary admit/discharge has no ordinal structure for section 1.2).
+
+## Base feature set (unchanged from iteration 1)
+
+- Acuity + disposition on TF-IDF + structured triage features + 6 vital signs + 8 abnormality flags + vital-transport / vital-age interactions. Vitals are masked to NaN for non-ambulance / non-helicopter patients to match inference behavior.
+- **19 PMH features** - 13 binary `pmh_<group>` flags from prior discharge summaries (OR'd with ICD-derived flags) + 6 prior-encounter numerics (`n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`, `same_complaint_as_prior`, `no_history`).
+
+Leakage is zero by construction: both PMH sources are filtered to `prior_*time < current_intime`.
+
+## GPU + progress
 
 All XGBoost training runs on **GPU (CUDA)** via XGBoost 2.x's `device="cuda"` API. The env vars `XGB_DEVICE=cuda` + `XGB_TREE_METHOD=hist` are set in Cell 7 before training kicks off - read by `train_triage_v3.py:XGB_DEVICE`.
+
+The training cell now shows a **live tqdm progress bar** per head with the latest eval-metric value updating in the postfix, plus periodic `[iter] metric:value` stdout lines every 100 iterations as a backup textual trail.
 
 ---
 
@@ -114,13 +132,13 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 |------|------|
 | Setup + install | ~3 min |
 | GPU smoke test + file checks | < 1 min |
-| `train_triage_v3` total | **~25-40 min** |
+| `train_triage_v3` total | **~40-60 min** (iteration 2: longer training) |
 | &nbsp;&nbsp;discharge.csv PMH parse (CPU) | ~15-25 min |
-| &nbsp;&nbsp;XGBoost acuity (GPU) | ~5-8 min |
-| &nbsp;&nbsp;XGBoost disposition (GPU) | ~3-5 min |
+| &nbsp;&nbsp;XGBoost acuity (GPU, up to 5000 trees) | ~12-20 min |
+| &nbsp;&nbsp;XGBoost disposition (GPU, up to 5000 trees) | ~8-15 min |
 | `benchmark_triage_v3` (head-to-head v2 vs v3) | ~2-3 min |
 
-> The CPU-bound PMH parse dominates. XGBoost on GPU is roughly 4-6x faster than CPU on this workload.""")
+> The CPU-bound PMH parse dominates the first half; longer XGBoost training dominates the second half. Total runtime is ~50% higher than iteration 1.""")
 
 
 md("section1-md", """---
@@ -274,25 +292,32 @@ print('All required checks passed. Ready to train.')""")
 
 
 md("section3-md", """---
-## Section 3 - Train Triage v3 (GPU, v2 features + PMH)
+## Section 3 - Train Triage v3 iteration 2 (GPU)
 
-Trains the v3 pipeline on GPU. Heavy steps inside this single cell:
+Trains the v3 iteration-2 pipeline on GPU. Heavy steps inside this single cell:
 
 1. Load `triage.csv` + `edstays.csv` + `patients.csv` (~1 min). Vitals get masked to NaN for non-ambulance / non-helicopter patients to match inference behavior.
 2. **PMH aggregation:** stream `discharge.csv` (3.3 GB) in chunks, parse the PMH sections against `pmh_vocab.py`, OR with ICD-derived flags from `diagnoses_icd.csv`. ~15-25 min, CPU-bound.
-3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF = **~2070 features** (the final number depends on TF-IDF vocab size on your data).
+3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF = **~2070 features**.
 4. Split 80/20 (random_state=42, stratified on `acuity`).
-5. **Train acuity model on GPU** (~5-8 min). 3000 trees, max_depth=10, lr=0.02, early stopping=100.
-6. **Train disposition model on GPU** (~3-5 min). Same hyperparameters, plus the cascading `predicted_acuity` feature.
+5. **Train acuity model on GPU** (~12-20 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.2 applied: sample weights are multiplied by `ESI_EXTREME_BOOST` and the eval metric is the negative quadratic-weighted κ (XGBoost minimizes, so best iteration = highest κ).
+6. **Train disposition model on GPU** (~8-15 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.1 only - same `logloss` early stopping, no ordinal weighting.
 7. Save artifacts to Drive via the symlink (`artifacts/triage/v3/`).
 
-**Outputs:**
+### What you should see in the cell output
+
+Per training head, the cell shows:
+- A **live tqdm progress bar** ticking once per boosting iteration. The postfix shows the latest validation metric (`neg_quadratic_kappa` for acuity, `logloss` for disposition) so you can watch the model converge in real time.
+- A periodic **`[iter] metric:value`** textual line every 100 iterations as a backup trail (XGBoost's built-in `verbose=100`).
+- After fit completes: the `best_iteration` value. **If `best_iteration` is close to 5000 again, the model still hasn't converged** - drop lr further or push n_estimators higher in a follow-up run.
+
+### Outputs
 - `acuity_model.joblib` - 5-class XGBoost.
 - `disposition_model.joblib` - binary XGBoost with cascading acuity.
 - `tfidf_vectorizer.joblib`, `severity_map.joblib`, `vital_medians.joblib`.
-- `model_metadata.json` with the new `pmh_feature_cols` block.
+- `model_metadata.json` with `pmh_feature_cols`, `training_config` (records lr, n_estimators, sample-weight strategy, ESI_EXTREME_BOOST), and `iteration` field.
 
-*Expected runtime: 25-40 min on T4 GPU.*""")
+*Expected runtime: 40-60 min on T4 GPU.*""")
 
 
 code("cell-train-triage-v3", """# Cell 7: Train Triage v3 on GPU
@@ -380,58 +405,103 @@ runpy.run_path(
 
 
 md("section5-md", """---
-## Section 5 - Audit (PMH feature wiring)
+## Section 5 - Audit (PMH wiring + iteration 2 config)
 
-Fail-fast verification gate. Failing this should block trusting the new artifacts.
+Fail-fast verification gates. Failing any of these should block trusting the new artifacts.
 
+**PMH wiring (unchanged from iteration 1):**
 - The metadata must record exactly 19 PMH feature columns.
-- The acuity model's `feature_importances_` must show ≥1 PMH-related column with non-zero gain. Zero everywhere = silent merge failure (e.g. PMH aggregation ran but the columns weren't merged into the training feature matrix).""")
+- The acuity model's `feature_importances_` must show ≥1 PMH-related column with non-zero gain. Zero everywhere = silent merge failure.
+
+**Iteration 2 config (new):**
+- Metadata must include the `iteration` and `training_config` blocks recorded by `save_models`.
+- Acuity head must have used `neg_quadratic_kappa` as eval_metric and `ESI_EXTREME_BOOST` for sample weighting.
+- `best_iteration` should *not* be 4999 - if it is, the model still hasn't converged at the new (longer) training budget, and a follow-up run with lr=0.005 or n_estimators=8000 is warranted.""")
 
 
-code("cell-audit", """# Cell 10: Audit PMH wiring
+code("cell-audit", """# Cell 10: Audit PMH wiring + iteration 2 training config
 import joblib, pandas as pd, json
 
 meta = json.loads((TRIAGE_V3_DIR / 'model_metadata.json').read_text())
+
+# ===================================================================
+# (A) Iteration 2 training config audit (section 1.1 + 1.2)
+# ===================================================================
+print('=' * 60)
+print('A. Iteration 2 training config audit (sections 1.1 + 1.2)')
+print('=' * 60)
+print(f'  iteration:    {meta.get(\"iteration\")}')
+cfg = meta.get('training_config') or {}
+print(f'  acuity_n_estimators:           {cfg.get(\"acuity_n_estimators\")}  (expected 5000)')
+print(f'  acuity_learning_rate:          {cfg.get(\"acuity_learning_rate\")}  (expected 0.01)')
+print(f'  acuity_early_stopping_rounds:  {cfg.get(\"acuity_early_stopping_rounds\")}  (expected 150)')
+print(f'  acuity_eval_metric:            {cfg.get(\"acuity_eval_metric\")}')
+print(f'  acuity_sample_weight_strategy: {cfg.get(\"acuity_sample_weight_strategy\")}')
+print(f'  esi_extreme_boost:             {cfg.get(\"esi_extreme_boost\")}')
+print(f'  disp_n_estimators:             {cfg.get(\"disp_n_estimators\")}  (expected 5000)')
+print(f'  disp_learning_rate:            {cfg.get(\"disp_learning_rate\")}  (expected 0.01)')
+print(f'  disp_early_stopping_rounds:    {cfg.get(\"disp_early_stopping_rounds\")}  (expected 150)')
+
+assert cfg.get('acuity_n_estimators') == 5000, 'section 1.1 acuity n_estimators not applied'
+assert cfg.get('acuity_learning_rate') == 0.01, 'section 1.1 acuity lr not applied'
+assert 'quadratic_kappa' in (cfg.get('acuity_eval_metric') or ''), 'section 1.2 QWK eval not applied'
+assert cfg.get('esi_extreme_boost'), 'section 1.2 ESI_EXTREME_BOOST not recorded'
+assert cfg.get('disp_n_estimators') == 5000, 'section 1.1 disposition n_estimators not applied'
+
+# Best-iteration check (warn if we hit the new ceiling)
+acuity = joblib.load(TRIAGE_V3_DIR / 'acuity_model.joblib')
+disp = joblib.load(TRIAGE_V3_DIR / 'disposition_model.joblib')
+print(f'\\n  Acuity best_iteration:       {acuity.best_iteration}  (of {cfg.get(\"acuity_n_estimators\")})')
+print(f'  Disposition best_iteration:  {disp.best_iteration}  (of {cfg.get(\"disp_n_estimators\")})')
+
+if acuity.best_iteration >= cfg.get('acuity_n_estimators', 5000) - 1:
+    print('  WARN: acuity model hit the n_estimators ceiling — still has not converged.')
+    print('        Drop lr to 0.005 or push n_estimators to 8000 in a follow-up run.')
+if disp.best_iteration >= cfg.get('disp_n_estimators', 5000) - 1:
+    print('  WARN: disposition model hit the n_estimators ceiling — still has not converged.')
+
+# ===================================================================
+# (B) PMH wiring audit (unchanged from iteration 1)
+# ===================================================================
+print('\\n' + '=' * 60)
+print('B. PMH wiring audit')
+print('=' * 60)
 pmh_cols_meta = meta.get('pmh_feature_cols', [])
-print('PMH metadata audit')
 print(f'  pmh_feature_cols recorded: {len(pmh_cols_meta)} (expected 19)')
 assert len(pmh_cols_meta) == 19
 
-acuity = joblib.load(TRIAGE_V3_DIR / 'acuity_model.joblib')
 feature_names = list(acuity.feature_names_in_)
-print(f'\\nAcuity model: {len(feature_names)} features')
+print(f'  Acuity model:              {len(feature_names)} features')
 
 pmh_prefixes = ('pmh_', 'n_prior_', 'days_since_', 'no_history',
                 'same_complaint_as_prior')
 pmh_cols_model = [f for f in feature_names if f.startswith(pmh_prefixes)]
 importances = pd.Series(acuity.feature_importances_, index=feature_names)
 non_zero_pmh = [f for f in pmh_cols_model if importances[f] > 0]
-print(f'  PMH-related columns in model: {len(pmh_cols_model)}')
-print(f'  With non-zero gain:           {len(non_zero_pmh)}')
+print(f'  PMH-related columns:       {len(pmh_cols_model)}; non-zero gain: {len(non_zero_pmh)}')
 assert len(non_zero_pmh) > 0, 'ZERO PMH features have non-zero gain - silent merge failure.'
 
 # Top PMH columns by gain
 pmh_imp = importances[pmh_cols_model].sort_values(ascending=False)
-print(f'\\nTop 5 PMH features by gain (acuity model):')
+print(f'\\n  Top 5 PMH features by gain (acuity model):')
 for name, gain in pmh_imp.head(5).items():
     overall_rank = list(importances.sort_values(ascending=False).index).index(name) + 1
-    print(f'  rank {overall_rank:4d}: {name:55s} gain={gain:.5f}')
+    print(f'    rank {overall_rank:4d}: {name:55s} gain={gain:.5f}')
 
 # Disposition model
-disp = joblib.load(TRIAGE_V3_DIR / 'disposition_model.joblib')
 disp_feature_names = list(disp.feature_names_in_)
 disp_pmh_cols = [f for f in disp_feature_names if f.startswith(pmh_prefixes)]
 disp_importances = pd.Series(disp.feature_importances_, index=disp_feature_names)
 disp_non_zero = [f for f in disp_pmh_cols if disp_importances[f] > 0]
-print(f'\\nDisposition model: {len(disp_feature_names)} features')
-print(f'  PMH columns: {len(disp_pmh_cols)}; non-zero gain: {len(disp_non_zero)}')
+print(f'\\n  Disposition model:         {len(disp_feature_names)} features')
+print(f'  PMH columns:               {len(disp_pmh_cols)}; non-zero gain: {len(disp_non_zero)}')
 assert len(disp_non_zero) > 0, 'Disposition model also has zero PMH gain.'
 
 disp_pmh_imp = disp_importances[disp_pmh_cols].sort_values(ascending=False)
-print(f'\\nTop 5 PMH features by gain (disposition model):')
+print(f'\\n  Top 5 PMH features by gain (disposition model):')
 for name, gain in disp_pmh_imp.head(5).items():
     overall_rank = list(disp_importances.sort_values(ascending=False).index).index(name) + 1
-    print(f'  rank {overall_rank:4d}: {name:55s} gain={gain:.5f}')
+    print(f'    rank {overall_rank:4d}: {name:55s} gain={gain:.5f}')
 
 print(f'\\nAll audits PASSED.')""")
 

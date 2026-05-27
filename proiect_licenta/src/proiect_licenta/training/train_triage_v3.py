@@ -35,7 +35,7 @@ import numpy as np
 import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score, cohen_kappa_score
 from xgboost import XGBClassifier
 
 # Shared text normalization (peers with v1, v2)
@@ -70,9 +70,116 @@ XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
 # ---------------------------------------------------------------------------
+# Optional progress bars (tqdm.auto picks Jupyter widgets in Colab, plain bar
+# in a terminal). If tqdm isn't installed, fall back to a no-op wrapper so
+# local `uv run train_triage_v3` still works without an extra dependency.
+# ---------------------------------------------------------------------------
+try:
+    from tqdm.auto import tqdm as _tqdm  # type: ignore
+
+    def tqdm(it, **kw):
+        return _tqdm(it, **kw)
+except ImportError:  # pragma: no cover
+
+    def tqdm(it, **kw):  # type: ignore[misc]
+        return it
+
+
+def _make_xgb_progress_callback(n_total: int, desc: str):
+    """Return an XGBoost TrainingCallback that updates a tqdm bar per iteration.
+
+    Falls back to ``None`` if tqdm or the XGBoost callback API isn't available
+    (older XGBoost versions), in which case .fit() runs silently as before.
+
+    The tqdm postfix shows the latest validation-metric value so the user can
+    see eval metrics in real time during training (in the Colab cell).
+    """
+    try:
+        from tqdm.auto import tqdm as _tqdm_cls
+        from xgboost.callback import TrainingCallback
+    except ImportError:
+        return None
+
+    class _TqdmCallback(TrainingCallback):  # type: ignore[misc]
+        def __init__(self):
+            self.pbar = _tqdm_cls(
+                total=n_total, desc=desc, unit="iter", leave=False,
+            )
+
+        def after_iteration(self, model, epoch, evals_log):
+            self.pbar.update(1)
+            # evals_log structure: {'validation_0': {'metric_name': [v1, v2, ...]}}
+            postfix = {}
+            for ds in evals_log:
+                for metric, vals in evals_log[ds].items():
+                    if vals:
+                        postfix[metric] = f"{vals[-1]:.4f}"
+            if postfix and hasattr(self.pbar, "set_postfix"):
+                self.pbar.set_postfix(postfix, refresh=False)
+            return False  # do not stop training
+
+        def after_training(self, model):
+            self.pbar.close()
+            return model
+
+    return _TqdmCallback()
+
+
+# ---------------------------------------------------------------------------
+# Section 1.2 — ordinal-aware acuity weighting
+# ---------------------------------------------------------------------------
+# Multiply the existing sqrt-balanced sample weights by these per-class
+# factors to push the acuity head to pay more attention to clinically critical
+# / rare extremes. The plain `multi:softprob` objective treats every misclass-
+# ification the same; sample-weighting biases the gradient updates toward the
+# classes we care about most.
+#
+#   ESI 1  (resuscitation, ~1.1% of stays):  1.5x — critical; under-triage = death risk
+#   ESI 2  (emergent, ~33% of stays):        1.3x — most clinically dangerous to miss
+#   ESI 3  (urgent, dominant class):         1.0x — baseline
+#   ESI 4  (less urgent):                    1.0x — baseline
+#   ESI 5  (non-urgent, ~0.3% of stays):     2.0x — current recall 14% on v3 base
+#
+# Combined with the QWK eval metric below (which steers early stopping toward
+# ordinal-friendly iterations), this gives the acuity head a soft ordinal
+# objective without requiring a custom loss function.
+ESI_EXTREME_BOOST = {1: 1.5, 2: 1.3, 3: 1.0, 4: 1.0, 5: 2.0}
+
+
+def neg_quadratic_kappa(y_true, y_pred):
+    """Negative quadratic-weighted kappa for XGBoost minimization-based early stopping.
+
+    XGBoost minimizes its eval metric by default. Returning -κ means "lowest
+    -κ" = "highest κ", so early stopping picks the iteration with the best
+    ordinal agreement. Used as the acuity model's eval_metric in place of
+    plain mlogloss — early stopping now optimizes for the ordinal structure
+    of ESI 1-5 rather than treating every class-confusion identically.
+
+    y_pred has shape (n_samples, n_classes) — softmax probabilities. argmax
+    gives the predicted 0-indexed class; y_true is also 0-indexed at fit-time
+    (we shift ESI 1-5 → 0-4 before calling .fit()), so κ comparisons are
+    consistent. κ is invariant to label-set shifts anyway.
+    """
+    y_pred_class = np.argmax(y_pred, axis=1)
+    return -cohen_kappa_score(y_true, y_pred_class, weights="quadratic")
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 TRAIN_CAP = None  # None = use full dataset
+
+# Section 1.1 — train both heads longer with a lower learning rate. The v3
+# baseline hit best_iteration = 2999/3000 (acuity) and 2983/3000 (disposition)
+# — neither head had converged. Halving lr and giving the booster more trees
+# lets it actually find a minimum.
+ACUITY_N_ESTIMATORS = 5000
+ACUITY_LEARNING_RATE = 0.01
+ACUITY_EARLY_STOPPING_ROUNDS = 150
+
+DISP_N_ESTIMATORS = 5000
+DISP_LEARNING_RATE = 0.01
+DISP_EARLY_STOPPING_ROUNDS = 150
 
 # ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
@@ -418,25 +525,51 @@ def train_acuity_model(
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> XGBClassifier:
-    """Train acuity model — same hyperparameters as v2."""
+    """Train the acuity head with section 1.1 (longer training) + section 1.2
+    (ordinal-aware sample weights + QWK early stopping) applied on top of the
+    v3 PMH-augmented feature set.
+
+    Hyperparameters vs the initial v3 iteration:
+      n_estimators       3000 → 5000        (section 1.1)
+      learning_rate      0.02 → 0.01        (section 1.1)
+      early_stopping     100  → 150         (section 1.1)
+      sample_weight      sqrt-balanced × ESI_EXTREME_BOOST  (section 1.2)
+      eval_metric        mlogloss → neg_quadratic_kappa     (section 1.2)
+    """
     print("\n" + "=" * 60)
     print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
+    print(f"         Section 1.1 (longer training) + Section 1.2 (ordinal weights + QWK)")
     print("=" * 60)
 
     class_counts = y_train.value_counts()
     total = len(y_train)
     n_classes = len(class_counts)
-    sample_weights = y_train.map(
+    base_weights = y_train.map(
         lambda x: np.sqrt(total / (n_classes * class_counts[x]))
     )
+    extreme_factor = y_train.map(ESI_EXTREME_BOOST)
+    sample_weights = base_weights * extreme_factor
+
+    print(f"  Class distribution + weighting:")
+    for esi in sorted(class_counts.index):
+        n = int(class_counts[esi])
+        base = float(np.sqrt(total / (n_classes * n)))
+        boost = ESI_EXTREME_BOOST[esi]
+        print(f"    ESI {esi}: n={n:>7,}  base_w={base:.3f}  boost={boost:.2f}x  "
+              f"final_w={base * boost:.3f}")
 
     y_train_shifted = y_train - 1
     y_test_shifted = y_test - 1
 
+    progress_cb = _make_xgb_progress_callback(
+        n_total=ACUITY_N_ESTIMATORS, desc="    XGBoost (acuity)",
+    )
+    callbacks = [progress_cb] if progress_cb is not None else None
+
     model = XGBClassifier(
-        n_estimators=3000,
+        n_estimators=ACUITY_N_ESTIMATORS,
         max_depth=10,
-        learning_rate=0.02,
+        learning_rate=ACUITY_LEARNING_RATE,
         subsample=0.8,
         colsample_bytree=0.5,
         colsample_bylevel=0.7,
@@ -446,32 +579,48 @@ def train_acuity_model(
         reg_lambda=2.0,
         objective="multi:softprob",
         num_class=5,
-        eval_metric="mlogloss",
-        early_stopping_rounds=100,
+        eval_metric=neg_quadratic_kappa,
+        early_stopping_rounds=ACUITY_EARLY_STOPPING_ROUNDS,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
         device=XGB_DEVICE,
         tree_method=XGB_TREE_METHOD,
+        callbacks=callbacks,
     )
 
-    print(f"  Training XGBoost (up to 3000 trees, lr=0.02, early stopping=100; "
-          f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD})...")
+    print(f"\n  Training XGBoost (up to {ACUITY_N_ESTIMATORS} trees, "
+          f"lr={ACUITY_LEARNING_RATE}, early stopping={ACUITY_EARLY_STOPPING_ROUNDS}; "
+          f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD}, eval=neg_qwk)...")
+    # verbose=100 prints a one-line update every 100 boosting iterations
+    # in addition to the tqdm bar — gives the user a textual progress trail
+    # in the notebook output even if the tqdm widget didn't render.
     model.fit(
         X_train, y_train_shifted,
         sample_weight=sample_weights,
         eval_set=[(X_test, y_test_shifted)],
-        verbose=False,
+        verbose=100,
     )
 
-    print(f"  Best iteration: {model.best_iteration}")
+    print(f"  Best iteration: {model.best_iteration}  "
+          f"(eval metric was -κ, so best = highest κ)")
+
+    # Strip the tqdm callback so joblib.dump can pickle the model — the bar
+    # holds an open file handle that pickle chokes on. Only matters during
+    # .fit(); .predict() / .predict_proba() never touch it.
+    try:
+        model.set_params(callbacks=None)
+    except Exception:
+        pass
 
     y_pred = model.predict(X_test) + 1
     accuracy = accuracy_score(y_test, y_pred)
     within_1 = np.mean(np.abs(y_pred - y_test.values) <= 1)
+    kappa_q = cohen_kappa_score(y_test, y_pred, weights="quadratic")
 
-    print(f"\n  Accuracy (exact): {accuracy:.4f}")
+    print(f"\n  Accuracy (exact):              {accuracy:.4f}")
     print(f"  Accuracy (within 1 ESI level): {within_1:.4f}")
+    print(f"  Cohen's κ (quadratic):         {kappa_q:.4f}")
     print(f"\n  Classification Report:")
     print(classification_report(y_test, y_pred, digits=3))
 
@@ -484,19 +633,33 @@ def train_disposition_model(
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> XGBClassifier:
-    """Train disposition model — same hyperparameters as v2."""
+    """Train the disposition head with section 1.1 (longer training).
+
+    Section 1.2 (ordinal weights, QWK eval) is acuity-only — disposition is
+    binary and admit/discharge has no ordinal structure.
+
+    Hyperparameters vs the initial v3 iteration:
+      n_estimators       3000 → 5000        (section 1.1)
+      learning_rate      0.02 → 0.01        (section 1.1)
+      early_stopping     100  → 150         (section 1.1)
+    """
     print("\n" + "=" * 60)
-    print("STEP 4b: Training DISPOSITION model (XGBoost)")
+    print("STEP 4b: Training DISPOSITION model (XGBoost) — Section 1.1 longer training")
     print("=" * 60)
 
     neg_count = (y_train == 0).sum()
     pos_count = (y_train == 1).sum()
     scale = neg_count / pos_count
 
+    progress_cb = _make_xgb_progress_callback(
+        n_total=DISP_N_ESTIMATORS, desc="    XGBoost (disposition)",
+    )
+    callbacks = [progress_cb] if progress_cb is not None else None
+
     model = XGBClassifier(
-        n_estimators=3000,
+        n_estimators=DISP_N_ESTIMATORS,
         max_depth=10,
-        learning_rate=0.02,
+        learning_rate=DISP_LEARNING_RATE,
         subsample=0.8,
         colsample_bytree=0.5,
         colsample_bylevel=0.7,
@@ -507,23 +670,30 @@ def train_disposition_model(
         scale_pos_weight=scale,
         objective="binary:logistic",
         eval_metric="logloss",
-        early_stopping_rounds=100,
+        early_stopping_rounds=DISP_EARLY_STOPPING_ROUNDS,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
         device=XGB_DEVICE,
         tree_method=XGB_TREE_METHOD,
+        callbacks=callbacks,
     )
 
-    print(f"  Training XGBoost (up to 3000 trees, lr=0.02, early stopping=100; "
+    print(f"  Training XGBoost (up to {DISP_N_ESTIMATORS} trees, "
+          f"lr={DISP_LEARNING_RATE}, early stopping={DISP_EARLY_STOPPING_ROUNDS}; "
           f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD})...")
     model.fit(
         X_train, y_train,
         eval_set=[(X_test, y_test)],
-        verbose=False,
+        verbose=100,
     )
 
     print(f"  Best iteration: {model.best_iteration}")
+
+    try:
+        model.set_params(callbacks=None)
+    except Exception:
+        pass
 
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
@@ -566,6 +736,7 @@ def save_models(
 
     metadata = {
         "version": "5-v3",
+        "iteration": "1.1+1.2 (longer training + ordinal-aware acuity)",
         "trained_at": datetime.now().isoformat(),
         "train_cap": TRAIN_CAP,
         "n_total_features": n_features,
@@ -585,7 +756,21 @@ def save_models(
         "acuity_accuracy_within_1": round(within_1_accuracy, 4),
         "disposition_accuracy": round(disposition_accuracy, 4),
         "model_type": "XGBClassifier",
-        "note": "Triage v3: v2 features + 19 PMH features (Doctor v3 Change 1). "
+        "training_config": {
+            "acuity_n_estimators": ACUITY_N_ESTIMATORS,
+            "acuity_learning_rate": ACUITY_LEARNING_RATE,
+            "acuity_early_stopping_rounds": ACUITY_EARLY_STOPPING_ROUNDS,
+            "acuity_eval_metric": "neg_quadratic_kappa (section 1.2)",
+            "acuity_sample_weight_strategy": "sqrt(N/(K*count)) * ESI_EXTREME_BOOST",
+            "esi_extreme_boost": ESI_EXTREME_BOOST,
+            "disp_n_estimators": DISP_N_ESTIMATORS,
+            "disp_learning_rate": DISP_LEARNING_RATE,
+            "disp_early_stopping_rounds": DISP_EARLY_STOPPING_ROUNDS,
+            "disp_eval_metric": "logloss",
+        },
+        "note": "Triage v3 iteration 2 (2026-05-27): v2 features + 19 PMH features "
+                "+ section 1.1 longer training (lr 0.02->0.01, n_est 3000->5000) "
+                "+ section 1.2 ordinal-aware acuity (extreme-class boost + QWK early stopping). "
                 "Acuity model outputs classes 0-4 (add 1 to get ESI 1-5).",
     }
 
