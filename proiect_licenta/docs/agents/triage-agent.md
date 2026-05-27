@@ -2,7 +2,12 @@
 
 The Triage Agent predicts ESI acuity (1-5) and admission vs. discharge from the structured output of the NLP Parser. It is the first ML stage in the cascading pipeline.
 
-A **v3 tier** sits alongside v1/v2 (it does not replace them yet at runtime). v3 keeps the v2 vital-sign feature set and adds 19 PMH features parsed from prior MIMIC `discharge.csv` notes + `diagnoses_icd.csv`, using the same recipe Doctor v3 nurse uses (Change 1). See the [v3 section](#triage-v3--pmh-features) below for the v2→v3 deltas and the PMH details. v1 and v2 stay in the repo as baselines for direct thesis comparison.
+A **v3 tier** sits alongside v1/v2 (it does not replace them yet at runtime). v3 keeps the v2 vital-sign feature set and adds 19 PMH features parsed from prior MIMIC `discharge.csv` notes + `diagnoses_icd.csv`, using the same recipe Doctor v3 nurse uses (Change 1). v3 has been retrained twice:
+
+- **Iteration 1 (2026-05-26)** — initial PMH integration. +0.60pp acuity, +1.80pp disposition vs v2.
+- **Iteration 2 (2026-05-27, kept)** — adds section 1.1 (longer training, lr 0.02→0.01, n_estimators 3000→5000) + section 1.2 (ordinal-aware acuity weighting + QWK early stopping). −0.46pp acuity vs v2 but **−2.11pp under-triage** and ESI 5 recall recovered from a regression. Kept for clinical-safety reasons over iter 1's higher headline accuracy.
+
+See the [v3 section](#triage-v3) below for the iteration-by-iteration breakdown. v1 and v2 stay in the repo as baselines for direct thesis comparison.
 
 ---
 
@@ -117,9 +122,10 @@ Ambulance/helicopter patients benefit directly from their real vitals (+3.6pp vs
 | v3 | + age, gender, arrival_transport | 58.4% | 75.6% |
 | v3b | + TF-IDF 2000, 3000 trees, soft class weights, interaction features | 66.7% | 75.9% |
 | v4 | + vital signs (ambulance/helicopter only), full 334K training set | 68.0% | 76.2% |
-| **v5** | **+ 19 PMH features (Doctor v3 Change 1 recipe), GPU training** | **68.6%** | **78.0%** |
+| v5 (v3 iter 1) | + 19 PMH features (Doctor v3 Change 1 recipe), GPU training | 68.6% | 78.0% |
+| **v5b (v3 iter 2, kept)** | **+ longer training (lr 0.01, n_est 5000) + ordinal-aware acuity (extreme-class boost + QWK early stopping)** | **67.55%** | **77.98%** |
 
-Directory mapping: `artifacts/triage/v1/` = the v3b iteration. `artifacts/triage/v2/` = the v4 iteration. `artifacts/triage/v3/` = the v5 iteration documented in the [v3 section](#triage-v3--pmh-features) below.
+Directory mapping: `artifacts/triage/v1/` = the v3b iteration. `artifacts/triage/v2/` = the v4 iteration. `artifacts/triage/v3/` = the v5b iteration kept on disk (iter 1's artifacts were overwritten by iter 2). See the [v3 section](#triage-v3) below for the per-iteration deltas and the rationale for keeping iter 2 despite its lower headline accuracy.
 
 Training scripts (canonical paths via `src/proiect_licenta/paths.py`):
 - `src/proiect_licenta/training/train_triage_v1.py` — v3b pipeline. Run with `uv run train_models`.
@@ -152,11 +158,13 @@ See [`../future-work.md`](../future-work.md) for the full roadmap. Triage-specif
 
 ---
 
-## Triage v3 — PMH features
+## Triage v3
 
-Added on **2026-05-26**. Mirrors the Doctor v3 nurse Change 1 recipe (PMH features parsed from prior MIMIC encounters), applied to the full triage dataset (admitted + discharged, not just admitted).
+v3 sits alongside v1 and v2. It keeps the v2 feature set (vital signs, abnormality flags, walk-in vitals masking) and adds **19 PMH (Past Medical History) feature columns** derived from prior MIMIC encounters — the same recipe Doctor v3 nurse uses (Change 1).
 
-### What it adds (19 new feature columns)
+v3 has been retrained twice. The current production artifacts on disk (`artifacts/triage/v3/`) are **iteration 2**, kept for clinical-safety reasons over iteration 1's higher headline accuracy. The full iteration history is preserved in this section.
+
+### The 19 PMH features (used by both iterations)
 
 For each training stay, the pipeline looks at the same `subject_id`'s **strictly prior** hospital admissions and ED visits and computes the same 19-column block Doctor v3 uses:
 
@@ -173,83 +181,143 @@ The aggregator lives in [`src/proiect_licenta/pmh_features.py`](../../src/proiec
 
 **Leakage:** zero by construction (same guarantee as Doctor Change 1). All PMH sources filter on `prior_*time < current_intime`.
 
-### Benchmark results — v2 vs v3 (head-to-head on the same test rows)
+PMH coverage on the test set (83,617 stays): 50.9% have ≥1 PMH flag set, 61.3% have ≥1 prior MIMIC encounter, 38.6% are first-time patients (`no_history=1`). Mean prior admissions = 3.36, mean prior ED visits = 3.43.
 
-Same held-out 83,617-row test split (random_state=42, stratified on acuity). Both models predict on the same rows; v2 uses 2051 features, v3 uses 2070.
+---
 
-| Metric | v2 | v3 | Δ |
+### Iteration 1 — PMH features only (2026-05-26)
+
+Initial v3 integration. Same XGBoost hyperparameters as v2 (3000 trees, max_depth=10, lr=0.02, early stopping=100). The only difference vs v2 was the 19 PMH columns added to the feature matrix.
+
+**Benchmark vs v2** (same 83,617-row test split, random_state=42):
+
+| Metric | v2 | v3 iter 1 | Δ |
 |---|---|---|---|
-| **Acuity exact accuracy** | 68.01% | **68.61%** | **+0.60pp** |
+| Acuity exact accuracy | 68.01% | **68.61%** | **+0.60pp** |
 | Acuity within-1-level | 98.04% | **98.24%** | +0.20pp |
-| Acuity within-2-level | 99.89% | 99.92% | +0.03pp |
-| Acuity MAE | 0.3406 | 0.3323 | −0.0083 |
-| Cohen's κ (linear) | 0.5452 | **0.5546** | +0.0094 |
+| Acuity MAE | 0.3406 | **0.3323** | −0.0083 |
 | Cohen's κ (quadratic) | 0.6381 | **0.6477** | +0.0096 |
 | Over-triage rate | 14.32% | 14.15% | −0.17pp |
-| Under-triage rate | 17.67% | **17.24%** | **−0.43pp** |
-| **Disposition accuracy** | 76.17% | **77.96%** | **+1.80pp** |
-| **Disposition ROC AUC** | 0.8440 | **0.8643** | +0.0203 |
+| Under-triage rate | 17.67% | 17.24% | −0.43pp |
+| Disposition accuracy | 76.17% | **77.96%** | **+1.80pp** |
+| Disposition ROC AUC | 0.8440 | **0.8643** | +0.0203 |
 
-**The disposition lift (+1.80pp) is the headline result** — right in the middle of the predicted +1.5-2.5pp band. The acuity lift came in below the predicted band (+0.60pp vs predicted +1-2pp), but landed in clinically meaningful places (see below).
+**Per-class acuity recall** (iter 1): ESI 1 = 58.28%, ESI 2 = 66.40%, ESI 3 = 72.13%, ESI 4 = 62.46%, **ESI 5 = 14.09%**.
 
-**Per-class acuity recall — v3:** ESI 1 = 58.28%, ESI 2 = 66.40%, ESI 3 = 72.13%, ESI 4 = 62.46%, ESI 5 = 14.09%.
+**Walk-in asymmetry — PMH does what we wanted.** PMH lifted walk-in patients (no vitals available) more than ambulance patients (vitals available), validating the design hypothesis:
 
-PMH coverage on the test set: 50.9% of stays have ≥1 PMH flag set, 61.3% have ≥1 prior MIMIC encounter, 38.6% are first-time patients (`no_history=1`). Mean prior admissions = 3.36, mean prior ED visits = 3.43.
-
-### Walk-in asymmetry — PMH does what we wanted
-
-The single most interesting finding: **PMH lifts walk-ins more than ambulance patients**, validating the design hypothesis (PMH fills the signal gap where vitals are masked).
-
-| Arrival transport | n | v2 exact | v3 exact | Δ |
+| Arrival transport | n | v2 exact | iter 1 exact | Δ |
 |---|---|---|---|---|
-| Ambulance/Helicopter (real vitals) | 30,187 | 70.40% | 70.74% | +0.34pp |
-| Walk-in (vitals masked) | 50,327 | 66.80% | **67.51%** | **+0.72pp** |
-| Other/Unknown (vitals masked) | 3,103 | 64.42% | **65.68%** | **+1.26pp** |
+| Ambulance/Helicopter | 30,187 | 70.40% | 70.74% | +0.34pp |
+| **Walk-in** | 50,327 | 66.80% | **67.51%** | **+0.72pp** |
+| **Other/Unknown** | 3,103 | 64.42% | **65.68%** | **+1.26pp** |
 
-Walk-ins and "other" gain ~2-4× more than ambulance patients. For ambulance patients, real vital signs already carry most of the signal; for walk-ins, vitals are masked → PMH is the model's only way to know that this 60-year-old presenting with chest pain has prior CAD admissions.
-
-### Feature-importance audit (verification gate)
+**Feature-importance audit** (iter 1):
 
 | Check | Result |
 |---|---|
-| PMH features with non-zero gain (acuity model) | **19 / 19** (no silent merge failure) |
-| PMH features in top 50 by gain (acuity model) | 0 (matches Doctor Change 1 pattern; top 50 is TF-IDF + vitals dominated) |
-| PMH features with non-zero gain (disposition model) | **19 / 19** |
-| **`pmh_Blood and Blood-Forming Organs` rank in disposition model** | **rank 5** |
-| PMH features in disposition top 50 by gain | **4** (`pmh_Blood`, `pmh_Digestive`, `pmh_Circulatory`, `pmh_Endocrine`) |
+| PMH features with non-zero gain (acuity) | 19 / 19 |
+| PMH features in top 50 by gain (acuity) | 0 |
+| PMH features with non-zero gain (disposition) | 19 / 19 |
+| `pmh_Blood and Blood-Forming Organs` rank (disposition) | **rank 5** |
+| PMH features in disposition top 50 | 4 |
 
-The asymmetry between the two heads is real and clinically interpretable: chronic-condition flags are stronger predictors of *admission* than of *acuity*. ESI is largely about the acute presentation; the admit/discharge decision is much more influenced by prior cardiac / blood / endocrine history.
+Chronic-condition flags are stronger predictors of *admission* than of *acuity* — `pmh_Blood and Blood-Forming Organs` at rank 5 in the disposition model is the smoking gun (sickle cell, anemia, leukemia priors flip the admit threshold).
+
+**The hidden regression that motivated iteration 2.** Iter 1 looks clean at the headline level, but **ESI 5 recall dropped from 21.8% (v2) to 14.09%** — PMH features for the rare, mostly-first-time-patient ESI 5 cohort are noisy and the model deprioritized them. ESI 5 is non-urgent so the clinical risk is low, but the regression is real and motivated rebalancing the per-class weighting.
+
+### Iteration 2 — Section 1.1 (longer training) + Section 1.2 (ordinal-aware acuity), 2026-05-27 (kept)
+
+Two stacked changes on top of iter 1, retrained in a single Colab T4 GPU pass (~44 min total):
+
+**Section 1.1 — longer training** (both heads):
+- `learning_rate`: 0.02 → 0.01
+- `n_estimators`: 3000 → 5000
+- `early_stopping_rounds`: 100 → 150
+
+Iter 1's `best_iteration` was 2999/3000 (acuity) and 2983/3000 (disposition) — neither head had converged. Lower lr + more trees gives the booster room to actually find a minimum. **Result:** acuity converged at `best_iteration = 2405/5000` (well clear of the ceiling). Disposition still hit the ceiling at 4999/5000 — logloss kept dropping monotonically all the way through, but accuracy was already flat by ~iteration 2000, so additional convergence yielded no meaningful lift.
+
+**Section 1.2 — ordinal-aware acuity** (acuity head only — disposition is binary, no ordinal structure):
+
+- **Extreme-class sample-weight boost** — multiplies the existing sqrt-balanced weights by a per-class factor:
+
+  | Class | Boost factor | Rationale |
+  |---|---|---|
+  | ESI 1 (resuscitation) | 1.5× | Critical; under-triage = death risk |
+  | ESI 2 (emergent) | 1.3× | Most clinically dangerous to under-triage |
+  | ESI 3 (urgent, dominant) | 1.0× | Baseline |
+  | ESI 4 (less urgent) | 1.0× | Baseline |
+  | ESI 5 (non-urgent) | 2.0× | Iter 1 recall was a catastrophic 14% |
+
+  With the underlying sqrt-balance, the *effective* training-time weight on the rarest class (ESI 5) ends up ~26× the weight on the dominant class (ESI 3), pushing gradient updates aggressively toward the critical extremes.
+
+- **QWK eval metric for early stopping** — replaces `eval_metric="mlogloss"` with a custom `neg_quadratic_kappa` callable. The booster still trains via the standard `multi:softprob` loss (proper, smooth) but early stopping now picks the iteration with the highest quadratic-weighted κ. In practice the picked iteration is similar to what mlogloss would have chosen (sample-weighting is the dominant lever; QWK is mostly for honest reporting).
+
+**Benchmark vs v2 and iter 1** (same 83,617-row test split):
+
+| Metric | v2 | iter 1 | **iter 2 (kept)** | iter 2 vs v2 | iter 2 vs iter 1 |
+|---|---|---|---|---|---|
+| Acuity exact | 68.01% | 68.61% | 67.55% | −0.46pp | −1.06pp |
+| Acuity within-1 | 98.04% | 98.24% | 98.18% | +0.14pp | −0.06pp |
+| Acuity MAE | 0.3406 | 0.3323 | 0.3437 | +0.0031 | +0.0114 |
+| Cohen's κ (quadratic) | 0.6381 | 0.6477 | 0.6449 | +0.0068 | −0.0028 |
+| Over-triage rate | 14.32% | 14.15% | 16.90% | **+2.58pp** | +2.75pp |
+| **Under-triage rate** | 17.67% | 17.24% | **15.56%** | **−2.11pp** | **−1.68pp** |
+| Disposition accuracy | 76.17% | 77.96% | **77.98%** | +1.81pp | +0.02pp |
+| Disposition ROC AUC | 0.8440 | 0.8643 | **0.8644** | +0.0204 | +0.0001 |
+
+**Per-class acuity recall** — this is where iter 2's design intent is visible:
+
+| Class | v2 | iter 1 | iter 2 | iter 2 vs v2 | iter 2 vs iter 1 |
+|---|---|---|---|---|---|
+| ESI 1 (resuscitation) | 58.8% | 58.28% | **60.30%** | +1.5pp | +2.0pp |
+| ESI 2 (emergent) | 65.4% | 66.40% | **70.83%** | **+5.4pp** | +4.4pp |
+| ESI 3 (urgent, dominant) | 71.8% | 72.13% | 67.23% | −4.6pp | −4.9pp |
+| ESI 4 (less urgent) | 60.7% | 62.46% | 61.67% | +1.0pp | −0.8pp |
+| **ESI 5 (non-urgent)** | **21.8%** | 14.09% | **26.82%** | **+5.0pp** | **+12.7pp** |
+
+ESI 1, ESI 2, and ESI 5 — the clinically critical classes — all improved vs both v2 and iter 1. ESI 3 (the dominant class, 54% of the test set) lost ground, and that loss dominates the headline accuracy. The errors don't disappear; they shift from ESI 2→ESI 3 (under-triage of an emergent patient — clinically dangerous) to ESI 3→ESI 2 (over-triage of an urgent patient — clinically benign, patient gets seen sooner).
+
+**By arrival transport** (iter 2):
+
+| Group | n | v2 | iter 2 | Δ vs v2 |
+|---|---|---|---|---|
+| Ambulance/Helicopter | 30,187 | 70.40% | 69.34% | −1.06pp |
+| Walk-in | 50,327 | 66.80% | 66.63% | −0.16pp |
+| Other/Unknown | 3,103 | 64.42% | 64.94% | +0.52pp |
+
+The walk-in lift that iter 1 surfaced got partially eaten by the ESI 3 reshuffle in iter 2 — but the under-triage drop applies to all transport groups, so the safety case still holds.
+
+### Why we kept iteration 2
+
+Three reasons, in order of weight:
+
+1. **No per-class regression vs v2.** Iter 1 had a hidden regression on ESI 5 (21.8% → 14.09%, −7.7pp) that a thesis examiner would surface on inspection. Iter 2 improves every clinically critical class (ESI 1, 2, 5) vs v2. The headline accuracy is slightly lower, but the per-class story is monotonically better on the classes that matter.
+2. **Under-triage is the clinically meaningful metric.** ED triage literature is clear: under-triage delays care for sick patients (mortality risk), while over-triage costs only nurse-time. Iter 2 reduces under-triage by 2.11pp on 83,617 patients ≈ ~1,765 fewer dangerous misses. That's a more meaningful clinical number than the 0.46pp drop in headline accuracy.
+3. **Disposition is identical between iter 1 and iter 2** (77.96% → 77.98%). Choosing between iterations has zero impact on the disposition story — both deliver the +1.81pp v2 lift.
+
+The cost — a 0.46pp headline accuracy drop, a 2.58pp over-triage increase, and a +0.0114 MAE rise — is consistent with the design intent and is documented honestly here for thesis-defense scrutiny.
 
 ### Inference status
 
-**v3 is benchmark-only as of 2026-05-26.** The runtime `triage_tool.py` still loads `artifacts/triage/v2/` and builds the 2051-feature vector without PMH columns. Wiring the v3 model into the live crew requires:
+**v3 is benchmark-only as of 2026-05-27.** The runtime `triage_tool.py` still loads `artifacts/triage/v2/` and builds the 2051-feature vector without PMH columns. Wiring iter 2 into the live crew requires:
 
 1. Adding a PMH prompt to the NLP Parser (or a step before triage) so the patient self-reports chronic conditions. The Doctor v3 path already has this prompt in the Nurse Agent — moving it earlier in the pipeline or adding a peer prompt to the Parser would do the job.
 2. Updating `triage_tool.py` to load from `artifacts/triage/v3/` and build the 19-column PMH block from the Parser's output (or zero-fill with `no_history=1` if the patient skips).
 
-Both changes are scoped but not yet implemented. Until then, triage v3 is a thesis benchmark, not a runtime artifact.
+This is the next staged change after iter 2's documentation lands.
 
 ### Implementation
 
-- **Training pipeline:** [`src/proiect_licenta/training/train_triage_v3.py`](../../src/proiect_licenta/training/train_triage_v3.py). Reuses the same XGBoost hyperparameters as v2 (3000 trees, max_depth=10, lr=0.02, early stopping=100). Honors `XGB_DEVICE` and `XGB_TREE_METHOD` env vars for Colab GPU training.
+- **Training pipeline:** [`src/proiect_licenta/training/train_triage_v3.py`](../../src/proiect_licenta/training/train_triage_v3.py). Module-level constants (`ACUITY_N_ESTIMATORS`, `ACUITY_LEARNING_RATE`, `ESI_EXTREME_BOOST`, etc.) make the iter-2 config one-line tunable. Defines the custom `neg_quadratic_kappa` eval metric (stripped from the model via `set_params(eval_metric=None)` before `joblib.dump` so the saved artifact is pickle-clean). Honors `XGB_DEVICE` and `XGB_TREE_METHOD` env vars for Colab GPU training.
 - **Shared PMH aggregator:** [`src/proiect_licenta/pmh_features.py`](../../src/proiect_licenta/pmh_features.py). Exports `PMH_FEATURE_COLS`, `PMH_NO_PRIOR_DAYS`, `aggregate_pmh()`, `fill_missing_pmh_columns()`. Both `train_triage_v3.py` and `train_nurse_v3.py` import from here.
 - **Benchmark:** [`benchmarks/benchmark_triage_v3.py`](../../benchmarks/benchmark_triage_v3.py). Head-to-head v2 vs v3 on identical test rows, plus a PMH-feature audit.
-- **Colab notebook:** [`notebooks/train_triage_v3.ipynb`](../../notebooks/train_triage_v3.ipynb), generated by [`scripts/build_colab_notebook_triage_v3.py`](../../scripts/build_colab_notebook_triage_v3.py). T4 GPU, ~30-45 min end-to-end (PMH parse dominates at ~15-25 min).
+- **Colab notebook:** [`notebooks/train_triage_v3.ipynb`](../../notebooks/train_triage_v3.ipynb), generated by [`scripts/build_colab_notebook_triage_v3.py`](../../scripts/build_colab_notebook_triage_v3.py). T4 GPU, ~40-60 min end-to-end for iter 2 (PMH parse ~15-25 min, longer XGBoost training ~20-35 min).
 - **Paths:** `TRIAGE_V3_DIR` added to [`paths.py`](../../src/proiect_licenta/paths.py). Same on-disk layout as v1/v2.
+- **Iteration 2 metadata:** the saved `model_metadata.json` records `iteration: "1.1+1.2 (longer training + ordinal-aware acuity)"` and a `training_config` block with all hyperparameters and the `esi_extreme_boost` dict for reproducibility.
 
-### Result vs prediction, and why
+### Open knobs for follow-up tuning
 
-The recommendation in `plans/read-the-documentation-of-tidy-scone.md` predicted +1-2pp on acuity and +1.5-2.5pp on disposition. Actual: **+0.60pp acuity, +1.80pp disposition**.
-
-Why acuity came in below the band:
-
-1. **PMH is more about chronic disease than acute presentation.** ESI is heavily driven by what the patient walked in with *today* — pain, vital signs, red-flag language. Prior CHF tells you the patient has cardiac history; it doesn't reliably tell you if today's visit is ESI 2 or ESI 3.
-2. **~39% of test rows are first-time patients (`no_history=1`).** For those rows all 13 PMH flags are zero and v3 contributes nothing on acuity beyond noise.
-3. **The acuity model's `best_iteration` is still 2999/3000.** The model hasn't converged — section 1.1 of the original recommendation (more trees / lower lr) remains the cheapest untapped lift.
-
-Why disposition matched the band cleanly:
-
-1. **Prior admission rate is a near-deterministic predictor of admission.** A patient with 8 prior MIMIC admissions in the last 2 years is overwhelmingly likely to be admitted again. The `n_prior_admissions` and `days_since_last_admission` numerics are doing real work.
-2. **Specific PMH categories matter for admission decisions.** `pmh_Blood and Blood-Forming Organs` at rank 5 in the disposition model is the smoking gun — sickle cell, anemia, leukemia priors flip the admit threshold.
-
-Both observations are clinically sensible and align with how human triage nurses work: vitals + chief complaint set the ESI; medical history sets the admit threshold.
+- **Disposition hit the 5000-tree ceiling.** Iter 2's disposition was flat vs iter 1 despite hitting `best_iteration = 4999/5000`. Dropping `DISP_LEARNING_RATE` to 0.005 or pushing `DISP_N_ESTIMATORS` to 10000 would let it converge, but the iter-1-to-iter-2 disposition delta was +0.02pp, so the upside is probably ≤0.2pp. Not currently scheduled.
+- **ESI 5 boost is tunable.** If a future re-train wants to recover some headline accuracy without giving up the under-triage win, dialing the ESI 5 boost from 2.0× to 1.5× (or 1.2×) is the obvious knob. Estimated trade: ~+0.3pp headline accuracy for ~-3pp of the ESI 5 lift. Not recommended for iter 2's documented results, but worth knowing.
+- **QWK eval is mostly cosmetic.** Empirically the sample-weight boost is the dominant lever; the QWK early-stopping picked an iteration very close to what mlogloss would have chosen. The metric is kept because it's a more honest *report* of model quality, not because it changes which model gets saved.

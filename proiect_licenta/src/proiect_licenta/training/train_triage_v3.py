@@ -728,6 +728,19 @@ def save_models(
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Strip the custom eval_metric callable before pickling. Training-time only:
+    # neg_quadratic_kappa is a function defined in this module, so when training
+    # is invoked via `runpy.run_path(..., run_name="__main__")` (the Colab flow),
+    # the callable gets pickled with __module__="__main__". At load time pickle
+    # cannot resolve __main__.neg_quadratic_kappa unless the caller manually
+    # injects it. Stripping eval_metric here makes the saved model loadable
+    # cleanly via plain joblib.load() — eval_metric is fit-time only and is
+    # never consulted at predict() / predict_proba() time anyway.
+    try:
+        acuity_model.set_params(eval_metric=None)
+    except Exception:
+        pass
+
     joblib.dump(acuity_model, MODELS_DIR / "acuity_model.joblib")
     joblib.dump(disposition_model, MODELS_DIR / "disposition_model.joblib")
     joblib.dump(tfidf, MODELS_DIR / "tfidf_vectorizer.joblib")
