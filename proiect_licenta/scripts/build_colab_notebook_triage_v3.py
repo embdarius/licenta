@@ -41,15 +41,18 @@ Trains `artifacts/triage/v3/` from the current HEAD of the repo on Colab GPU.
 
 ## v3 iteration history
 
-**Iteration 1 (2026-05-26):** Initial v3. v2 features (vital signs, abnormality flags, walk-in masking) + 19 PMH features parsed from prior MIMIC discharge summaries + ICD codes (Doctor v3 nurse Change 1 recipe). Acuity 68.01% -> 68.61%, disposition 76.17% -> 77.96%. See `docs/agents/triage-agent.md#triage-v3--pmh-features`.
+**Iteration 1 (2026-05-26, superseded):** Initial v3. v2 features (vital signs, abnormality flags, walk-in masking) + 19 PMH features parsed from prior MIMIC discharge summaries + ICD codes (Doctor v3 nurse Change 1 recipe). Acuity 68.01% -> 68.61%, disposition 76.17% -> 77.96%. Not kept - had a hidden ESI 5 recall regression (21.8% -> 14.09%). See `docs/agents/triage-agent.md#triage-v3`.
 
-**Iteration 2 (current):** Two stacked improvements on top of iteration 1:
-- **Section 1.1 - longer training (both heads).** lr 0.02 -> 0.01, n_estimators 3000 -> 5000, early_stopping_rounds 100 -> 150. Iteration 1's `best_iteration` was 2999/3000 on the acuity head and 2983/3000 on the disposition head - neither had converged. Lower lr + more trees gives the booster room to actually find the minimum.
-- **Section 1.2 - ordinal-aware acuity (acuity head only).** Two changes that approximate an ordinal objective without a custom loss function:
-  1. **Extreme-class sample-weight boost.** Multiply the existing sqrt-balanced weights by `ESI_EXTREME_BOOST = {1: 1.5, 2: 1.3, 3: 1.0, 4: 1.0, 5: 2.0}`. Pushes the gradient updates toward the clinically critical extremes (ESI 1 = resuscitation; ESI 5 = currently catastrophic 14% recall) and toward ESI 2 (the most clinically dangerous to under-triage).
-  2. **QWK eval metric for early stopping.** Replace `eval_metric="mlogloss"` with a custom `neg_quadratic_kappa` callable. The booster still trains via the standard multi:softprob loss (proper, smooth) but early stopping now picks the iteration with the highest quadratic-weighted κ - rewarding ordinal-friendly iterations over flat-class-confusion iterations.
+**Iteration 2 (2026-05-27, superseded):** Stacked on iter 1: section 1.1 (longer training, lr 0.02->0.01, n_estimators 3000->5000) + section 1.2 (ordinal-aware acuity weighting + QWK early stopping). Acuity dropped to 67.55% (-0.46pp vs v2) but under-triage rate dropped -2.11pp and ESI 5 recall recovered to 26.82% (+5pp vs v2). Kept iter 2 over iter 1 for clinical-safety reasons.
 
-The disposition head only gets section 1.1 (binary admit/discharge has no ordinal structure for section 1.2).
+**Iteration 3 (current):** Adds **section 1.5 - hand-curated red-flag keyword features** on top of iter 2:
+- 42 binary `rf_<name>` flags + 2 summary columns (`rf_any_count`, `rf_any`) = 44 new feature columns.
+- Categories: cardiac (chest+crushing, chest+radiating, syncope, palpitations, ...), neuro (stroke, face droop, slurred speech, worst headache, altered mental status, seizure, ...), respiratory (resp distress, cyanosis, stridor, ...), trauma (gunshot, stab, MVC+ejected, fall from height, ...), sepsis/shock (septic shock, fever+altered, hypotension+fever), hemorrhage (active bleeding, GI bleed, hemoptysis), OB/GYN emergencies (ectopic, imminent delivery, pregnant+bleed), anaphylaxis (anaphylaxis, airway swelling), overdose/self-harm (overdose, suicide attempt).
+- Patterns are matched against the **already-normalized** chief-complaint text from `preprocessing.normalize_complaint_text()` - that's where abbreviations like "cp", "sob", "mvc", "ams", "cva" get expanded to their long forms, so the red-flag patterns target the expanded forms ("chest pain", "shortness of breath", "motor vehicle collision", "altered mental status", "cerebrovascular accident stroke").
+- Multi-token red flags use AND-logic: e.g., `rf_chest_crushing` fires when both "chest" AND "crush" (stem-prefix matched) appear anywhere in the same normalized complaint.
+- 11 hardcoded smoke tests in `red_flag_vocab.SMOKE_TESTS` are checked at the start of training - the run aborts early if any regex got broken by a refactor.
+
+The disposition head also picks up the red-flag features automatically (same feature matrix is fed to both heads). Acuity is expected to benefit more (sections 1.5+1.2 together target ESI 1/2 recall), but on the disposition side red flags like anaphylaxis / septic-shock / massive-bleeding are likely admission-flippers, so a modest disposition lift is plausible too.
 
 ## Base feature set (unchanged from iteration 1)
 
@@ -292,13 +295,14 @@ print('All required checks passed. Ready to train.')""")
 
 
 md("section3-md", """---
-## Section 3 - Train Triage v3 iteration 2 (GPU)
+## Section 3 - Train Triage v3 iteration 3 (GPU)
 
-Trains the v3 iteration-2 pipeline on GPU. Heavy steps inside this single cell:
+Trains the v3 iteration-3 pipeline on GPU. Heavy steps inside this single cell:
 
+0. **Red-flag smoke tests** (< 1 sec). Aborts training early if any regex in `red_flag_vocab.py` is broken.
 1. Load `triage.csv` + `edstays.csv` + `patients.csv` (~1 min). Vitals get masked to NaN for non-ambulance / non-helicopter patients to match inference behavior.
 2. **PMH aggregation:** stream `discharge.csv` (3.3 GB) in chunks, parse the PMH sections against `pmh_vocab.py`, OR with ICD-derived flags from `diagnoses_icd.csv`. ~15-25 min, CPU-bound.
-3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF = **~2070 features**.
+3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + **44 red flags** + 2000 TF-IDF = **~2114 features**. Red-flag features are computed inline from the already-normalized complaint text - ~40 regex passes per row, vectorized via pandas; adds < 30 seconds to the build_features step.
 4. Split 80/20 (random_state=42, stratified on `acuity`).
 5. **Train acuity model on GPU** (~12-20 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.2 applied: sample weights are multiplied by `ESI_EXTREME_BOOST` and the eval metric is the negative quadratic-weighted κ (XGBoost minimizes, so best iteration = highest κ).
 6. **Train disposition model on GPU** (~8-15 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.1 only - same `logloss` early stopping, no ordinal weighting.
@@ -306,18 +310,18 @@ Trains the v3 iteration-2 pipeline on GPU. Heavy steps inside this single cell:
 
 ### What you should see in the cell output
 
-Per training head, the cell shows:
-- A **live tqdm progress bar** ticking once per boosting iteration. The postfix shows the latest validation metric (`neg_quadratic_kappa` for acuity, `logloss` for disposition) so you can watch the model converge in real time.
-- A periodic **`[iter] metric:value`** textual line every 100 iterations as a backup trail (XGBoost's built-in `verbose=100`).
-- After fit completes: the `best_iteration` value. **If `best_iteration` is close to 5000 again, the model still hasn't converged** - drop lr further or push n_estimators higher in a follow-up run.
+- **Red-flag smoke tests** at the top of the run: `11 passed, 0 failed`. If anything fails, the cell aborts before loading data.
+- **Red-flag positive rate** printed at the end of build_features: tells you what fraction of training rows match at least one of the 44 red-flag patterns (expected ~5-15% based on chief-complaint phrasing patterns in MIMIC).
+- **Per training head**: a **live tqdm progress bar** ticking once per boosting iteration. The postfix shows the latest validation metric (`neg_quadratic_kappa` for acuity, `logloss` for disposition) so you can watch the model converge in real time. A periodic **`[iter] metric:value`** textual line every 100 iterations as a backup trail (XGBoost's built-in `verbose=100`).
+- After each fit completes: the `best_iteration` value. **If `best_iteration` is close to 5000 again, the model still hasn't converged** - drop lr further or push n_estimators higher in a follow-up run.
 
 ### Outputs
 - `acuity_model.joblib` - 5-class XGBoost.
 - `disposition_model.joblib` - binary XGBoost with cascading acuity.
 - `tfidf_vectorizer.joblib`, `severity_map.joblib`, `vital_medians.joblib`.
-- `model_metadata.json` with `pmh_feature_cols`, `training_config` (records lr, n_estimators, sample-weight strategy, ESI_EXTREME_BOOST), and `iteration` field.
+- `model_metadata.json` with `pmh_feature_cols`, **`red_flag_feature_cols`** (new in iter 3), `training_config` (lr, n_estimators, sample-weight strategy, ESI_EXTREME_BOOST), and `iteration` field tagged `"1.1+1.2+1.5"`.
 
-*Expected runtime: 40-60 min on T4 GPU.*""")
+*Expected runtime: 40-60 min on T4 GPU. Red-flag features add < 1 min to the feature build step; otherwise identical to iter 2.*""")
 
 
 code("cell-train-triage-v3", """# Cell 7: Train Triage v3 on GPU
@@ -405,7 +409,7 @@ runpy.run_path(
 
 
 md("section5-md", """---
-## Section 5 - Audit (PMH wiring + iteration 2 config)
+## Section 5 - Audit (PMH wiring + iteration-3 config + red-flag wiring)
 
 Fail-fast verification gates. Failing any of these should block trusting the new artifacts.
 
@@ -413,10 +417,16 @@ Fail-fast verification gates. Failing any of these should block trusting the new
 - The metadata must record exactly 19 PMH feature columns.
 - The acuity model's `feature_importances_` must show ≥1 PMH-related column with non-zero gain. Zero everywhere = silent merge failure.
 
-**Iteration 2 config (new):**
+**Iteration 2 config (sections 1.1 + 1.2, unchanged from iter 2):**
 - Metadata must include the `iteration` and `training_config` blocks recorded by `save_models`.
 - Acuity head must have used `neg_quadratic_kappa` as eval_metric and `ESI_EXTREME_BOOST` for sample weighting.
-- `best_iteration` should *not* be 4999 - if it is, the model still hasn't converged at the new (longer) training budget, and a follow-up run with lr=0.005 or n_estimators=8000 is warranted.""")
+- `best_iteration` should *not* be 4999 - if it is, the model still hasn't converged at the new (longer) training budget, and a follow-up run with lr=0.005 or n_estimators=8000 is warranted.
+
+**Iteration 3 — red-flag wiring (new for section 1.5):**
+- Metadata must include the `red_flag_feature_cols` block (44 entries: 42 individual rf_* flags + rf_any_count + rf_any).
+- All 44 columns must be present in the trained acuity model's `feature_names_in_`.
+- ≥1 red-flag feature must have non-zero gain on the acuity model. Zero everywhere = silent feature-merge failure (e.g., red-flag DataFrame got built but never appended to the feature matrix).
+- `red_flag_vocab.run_smoke_tests()` must pass all 11 canonical test cases.""")
 
 
 code("cell-audit", """# Cell 10: Audit PMH wiring + iteration 2 training config
@@ -502,6 +512,63 @@ print(f'\\n  Top 5 PMH features by gain (disposition model):')
 for name, gain in disp_pmh_imp.head(5).items():
     overall_rank = list(disp_importances.sort_values(ascending=False).index).index(name) + 1
     print(f'    rank {overall_rank:4d}: {name:55s} gain={gain:.5f}')
+
+# ===================================================================
+# (C) Red-flag wiring audit (section 1.5, new in iteration 3)
+# ===================================================================
+print('\\n' + '=' * 60)
+print('C. Red-flag wiring audit (section 1.5)')
+print('=' * 60)
+
+rf_cols_meta = meta.get('red_flag_feature_cols', [])
+print(f'  red_flag_feature_cols recorded: {len(rf_cols_meta)} (expected 44 — '
+      f'42 binary rf_* + rf_any_count + rf_any)')
+assert len(rf_cols_meta) == 44, \\
+    f'expected 44 red-flag columns in metadata; got {len(rf_cols_meta)}'
+
+# Verify the columns are present in the trained acuity model
+acuity_feature_names = list(acuity.feature_names_in_)
+rf_cols_in_model = [c for c in acuity_feature_names if c.startswith('rf_')]
+print(f'  Red-flag columns in acuity model:    {len(rf_cols_in_model)}')
+assert len(rf_cols_in_model) == 44, \\
+    f'expected 44 rf_* columns in acuity model; got {len(rf_cols_in_model)}'
+
+rf_importances = pd.Series(
+    acuity.feature_importances_, index=acuity_feature_names,
+)
+rf_nonzero = [c for c in rf_cols_in_model if rf_importances[c] > 0]
+print(f'  Non-zero gain (acuity):              {len(rf_nonzero)}/{len(rf_cols_in_model)}')
+assert len(rf_nonzero) > 0, \\
+    'ZERO red-flag features have non-zero gain — silent merge failure?'
+
+# Same check on the disposition model
+disp_rf_cols = [c for c in disp_feature_names if c.startswith('rf_')]
+disp_rf_imps = pd.Series(
+    disp.feature_importances_, index=disp_feature_names,
+)
+disp_rf_nonzero = [c for c in disp_rf_cols if disp_rf_imps[c] > 0]
+print(f'  Non-zero gain (disposition):         {len(disp_rf_nonzero)}/{len(disp_rf_cols)}')
+
+# Top-N red flags by gain
+acuity_rf_top = rf_importances[rf_cols_in_model].sort_values(ascending=False).head(5)
+overall_sorted = rf_importances.sort_values(ascending=False)
+print(f'\\n  Top 5 red flags by gain (acuity):')
+for name, gain in acuity_rf_top.items():
+    overall_rank = list(overall_sorted.index).index(name) + 1
+    print(f'    rank {overall_rank:4d}: {name:30s} gain={gain:.5f}')
+
+disp_rf_top = disp_rf_imps[disp_rf_cols].sort_values(ascending=False).head(5)
+disp_overall_sorted = disp_rf_imps.sort_values(ascending=False)
+print(f'\\n  Top 5 red flags by gain (disposition):')
+for name, gain in disp_rf_top.items():
+    overall_rank = list(disp_overall_sorted.index).index(name) + 1
+    print(f'    rank {overall_rank:4d}: {name:30s} gain={gain:.5f}')
+
+# Re-run smoke tests in the notebook environment as a final sanity check
+from proiect_licenta.red_flag_vocab import run_smoke_tests
+n_smoke_pass, smoke_failures = run_smoke_tests(verbose=False)
+print(f'\\n  Smoke tests:                        {n_smoke_pass}/11 pass')
+assert n_smoke_pass == 11, f'smoke tests failed: {smoke_failures}'
 
 print(f'\\nAll audits PASSED.')""")
 

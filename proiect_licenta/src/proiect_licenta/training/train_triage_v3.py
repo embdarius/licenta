@@ -50,6 +50,15 @@ from proiect_licenta.pmh_features import (
     aggregate_pmh,
     fill_missing_pmh_columns,
 )
+# Section 1.5 — hand-curated red-flag keyword features (~40 binary flags +
+# 2 summaries). Built from the normalized chief-complaint text in
+# build_features() and appended to the structured feature block alongside
+# the PMH columns.
+from proiect_licenta.red_flag_vocab import (
+    RED_FLAG_COLS,
+    build_red_flag_features,
+    run_smoke_tests as run_red_flag_smoke_tests,
+)
 # The PMH aggregator needs the ICD → diagnosis_group mapping from the doctor
 # pipeline (it's the canonical mapping; pmh_features doesn't redefine it).
 from proiect_licenta.training.train_doctor import (
@@ -500,9 +509,25 @@ def build_features(
     # v3 PMH cols (already on df via fill_missing_pmh_columns)
     v3_pmh_cols = list(PMH_FEATURE_COLS)
 
-    all_structured_cols = v1_structured_cols + v2_vital_cols + v3_pmh_cols
+    # v3 iter 3 — section 1.5 — red-flag keyword features.
+    # Built from the already-normalized chief-complaint text. The red-flag
+    # regexes assume the post-normalize_complaint_text form (expanded
+    # abbreviations, lowercase, no punctuation), which is what
+    # df["complaint_text"] already is at this point.
+    red_flag_df = build_red_flag_features(df["complaint_text"].values)
+    red_flag_df.index = df.index
+    v3_red_flag_cols = list(RED_FLAG_COLS)
+    pos_rate = float((red_flag_df["rf_any"] == 1).mean())
 
-    structured = df[all_structured_cols].reset_index(drop=True)
+    all_structured_cols = (
+        v1_structured_cols + v2_vital_cols + v3_pmh_cols + v3_red_flag_cols
+    )
+
+    structured = pd.concat(
+        [df[v1_structured_cols + v2_vital_cols + v3_pmh_cols].reset_index(drop=True),
+         red_flag_df.reset_index(drop=True)],
+        axis=1,
+    )
     tfidf_df = tfidf_df.reset_index(drop=True)
 
     features = pd.concat([structured, tfidf_df], axis=1)
@@ -510,6 +535,8 @@ def build_features(
     print(f"  v1 structured features: {len(v1_structured_cols)}")
     print(f"  v2 vital features: {len(v2_vital_cols)}")
     print(f"  v3 PMH features: {len(v3_pmh_cols)}")
+    print(f"  v3 red-flag features: {len(v3_red_flag_cols)} "
+          f"(rf_any positive rate: {100*pos_rate:.1f}%)")
     print(f"  TF-IDF features: {tfidf_df.shape[1]}")
     print(f"  Total features: {features.shape[1]}")
 
@@ -749,7 +776,7 @@ def save_models(
 
     metadata = {
         "version": "5-v3",
-        "iteration": "1.1+1.2 (longer training + ordinal-aware acuity)",
+        "iteration": "1.1+1.2+1.5 (longer training + ordinal-aware acuity + red-flag keywords)",
         "trained_at": datetime.now().isoformat(),
         "train_cap": TRAIN_CAP,
         "n_total_features": n_features,
@@ -763,6 +790,7 @@ def save_models(
         },
         "pmh_feature_cols": PMH_FEATURE_COLS,
         "pmh_no_prior_days": PMH_NO_PRIOR_DAYS,
+        "red_flag_feature_cols": RED_FLAG_COLS,
         "acuity_classes": [1, 2, 3, 4, 5],
         "disposition_classes": ["NOT ADMITTED", "ADMITTED"],
         "acuity_accuracy_exact": round(acuity_accuracy, 4),
@@ -781,9 +809,11 @@ def save_models(
             "disp_early_stopping_rounds": DISP_EARLY_STOPPING_ROUNDS,
             "disp_eval_metric": "logloss",
         },
-        "note": "Triage v3 iteration 2 (2026-05-27): v2 features + 19 PMH features "
+        "note": "Triage v3 iteration 3 (2026-05-28): v2 features + 19 PMH features "
                 "+ section 1.1 longer training (lr 0.02->0.01, n_est 3000->5000) "
-                "+ section 1.2 ordinal-aware acuity (extreme-class boost + QWK early stopping). "
+                "+ section 1.2 ordinal-aware acuity (extreme-class boost + QWK early stopping) "
+                "+ section 1.5 hand-curated red-flag keyword features (~40 binary flags "
+                "+ rf_any_count + rf_any summary). "
                 "Acuity model outputs classes 0-4 (add 1 to get ESI 1-5).",
     }
 
@@ -804,8 +834,24 @@ def main():
     print("\n" + "#" * 60)
     print("  MIMIC-IV Triage Model Training Pipeline v3")
     cap_str = f"{TRAIN_CAP:,}" if TRAIN_CAP else "full dataset"
-    print(f"  (v2 features + PMH, {cap_str} rows)")
+    print(f"  (v2 features + PMH + section 1.5 red flags, {cap_str} rows)")
     print("#" * 60)
+
+    # Section 1.5 sanity check — fail fast if any red-flag regex got broken
+    # before we burn ~45 min of GPU time on a model that has a broken
+    # feature column. SMOKE_TESTS in red_flag_vocab.py asserts canonical
+    # positive + negative cases (chest crushing, MVC ejected, baseline
+    # laceration, etc.). If this trips, fix the vocab and re-run.
+    print("\n  Red-flag smoke tests:")
+    n_pass, failures = run_red_flag_smoke_tests(verbose=False)
+    print(f"    {n_pass} passed, {len(failures)} failed")
+    if failures:
+        for f in failures:
+            print(f"    {f}")
+        raise RuntimeError(
+            "Red-flag smoke tests failed — refusing to train on a broken "
+            "feature set. Fix `red_flag_vocab.py` and re-run."
+        )
 
     df, _edstays = load_and_clean_data()
 

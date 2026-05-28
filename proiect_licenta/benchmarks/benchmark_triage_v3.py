@@ -310,6 +310,68 @@ def main():
     print(f"  PMH features in top 50: {pmh_in_top50}")
 
     # ===================================================================
+    #  RED-FLAG FEATURE AUDIT (section 1.5)
+    # ===================================================================
+    print_section("v3 ACUITY — RED-FLAG FEATURE AUDIT (section 1.5)")
+
+    rf_feature_idxs = [i for i, n in enumerate(feature_names)
+                       if n.startswith("rf_")]
+    rf_nonzero = sum(1 for i in rf_feature_idxs if importances[i] > 0)
+    rf_in_top50 = sum(1 for i in sorted_idx[:50] if i in rf_feature_idxs)
+    rf_in_top100 = sum(1 for i in sorted_idx[:100] if i in rf_feature_idxs)
+    print(f"  Red-flag features in model:                    {len(rf_feature_idxs)}")
+    print(f"  Red-flag features with non-zero gain (acuity): "
+          f"{rf_nonzero}/{len(rf_feature_idxs)}")
+    print(f"  Red-flag features in top 50 by gain (acuity):  {rf_in_top50}")
+    print(f"  Red-flag features in top 100 by gain (acuity): {rf_in_top100}")
+
+    # Coverage on the test set — how often does any red flag fire?
+    rf_cols_in_test = [c for c in test_df.columns if c.startswith("rf_")] \
+        if any(c.startswith("rf_") for c in test_df.columns) else []
+    # rf_* columns aren't on test_df directly (red-flag features are built
+    # inside build_features), so compute coverage off X_test_v3 instead.
+    rf_any_col = "rf_any"
+    if rf_any_col in X_test_v3.columns:
+        rf_any_rate = float((X_test_v3[rf_any_col] == 1).mean())
+        rf_any_count_mean = float(X_test_v3["rf_any_count"].mean())
+        print(f"  rf_any positive rate on test set:              {100*rf_any_rate:.2f}%")
+        print(f"  Mean rf_any_count per row:                     {rf_any_count_mean:.3f}")
+
+    # Top-N red flags by gain on the ACUITY model (the head that ESI
+    # extreme-class weighting should make most receptive to this signal).
+    rf_imps = sorted(
+        [(feature_names[i], float(importances[i])) for i in rf_feature_idxs],
+        key=lambda kv: kv[1], reverse=True,
+    )
+    print(f"\n  Top 10 red flags by gain (acuity):")
+    for rank, (name, gain) in enumerate(rf_imps[:10], 1):
+        # Overall feature rank for context.
+        overall_rank = int(np.where(sorted_idx == feature_names.index(name))[0][0]) + 1
+        print(f"    {rank:>2}. rank={overall_rank:<4d}  {name:<28s}  gain={gain:.5f}")
+
+    # Same audit on the DISPOSITION head — chronic-condition-like red flags
+    # (anaphylaxis, sepsis, GI bleed) may matter more for admit/discharge.
+    print(f"\n  Disposition head:")
+    disp_feature_names = list(X_test_v3_disp.columns)
+    disp_imps_arr = v3_disp.feature_importances_
+    disp_rf_idxs = [i for i, n in enumerate(disp_feature_names)
+                    if n.startswith("rf_")]
+    disp_rf_nonzero = sum(1 for i in disp_rf_idxs if disp_imps_arr[i] > 0)
+    disp_sorted = np.argsort(disp_imps_arr)[::-1]
+    disp_rf_top50 = sum(1 for i in disp_sorted[:50] if i in disp_rf_idxs)
+    print(f"    Red-flag features with non-zero gain: "
+          f"{disp_rf_nonzero}/{len(disp_rf_idxs)}")
+    print(f"    Red-flag features in top 50 by gain:  {disp_rf_top50}")
+    disp_rf_imps = sorted(
+        [(disp_feature_names[i], float(disp_imps_arr[i])) for i in disp_rf_idxs],
+        key=lambda kv: kv[1], reverse=True,
+    )
+    print(f"\n    Top 5 red flags by gain (disposition):")
+    for rank, (name, gain) in enumerate(disp_rf_imps[:5], 1):
+        overall_rank = int(np.where(disp_sorted == disp_feature_names.index(name))[0][0]) + 1
+        print(f"      {rank:>2}. rank={overall_rank:<4d}  {name:<28s}  gain={gain:.5f}")
+
+    # ===================================================================
     #  SUMMARY
     # ===================================================================
     print_section("BENCHMARK SUMMARY")
