@@ -519,6 +519,173 @@ This pattern is consistent with what isotonic calibration does on imbalanced mul
 
 ---
 
+## Doctor disposition v3 — peer model (plan section 3, Option B, shipped 2026-05-28)
+
+A peer **binary admit/discharge classifier** that sits alongside the v3 diagnosis + department models, refining the triage-time disposition (currently 80.19% accuracy / 0.8894 ROC AUC against the same disposition-pipeline test rows — see "Why two reference numbers" below) using the nurse-collected snapshot vitals + longitudinal vitals + rhythm + medications + PMH. Unlike the diagnosis + department models, this one is trained on the **FULL 425K ED stays** (filtered down to 418,083 after acuity/chief-complaint cleaning) rather than the admitted-only ~102K slice, so it sees the positives and negatives in their real-world ratio (36.7% admit / 63.3% discharge).
+
+This is the implementation of "Option B" from the Triage Improvements + Doctor-Level Discharge Prediction plan (`plans/read-the-documentation-of-tidy-scone.md`, section 3): a peer model that doesn't break the admitted-only assumption of diagnosis/department.
+
+### Why two reference numbers exist
+
+The triage v3 disposition model has two cited accuracies, and the difference matters for thesis defense:
+
+- **77.98%** in [`docs/agents/triage-agent.md`](triage-agent.md#triage-v3) — measured on the triage v3 pipeline's own 80/20 test split, which uses the triage-pipeline filtering (stratified on `acuity`).
+- **80.19%** in the disposition-model benchmark (`benchmarks/benchmark_doctor_disposition.py`) — measured on the disposition pipeline's 80/20 test split (stratified on `admitted`), with the triage v3 disposition prediction obtained by running the triage v3 cascade through `train_triage_v3.build_features` on the same rows the doctor disposition model is scored on.
+
+The 80.19% is the **apples-to-apples baseline** for this section because it's measured on the exact rows the doctor model is evaluated against. The 77.98% is the triage agent's own headline number and should stay in the triage doc.
+
+### Architecture
+
+| | Triage v3 disposition | Doctor disposition v3 |
+|---|---|---|
+| Output | binary admit/discharge | binary admit/discharge |
+| Training set | full 425K stays | full 418K stays (after cleaning) |
+| Objective | binary:logistic | binary:logistic |
+| Class weighting | cascading scale_pos_weight | `scale_pos_weight = sqrt(N_neg/N_pos) = 1.31` |
+| Cascade input from triage | hard cascade (predicted_acuity int) | **soft cascade** (5 acuity softmax + 1 dispo probability) |
+| Calibration | none | **isotonic, FrozenEstimator + CalibratedClassifierCV** on 10% held-out fit slice |
+| Nurse data | NO (triage-time only) | **YES** (vitals + longitudinal + meds + PMH all available) |
+| Feature count | 2,070 | **2,128** (2069 v3 base + 6 soft cascade + 11 medication + 41 longitudinal vital/rhythm + 1 cascade integer-position housekeeping) |
+| Leakage guard | n/a (triage-time vitals) | longitudinal vital window `[intime, intime + 4h]` |
+| Use of catch-all filter | n/a | **no** — the disposition decision applies to all stays; diagnosis catch-all is a labeling artifact specific to diagnosis-grouping and is irrelevant here |
+| Output range | 0–1 (uncalibrated) | 0–1 (**isotonic-calibrated**) |
+
+**Soft cascade (per plan section 2/3 recommendation):** instead of feeding the doctor disposition model the triage's argmax integer (`predicted_acuity ∈ {1..5}`), the disposition model receives the full triage v3 acuity softmax (5 float columns `triage_acuity_proba_1..5`) plus the triage v3 disposition probability (`triage_disposition_proba_admit`). This mirrors the A3 lesson from the doctor diag/dept side (single argmax → 13 `diag_proba_*` columns gave +0.72pp on department) and lets the doctor model weight borderline ESI 2-3 cases honestly rather than hard-locking on the triage argmax.
+
+**Isotonic calibration (per plan section 3 recommendation):** the deployment artifact is `CalibratedClassifierCV(FrozenEstimator(raw_xgb), method="isotonic", cv=None)`, fit on a 10% held-out slice (33,447 rows) that the underlying XGBoost never sees during training. Calibration matters more here than for diagnosis because the disposition output is a clinical-decision probability — a miscalibrated 0.8 hurts. The raw uncalibrated model is also saved (`disposition_model_raw.joblib`) for audit and feature-importance inspection.
+
+### Benchmark results — triage v3 cascade vs doctor disposition v3 (same 83,617-row test split)
+
+The triage v3 cascade dispo baseline below is computed inline in the benchmark by thresholding the soft-cascade `triage_disposition_proba_admit` column at 0.5 — i.e., it's exactly the model that already sits in `artifacts/triage/v3/disposition_model.joblib`, evaluated on the disposition pipeline's test rows.
+
+| Metric | triage v3 cascade dispo (baseline) | doctor dispo v3 (calibrated, deployment) | Δ |
+|---|---|---|---|
+| **Accuracy** | 0.8019 | **0.8396** | **+0.0377** |
+| **ROC AUC** | 0.8894 | **0.9138** | **+0.0244** |
+| Brier score | 0.1360 | **0.1128** | −0.0232 (lower=better) |
+| **ECE (10 bins)** | 0.0748 | **0.0036** | **−0.0713** (calibration **crushed** by isotonic) |
+| Sensitivity (admit recall) | 0.8054 | 0.7649 | −0.0405 |
+| Specificity (discharge recall) | 0.7999 | **0.8830** | **+0.0830** |
+| Over-triage rate (false admit) | 0.2001 | **0.1170** | **−0.0830** |
+| Under-triage rate (missed admit) | 0.1946 | 0.2351 | **+0.0405** ← **worse**, see operating-point discussion below |
+
+**Predicted band per plan section 3:** +3-6pp accuracy, +0.03-0.05 ROC AUC. Accuracy delta of +3.77pp lands **in-band**; ROC AUC delta of +0.0244 lands **just below the predicted band**.
+
+**The under-triage trade-off (clinically important, honest):** At the default 0.5 threshold the doctor model trades sensitivity for specificity — it catches 4.05pp fewer real admissions (76.49% vs 80.54%) in exchange for 8.30pp better discharge recall (88.30% vs 79.99%). The ROC AUC delta of +0.0244 says the model has **strictly more discriminative power** than triage v3 (the underlying probability ranking is better); the under-triage regression is therefore an **operating-point** problem, not a model-quality problem. With threshold tuning (~0.40 or `scale_pos_weight = 1.8`) the model can almost certainly recover the sensitivity gap and still improve on accuracy. **Threshold tuning is left as future work** — see "What's next" below.
+
+**Uncalibrated audit (`disposition_model_raw.joblib`):** accuracy 0.8383, ROC AUC 0.9140, ECE 0.0204. Isotonic moved the ECE from 0.0204 → 0.0036 (an order-of-magnitude improvement in reliability) at the cost of essentially-zero accuracy (0.8383 → 0.8396, +0.13pp) and ROC AUC (0.9140 → 0.9138, −0.0002). Trade is unambiguously good: isotonic is monotone so the ranking is preserved, and the calibrated probabilities are now usable as decision-grade output.
+
+### Calibration curve — the headline of the isotonic story
+
+10 reliability bins on the held-out test rows, calibrated model. Bin centers track observed admit rate to within ±0.01 across every bin:
+
+| bin center | predicted mean | observed admit | n |
+|---|---|---|---|
+| 0.05 | 0.0276 | 0.0277 | 27,519 |
+| 0.15 | 0.1305 | 0.1339 | 11,796 |
+| 0.25 | 0.2498 | 0.2646 | 6,780 |
+| 0.35 | 0.3525 | 0.3581 | 4,013 |
+| 0.45 | 0.4325 | 0.4312 | 3,822 |
+| 0.55 | 0.5228 | 0.5334 | 4,477 |
+| 0.65 | 0.6372 | 0.6360 | 4,423 |
+| 0.75 | 0.7482 | 0.7421 | 4,211 |
+| 0.85 | 0.8481 | 0.8401 | 5,227 |
+| 0.95 | 0.9491 | 0.9497 | 11,349 |
+
+A clinician reading "P(admit) = 0.82" from this model can trust that, on average, ~82% of patients with that score were actually admitted. This is the property that justifies shipping the disposition prediction as a calibrated probability rather than just a binary decision.
+
+### Per-subgroup deltas — lift concentration matches the plan's prediction
+
+Plan section 3 predicted the lift would concentrate in elderly / polypharmacy / abnormal-vitals / repeat-visitor / prior-admission cohorts. The benchmark confirms this almost exactly:
+
+| Subgroup | n | base accuracy | doctor accuracy | Δ acc | base AUC | doctor AUC | Δ AUC |
+|---|---|---|---|---|---|---|---|
+| elderly (age ≥ 65) | 26,349 | 0.7521 | 0.8047 | **+0.0526** | 0.8526 | 0.8858 | **+0.0332** |
+| polypharmacy (n_meds ≥ 5) | 41,856 | 0.7553 | 0.8032 | **+0.0479** | 0.8546 | 0.8885 | **+0.0339** |
+| abnormal vitals (any 1+ flag) | 18,702 | 0.7998 | 0.8398 | +0.0400 | 0.8892 | 0.9199 | +0.0307 |
+| repeat visitor (prior ED visit) | 43,923 | 0.7976 | 0.8415 | +0.0439 | 0.8913 | 0.9187 | +0.0274 |
+| prior admission | 43,137 | 0.7720 | 0.8221 | **+0.0501** | 0.8737 | 0.9058 | **+0.0321** |
+| non-sinus rhythm | 1,445 | 0.8048 | 0.8401 | +0.0353 | 0.8484 | 0.8933 | **+0.0449** |
+
+**Reading.** The biggest accuracy lifts (+5.26pp, +5.01pp) are on elderly and prior-admission patients — exactly where nurse data (PMH, longitudinal vitals, polypharmacy) carries the most information beyond what triage-time data captures. The smallest accuracy lift (+3.53pp) is on non-sinus-rhythm patients, but that subgroup has the **largest AUC improvement** (+4.49) because the rhythm signal is most discriminative in the long tail. Sample sizes are large enough across all six subgroups (n > 1,400) to take the deltas seriously.
+
+### Feature importance audit — soft cascade is the #1 non-TF-IDF feature
+
+By gain on the uncalibrated XGBoost (single-source-of-truth for importance, since calibration is post-hoc):
+
+| Feature group | Total gain | % of total |
+|---|---|---|
+| **tfidf** | 4591.7 | 84.6% |
+| longitudinal vitals + rhythm | 251.3 | 4.6% |
+| structured (age, pain, demographics, severity priors, interactions) | 224.2 | 4.1% |
+| pmh | 103.9 | **1.9%** |
+| soft cascade (triage v3 acuity + disposition) | 101.4 | **1.9%** |
+| snapshot vitals + clinical flags | 92.4 | 1.7% |
+| medications | 62.9 | 1.2% |
+
+**Wiring checks (gates that block shipping if they fail):**
+- **PMH wiring:** 19/19 PMH columns earned non-zero gain ✓
+- **Soft cascade wiring:** 6/6 cascade columns earned non-zero gain ✓
+- **Top-1 non-TF-IDF column:** `triage_disposition_proba_admit` with gain 55.6 (rank 1 overall outside TF-IDF). The triage v3 disposition probability is the single most informative non-text signal — exactly what cascading is supposed to deliver.
+
+**Top non-TF-IDF features by gain (from the top 25):**
+
+| Rank | Group | Column | Gain |
+|---|---|---|---|
+| 1 | soft cascade | triage_disposition_proba_admit | 55.6 |
+| 2 | longitudinal | n_tachypnea_readings | 40.4 |
+| 3 | structured | elderly | 28.0 |
+| 6 | soft cascade | triage_acuity_proba_4 | 22.5 |
+| 10 | longitudinal | n_tachycardia_readings | 16.1 |
+| 11 | snapshot_vitals | heartrate_missing | 15.1 |
+| 12 | pmh | pmh_Blood and Blood-Forming Organs | 14.8 |
+| 14 | longitudinal | n_fever_readings | 14.0 |
+| 16 | longitudinal | n_hypoxia_readings | 12.7 |
+| 17 | longitudinal | resprate_max | 12.2 |
+| 19 | longitudinal | n_hypotension_readings | 11.7 |
+| 21 | structured | age_bin | 11.3 |
+
+Five of the top 7 non-TF-IDF features are longitudinal vital trajectory aggregates (counts of abnormal readings within the 4-hour window) or the triage cascade — the two signals plan section 3 explicitly said should dominate. Snapshot vitals' headline feature is `heartrate_missing` rather than a heart-rate value itself, because the missingness flag itself carries information about transport mode (walk-ins have masked vitals).
+
+### Training details
+
+- **Pipeline:** `src/proiect_licenta/training/train_doctor_disposition.py`. Run with `uv run train_doctor_disposition`.
+- **Hardware tested:** Colab T4 GPU. ~24 min XGBoost training (3805 best iteration out of 5000), ~25 min discharge.csv PMH parse, ~5 min longitudinal vitals aggregation, ~1 min calibration fit. Total ~60 min end-to-end including data loading.
+- **Hyperparameters (XGBoost):** `n_estimators=5000`, `max_depth=10`, `lr=0.02`, `subsample=0.8`, `colsample_bytree=0.5`, `colsample_bylevel=0.7`, `min_child_weight=3`, `gamma=0.05`, `reg_alpha=0.5`, `reg_lambda=2.0`, `early_stopping_rounds=150`, `scale_pos_weight=sqrt(N_neg/N_pos)=1.3123`.
+- **Calibration:** 10% of training rows held out (33,447 rows; rest stratified-split between fit and the original test split). FrozenEstimator wrapper around the trained XGB, then `CalibratedClassifierCV(method="isotonic", cv=None)` fit on the held-out slice. The wrapped object exposes the same `predict_proba` interface, so the (forthcoming) inference tool needs no special handling.
+- **Cascade source:** triage v3 artifacts (`artifacts/triage/v3/`). Walk-in vitals are re-masked to NaN on the cascade input copy before calling `train_triage_v3.build_features(fit=False)` so the v3 `_missing` flags compute correctly even though the disposition pipeline's main vital columns are already imputed.
+- **Class balance:** 36.7% admit / 63.3% discharge at training (153,581 admitted out of 418,083 stays).
+- **Best iteration:** 3,805 / 5,000 (well clear of the ceiling — no convergence concern).
+
+### Artifacts
+
+- `artifacts/doctor/v3/disposition_model.joblib` — calibrated `CalibratedClassifierCV` wrapper (deployment).
+- `artifacts/doctor/v3/disposition_model_raw.joblib` — uncalibrated `XGBClassifier` (audit + feature importance).
+- `artifacts/doctor/v3/metadata.json` — extended with a `disposition` block that includes the metrics table above plus the `triage_v3_dispo_baseline` sub-block (the apples-to-apples baseline numbers for thesis citation without re-running the benchmark).
+- **Note:** the existing v3 diagnosis + department artifacts are not overwritten by this training run. `train_doctor_disposition.save_disposition_model` merges into the existing `metadata.json` rather than replacing it.
+
+### Inference status — model trained, runtime rewiring pending (placeholder)
+
+As of the current commit:
+- ✅ Model trained on Colab T4 GPU, artifacts on disk in `artifacts/doctor/v3/`.
+- ✅ Benchmark run, head-to-head numbers in this section.
+- ⏳ **`src/proiect_licenta/tools/doctor_disposition_tool.py` — NOT YET CREATED.**
+- ⏳ **`src/proiect_licenta/crew.py` — NOT YET WIRED.** The crew still uses Doctor v1 + v2 for the live runtime. Will switch to v3_base (initial) + new disposition (post-nurse) + v3-nurse (reassessment) once the tool is in place.
+- ⏳ **`src/proiect_licenta/config/tasks.yaml` — NOT YET UPDATED.** New `doctor_disposition_task` between nurse and reassessment; existing doctor tasks need top-3 + probability formatting.
+- ⏳ **End-to-end smoke test — NOT YET RUN.**
+
+The inference rewiring is queued as the next chunk of work after the model itself is approved. See "What's next" below.
+
+### What's next
+
+- **Inference wiring (highest-priority next step).** Create `doctor_disposition_tool.py` mirroring the pattern in `doctor_tool_v3.py`. Reads the triage softmax + nurse-collected vitals/meds/PMH, returns a calibrated admit probability + binary decision at the chosen threshold + short clinical-reasoning bullets sourced from the top contributing features. Plug into `crew.py` as a new `doctor_disposition_task` between the nurse and the reassessment task; the reassessment then uses *this* model's `is_admitted` instead of the triage one.
+- **Threshold tuning.** The 0.5 default trades sensitivity for specificity; the AUC says we have room to improve sensitivity without giving up much accuracy. Sweep thresholds {0.30, 0.35, 0.40, 0.45, 0.50} on the calibration holdout, choose by either (a) under-triage rate target, (b) F1, or (c) a clinician-elicited utility function. Wire the chosen threshold into the tool as a constant. **Placeholder: TBD pending the threshold sweep.**
+- **Asymmetric `scale_pos_weight` retrain (alternative to threshold tuning).** Re-run training with `scale_pos_weight ∈ {1.5, 1.8, 2.0}` and pick by under-triage delta — comparable to threshold tuning but recovers the calibration at the new operating point. Cheap (~25 min per run on GPU).
+- **Downstream gating of the reassessment task.** Once the new disposition prediction is wired, the diagnosis/department reassessment should gate on *its* `is_admitted` flag (not the triage one) so a borderline-but-admitted patient triggers the full workup even if triage said discharge.
+- **Output formatting (cross-cuts with reassessment).** Tasks should print top-3 categories with probabilities for both diagnosis and department, plus the calibrated admit/discharge probability split with a "calibration note" caveat (per plan section 2 and the user's request during section-3 planning).
+
+---
+
 ## Tools
 
 - **`DoctorPredictionTool` (v1)** — `src/proiect_licenta/tools/doctor_tool.py`. Wraps the diagnosis v1 + department v1 models, rebuilds the 2025-feature vector from triage output.

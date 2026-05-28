@@ -63,13 +63,22 @@ The system simulates a clinical emergency department workflow: a patient describ
 |     Output: Enhanced diagnosis + department + comparison with v1     |
 |     Tool:   doctor_prediction_tool_v2 (wraps 2 XGBoost v2 models)  |
 |                                                                      |
+|  (Planned) 5b. Doctor Disposition Refinement       [MODEL TRAINED,   |
+|                (ML - XGBoost v3, isotonic-calibrated) WIRING PENDING]|
+|     Task:   doctor_disposition_task  (between nurse + reassessment)  |
+|     Input:  Triage softmax + nurse vitals + meds + longitudinal+PMH  |
+|     Output: Calibrated P(admit), refines triage's admit/discharge    |
+|     Tool:   doctor_disposition_tool  (TO BE CREATED)                 |
+|     Note:   Plan section 3 / Option B. +3.77pp accuracy over triage  |
+|             v3 cascade dispo on the same test rows. ECE = 0.0036.    |
+|                                                                      |
 |  (Future) Text Generation Agent                                      |
 |     Purpose: Generate synthetic patient utterances for testing       |
 |                                                                      |
 +---------------------------------------------------------------------+
 ```
 
-Although there are only 4 distinct agents, the Doctor Agent runs twice (as two separate tasks), yielding 5 tasks total. All tasks execute sequentially via `Process.sequential`.
+There are 4 distinct agents. The Doctor Agent currently runs **twice** (initial + reassessment), yielding 5 tasks total in the live runtime. When the disposition-refinement task (plan section 3, Option B — model trained, wiring pending) lands, the Doctor Agent will run **three** times for a 6-task pipeline. All tasks execute sequentially via `Process.sequential`.
 
 ---
 
@@ -78,20 +87,20 @@ Although there are only 4 distinct agents, the Doctor Agent runs twice (as two s
 The system uses a cascading design where each model's output feeds into the next:
 
 ```
-Chief complaints + demographics (+ EMS vitals for ambulance/helicopter)
+Chief complaints + demographics (+ EMS vitals for ambulance/helicopter) + PMH (all patients)
          |
-         v  [2051 features for ambulance/helicopter; walk-ins get vitals=missing]
-  [Acuity Model v4] -> predicted_acuity (ESI 1-5)
+         v  [2070 features for triage v3: 23 structured + 28 vital + 19 PMH + 2000 TF-IDF]
+  [Acuity Model v3] -> predicted_acuity (ESI 1-5, ordinal-aware)
          |
          v
-  [Disposition Model v4] -> predicted_disposition (admit/discharge)
-         |                   (uses predicted_acuity as feature)
+  [Disposition Model v3] -> P(admit)  -- the SOFT cascade source
+         |                   (uses predicted_acuity int as feature; ROC AUC 0.86)
          |
     +----+----+
     |         |
     v         v
-[Diagnosis  [Diagnosis  <- + vital signs (nurse) + medication features (31 extra)
- Model v1]   Model v2]
+[Diagnosis  [Diagnosis  <- + snapshot vitals + longitudinal vitals + rhythm + meds + PMH
+ Model v1]   Model v2]      (Doctor v3 nurse — 13 classes, the production diag/dept models)
     |         |
     v         v
 [Department [Department
@@ -100,12 +109,25 @@ Chief complaints + demographics (+ EMS vitals for ambulance/helicopter)
     v         v
  INITIAL    ENHANCED
  ASSESSMENT REASSESSMENT (with nurse data comparison)
+
+         +---  PARALLEL post-nurse refinement (plan section 3, Option B, NEW)  ---+
+         |                                                                          |
+         |     [Doctor Disposition v3]                                              |
+         |          - Soft cascade: 5 acuity softmax + 1 dispo probability          |
+         |          - + snapshot vitals + longitudinal + rhythm + meds + PMH        |
+         |          - Isotonic-calibrated, ECE 0.0036                               |
+         |          - Trained on FULL 418K (admit + discharge), not admitted-only   |
+         |          - +3.77pp accuracy over the triage v3 cascade dispo on the      |
+         |            same 83,617-row test split. **Inference wiring pending.**     |
+         +---------------------------------------------------------------------------+
 ```
 
-- **Triage path** uses 2051 features: 23 v1 structured + 28 vital-sign features + 2000 TF-IDF. Vitals are real for ambulance/helicopter patients and median-imputed (with missing flags) for walk-ins.
+- **Triage path (v3)** uses 2070 features: 23 v1 structured + 28 vital-sign features + 19 PMH + 2000 TF-IDF. Vitals are real for ambulance/helicopter patients and walk-in-masked for walk-ins (the `_missing` flag tells the model). PMH is sourced from prior MIMIC encounters at training and from patient self-report (with zero-fill fallback) at inference.
 - **v1 doctor path** uses 2025 features (triage 2023 base + predicted_acuity + predicted_disposition).
 - **v2 doctor path** uses 2056 features (doctor v1 2025 + 20 vital-sign features + 11 medication features).
-- Both doctor paths run sequentially so the user sees initial results before providing nurse data.
+- **Doctor v3 nurse path** uses ~2116 features (v2 base + longitudinal vitals + rhythm + PMH + Tier A softmax cascade).
+- **Doctor disposition v3 (new, plan section 3 Option B)** uses **2128 features** = 2069 from the v3 triage input vector (calling `train_triage_v3.build_features(fit=False)` produces structured + v3 vitals + PMH + TF-IDF) + 6 soft cascade cols + 11 medication + 41 longitudinal vital + rhythm + 1 cascade housekeeping col. Trained on the FULL 418K stays (admit + discharge), unlike diagnosis/department which are admitted-only. **Model trained 2026-05-28; inference rewiring pending.**
+- Both doctor paths run sequentially so the user sees initial results before providing nurse data. The new disposition task (when wired) sits between the nurse step and the reassessment task; the reassessment will gate its tool call on *its* `is_admitted` flag rather than the triage one.
 - The Department model always consumes the predicted diagnosis from its matching-version diagnosis model (diagnosis v1 -> department v1, diagnosis v2 -> department v2).
 
 ---

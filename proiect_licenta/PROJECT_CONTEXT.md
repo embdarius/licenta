@@ -19,7 +19,7 @@ This file is the slim top-level overview. Detailed documentation is split per to
 | [`docs/architecture.md`](docs/architecture.md) | Full agent pipeline diagram, cascading prediction design, shared text preprocessing pipeline, project structure on disk |
 | [`docs/agents/nlp-parser-agent.md`](docs/agents/nlp-parser-agent.md) | NLP Parser Agent (LLM): role, input/output contract, `AskPatientTool` |
 | [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage Agent: acuity + disposition XGBoost models, 2023 features, 66.7% / 75.9% benchmarks, training evolution v1 -> v3b |
-| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2 + v3: 6 XGBoost models, diagnosis / department grouping tables, four-way comparison (v1 / v2 / v3 base / v3 with-nurse), medication classification, vital sign processing, longitudinal vitals + rhythm in v3 |
+| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2 + v3: 7 XGBoost models (v1 diag/dept, v2 diag/dept, v3 base + nurse diag/dept, **and the new v3 disposition peer model**), diagnosis / department grouping tables, four-way comparison (v1 / v2 / v3 base / v3 with-nurse), medication classification, vital sign processing, longitudinal vitals + rhythm in v3, and the binary admit/discharge refinement model from plan section 3 / Option B |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse Agent: interactive collection flow, partial data handling, why a dedicated agent |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference — used tables + inspected-but-unused tables (`vitalsign.csv`, `pyxis.csv`, `admissions.csv`, clinical notes) with leakage considerations |
 | [`docs/future-work.md`](docs/future-work.md) | Why the Doctor v2 gains were modest, prioritized next-step recommendations, Phase 4 Text Generation, Phase 5 Hospital Infrastructure, model-level improvements, known issues |
@@ -28,7 +28,7 @@ This file is the slim top-level overview. Detailed documentation is split per to
 
 ### Repo Conventions (must-knows for editing)
 
-- **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `DOCTOR_V3_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths.
+- **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `DOCTOR_V3_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths. `DOCTOR_V3_DIR` now holds three artifact bundles: `diagnosis_model.joblib`, `department_model.joblib`, and `disposition_model.joblib` (+ its `_raw` sibling for audit).
 - **`src/proiect_licenta/preprocessing.py`** owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1/v2, doctor, nurse, and runtime tools all import from here so training and inference can't drift.
 - **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/triage/{v1,v2}/` and `artifacts/doctor/{v1,v2,v3_base,v3}/`. Retrain with `uv run train_*` (see "How to Run").
 
@@ -66,6 +66,8 @@ Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
 | Doctor v3 base — Department (11 classes) | 60.7% | 92.3% | |
 | Doctor v3 nurse — Diagnosis (13 classes) | **64.1%** | **85.7%** | +4.0pp over v3 base; PMH (Change 1) + Tier A vocab expansion (A2) |
 | Doctor v3 nurse — Department (11 classes) | **70.8%** | **94.1%** | +10.1pp over v3 base; Tier A softmax cascade (A3) + isotonic calibration (A4) |
+| Triage v3 cascade — Disposition (binary, baseline for next row) | 80.2% | — | ROC AUC 0.8894, ECE 0.0748. Computed on the disposition test split (83,617 rows). Triage v3's own headline 77.98% is from the *triage* pipeline's split — see doctor-agent.md for the two-reference-numbers explanation. |
+| **Doctor disposition v3 (binary, calibrated, deployment-ready)** | **84.0%** | — | **ROC AUC 0.9138, ECE 0.0036, Brier 0.1128. +3.77pp accuracy / +0.0244 AUC over the triage v3 cascade baseline on the same 83,617 test rows. Specificity 88.3% (+8.3pp), sensitivity 76.5% (−4.05pp at threshold 0.5). Plan section 3 / Option B — peer binary admit/discharge model trained on the full 418K stays. Inference wiring pending.** |
 
 v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't be compared as if they were. Full per-class metrics and confusion matrices live in the per-agent docs.
 
@@ -116,6 +118,11 @@ uv run train_doctor_v3
 # Train/retrain doctor v3 with nurse (longitudinal vitals + rhythm + meds) (~70 minutes)
 uv run train_nurse_v3
 
+# Train/retrain doctor disposition v3 (Option B from plan section 3 — peer binary
+# admit/discharge model on full 425K, soft cascade from triage v3, isotonic-calibrated)
+# (~60 minutes on Colab T4 GPU; see notebooks/train_doctor_disposition.ipynb)
+uv run train_doctor_disposition
+
 # Run the full 4-agent, 5-task system interactively
 uv run crewai run
 
@@ -131,6 +138,7 @@ uv run python benchmarks/benchmark_doctor.py                # Doctor v1 models
 uv run python benchmarks/benchmark_nurse.py                 # Doctor v1 vs v2 comparison
 uv run python benchmarks/benchmark_doctor_v3.py             # Doctor v3 base (13 classes)
 uv run python benchmarks/benchmark_nurse_v3.py              # Doctor v3 base vs v3 with-nurse
+uv run python benchmarks/benchmark_doctor_disposition.py    # Doctor disposition v3 (Option B) — head-to-head vs triage v3 cascade dispo on the same test rows, with per-subgroup deltas + feature-importance audit
 uv run python benchmarks/compare_all_versions.py            # Four-way table v1/v2/v3-base/v3-nurse
 ```
 
@@ -156,6 +164,7 @@ GEMINI_API_KEY=<key>
 - **Doctor v3 nurse — Change 2 (multilabel sibling head):** Tried and reverted (2026-05-21). Best blend lift was +0.04pp top-3 — well below the predicted +1.5-3pp band. The multilabel head's signal turned out to be correlated with the softmax (same features, related labels), not orthogonal, so linear blending couldn't extract additional accuracy. See "Empirical findings — experiments tried and reverted" entry 4 in [`docs/future-work.md`](docs/future-work.md).
 - **Doctor v3 nurse — Change 4 (two-stage department routing):** Tried and reverted (2026-05-21). Net delta vs the legacy single department head was **−1.22pp top-1 / −0.63pp top-3** on the same 20,420-row test split. Gate binary accuracy landed at 82.0% (31.7% of surgical patients misrouted into the medical head), bounding the end-to-end ceiling — soft-blending cannot recover the 18% of misrouted patients. TRAUM did recover +6.7pp under the surgical-only head (partial hypothesis validation), but volume-weighted MED regression of −1.5pp on 12,045 stays eats the surgical gains many times over. Implementation reverted to commit `c40f15b`; this writeup retained. See "Empirical findings — experiments tried and reverted" entry 5 in [`docs/future-work.md`](docs/future-work.md).
 - **Doctor v3 nurse — Tier A (A2 + A3 + A4):** Shipped 2026-05-22. Three stacked changes — PMH vocabulary expansion (397 → 596 keywords), diagnosis-softmax cascade (13 `diag_proba_*` columns into the department model instead of a single argmax int), and isotonic calibration on the department model (FrozenEstimator + CalibratedClassifierCV, 10% held-out calibration set). Net deltas vs pre-Tier-A Change-1 baseline: **diagnosis −0.09pp top-1 (essentially flat), department +2.18pp top-1 (68.61% → 70.79%)**. A4 calibration delivered +1.46pp on its own — far above the predicted +0.1-0.3pp band — but the gain is concentrated on MED (+8.7pp recall, 12,045 stays), with most non-MED departments regressing. Cohen's κ on department actually dropped from 0.5009 to 0.4948 (less uniform agreement). See [Tier A section](docs/agents/doctor-agent.md#tier-a--vocab-expansion--softmax-cascade--isotonic-calibration) in the doctor-agent doc for per-lever attribution and per-class table.
+- **Doctor disposition v3 — Option B (peer admit/discharge model, plan section 3):** Shipped 2026-05-28 (training + benchmark). New `artifacts/doctor/v3/disposition_model.joblib` is a calibrated binary classifier trained on the FULL 418K stays (not the admitted-only ~102K slice used by diagnosis/department). Soft cascade from triage v3 (5 acuity softmax + 1 dispo probability cols) instead of the hard cascade used elsewhere. Isotonic calibration on a 10% held-out fit slice (A4 pattern). Net deltas vs the triage v3 cascade dispo baseline on the same 83,617-row test split: **+3.77pp accuracy (80.2% → 84.0%)**, **+0.0244 ROC AUC (0.8894 → 0.9138)**, **−0.0713 ECE (0.0748 → 0.0036 — calibration crushed)**, +8.30pp specificity, −4.05pp sensitivity. The under-triage rate is higher at the default 0.5 threshold (operating-point trade-off, not a model-quality problem since AUC is strictly better). Per-subgroup lift concentrates as plan section 3 predicted: elderly +5.26pp, prior-admission +5.01pp, polypharmacy +4.79pp. PMH wiring audit passes (19/19 PMH cols with non-zero gain); soft cascade audit passes (6/6 cascade cols with non-zero gain); `triage_disposition_proba_admit` is the #1 non-TF-IDF feature by gain. **Inference rewiring pending** — `doctor_disposition_tool.py`, `crew.py` swap to v3_base + v3-nurse + new disposition task, and `tasks.yaml` updates are all queued as the next chunk of work. Threshold tuning is the obvious lever to recover the sensitivity gap; left as TBD pending a sweep on the calibration holdout. See [Doctor disposition v3 section](docs/agents/doctor-agent.md#doctor-disposition-v3--peer-model-plan-section-3-option-b-shipped-2026-05-28) for the full numbers, calibration curve, per-subgroup table, and feature-importance audit.
 - **Doctor v3 nurse — A1 (Optuna macro-F1 sweep):** IN PROGRESS, paused at **10/30 trials** (2026-05-22). Best trial #2 on the 16,336-row inner-val split: macro_f1 = **0.5536**, top-1 = 0.6306. vs the hand-picked baseline (macro_f1 = 0.5529 on outer test) the delta is **+0.0007 — within sampling noise**. TPE not yet converged after 10 cold-start trials; best `class_weight_exponent` ≈ 0.52 (≈sqrt default, matching the existing setup); low-lr trials are undertrained at the 3000-iter cap. `artifacts/doctor/v3/tuned_params.json` was written with trial #2's config but **no final retrain has been applied** — the production v3 nurse model still uses hand-picked defaults. Resume plan: run 20 more trials (~3 hours) in a future session, then decide based on whether best macro_f1 clears 0.56. See ["Experiments in progress" in future-work](docs/future-work.md#experiments-in-progress).
 - **Phase 4 — Text Generation Agent:** Planned. See [`docs/future-work.md`](docs/future-work.md).
 - **Phase 5 — Hospital Infrastructure:** Planned. See [`docs/future-work.md`](docs/future-work.md).

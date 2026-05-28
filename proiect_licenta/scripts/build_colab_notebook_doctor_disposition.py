@@ -529,12 +529,19 @@ Trains the binary disposition model on GPU. Heavy steps inside this cell:
 
 ### Headline numbers to look for
 
-(Triage v3 iter 2 production baselines: 0.7798 / 0.8644 / 0.1556 / 0.1690.)
+Triage v3 iter 2 **disposition** baselines (the correct apples-to-apples
+reference — both are binary admit/discharge): accuracy 0.7798,
+ROC AUC 0.8644. Triage v3 disposition over/under-triage rates aren't
+published in the docs, but the training script computes them on the
+same held-out test rows by thresholding the soft-cascade dispo column
+at 0.5 — those numbers print inline in the test-metric table.
 
-- **Accuracy** > 0.81 (triage v3 iter 2: 0.7798)
-- **ROC AUC** > 0.89 (triage v3 iter 2: 0.8644)
+- **Accuracy** > 0.81 (triage v3 dispo: 0.7798)
+- **ROC AUC** > 0.89 (triage v3 dispo: 0.8644)
 - **ECE (calibrated)** < 0.04 (the whole point of isotonic)
-- **Under-triage** < 0.13 (triage v3 iter 2: 0.1556 — the safety-critical number)
+- **Under-triage** should be < the triage v3 dispo baseline (printed
+  inline in the test-metric table; **not** the ESI acuity under-triage
+  rate of 0.1556 — that's a different model)
 
 *Expected runtime: 60-90 min on T4 GPU. PMH parse dominates the first half.*""")
 
@@ -587,12 +594,14 @@ print(f'  soft_cascade_cols: {dispo.get(\"soft_cascade_cols\")}')
 
 m = dispo.get('metrics', {})
 print('\\nHeadline metrics (calibrated, 0.5 threshold):')
-print(f'  Accuracy   : {m.get(\"accuracy_calibrated\"):.4f}  (triage v3 iter 2: 0.7798)')
-print(f'  ROC AUC    : {m.get(\"roc_auc_calibrated\"):.4f}  (triage v3 iter 2: 0.8644)')
+tri = m.get('triage_v3_dispo_baseline') or {}
+_t = lambda k: (f\"{tri[k]:.4f}\" if tri.get(k) is not None else '  N/A')
+print(f'  Accuracy   : {m.get(\"accuracy_calibrated\"):.4f}  (triage v3 dispo: {_t(\"accuracy\")})')
+print(f'  ROC AUC    : {m.get(\"roc_auc_calibrated\"):.4f}  (triage v3 dispo: {_t(\"roc_auc\")})')
 print(f'  ECE (10b)  : {m.get(\"ece_calibrated\"):.4f}    (calibration error, lower=better)')
-print(f'  Brier      : {m.get(\"brier_calibrated\"):.4f}')
-print(f'  Under-tri  : {m.get(\"under_triage_rate\"):.4f}  (triage v3 iter 2: 0.1556)')
-print(f'  Over-tri   : {m.get(\"over_triage_rate\"):.4f}  (triage v3 iter 2: 0.1690)')
+print(f'  Brier      : {m.get(\"brier_calibrated\"):.4f}  (triage v3 dispo: {_t(\"brier\")})')
+print(f'  Under-tri  : {m.get(\"under_triage_rate\"):.4f}  (triage v3 dispo: {_t(\"under_triage_rate\")})')
+print(f'  Over-tri   : {m.get(\"over_triage_rate\"):.4f}  (triage v3 dispo: {_t(\"over_triage_rate\")})')
 print(f'  Sens       : {m.get(\"sensitivity\"):.4f}')
 print(f'  Spec       : {m.get(\"specificity\"):.4f}')
 
@@ -669,20 +678,23 @@ assert m['ece_calibrated'] <= m['ece_uncalibrated'] + 0.005, (
 print('  -> calibration helped (or stayed flat) ✓')
 
 print('\\n' + '=' * 60)
-print('B. Headline lift audit (vs triage v3 iter 2 production: 0.7798 / 0.8644 / 0.1556)')
+print('B. Headline lift audit (vs triage v3 *disposition* baseline on the same test rows)')
 print('=' * 60)
-ACC = m['accuracy_calibrated']
-AUC = m['roc_auc_calibrated']
-UND = m['under_triage_rate']
-print(f'  Accuracy   : {ACC:.4f}  (triage v3 iter 2: 0.7798)')
-print(f'  ROC AUC    : {AUC:.4f}  (triage v3 iter 2: 0.8644)')
-print(f'  Under-tri  : {UND:.4f}  (triage v3 iter 2: 0.1556; lower=better)')
-if ACC < 0.78:
-    print('  WARN: accuracy <= triage v3 iter 2 baseline. Worth investigating before shipping.')
-if AUC < 0.87:
-    print('  WARN: ROC AUC barely above triage v3 iter 2. Cascade may be under-trusted.')
-if UND > 0.155:
-    print('  WARN: under-triage rate did not improve over triage v3 iter 2 — the safety-critical metric.')
+tri = m.get('triage_v3_dispo_baseline') or {}
+ACC = m['accuracy_calibrated']; T_ACC = tri.get('accuracy')
+AUC = m['roc_auc_calibrated'];  T_AUC = tri.get('roc_auc')
+UND = m['under_triage_rate'];   T_UND = tri.get('under_triage_rate')
+def _ref(v): return f'{v:.4f}' if v is not None else '  N/A'
+print(f'  Accuracy   : {ACC:.4f}  (triage v3 dispo: {_ref(T_ACC)})')
+print(f'  ROC AUC    : {AUC:.4f}  (triage v3 dispo: {_ref(T_AUC)})')
+print(f'  Under-tri  : {UND:.4f}  (triage v3 dispo: {_ref(T_UND)}; lower=better)')
+if T_ACC is not None and ACC < T_ACC:
+    print('  WARN: accuracy <= triage v3 dispo baseline. Worth investigating before shipping.')
+if T_AUC is not None and AUC < T_AUC + 0.02:
+    print('  WARN: ROC AUC gain over triage v3 dispo is < 0.02. Cascade may be under-trusted.')
+if T_UND is not None and UND > T_UND:
+    print('  WARN: under-triage rate did not improve over triage v3 dispo — the safety-critical metric.')
+    print('        Consider threshold-tuning at inference or retraining with asymmetric scale_pos_weight.')
 
 print('\\n' + '=' * 60)
 print('C. Soft-cascade wiring audit')

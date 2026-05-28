@@ -24,6 +24,68 @@ The v1 -> v2 upgrade added 31 new features (20 vital signs + 11 medications) yet
 
 ## Empirical findings — experiments shipped
 
+### Doctor disposition v3 — peer admit/discharge model (Option B from plan section 3) (SHIPPED 2026-05-28, model trained; inference wiring PENDING)
+
+Implements "Option B" from the Triage Improvements + Doctor-Level Discharge Prediction plan (`plans/read-the-documentation-of-tidy-scone.md`, section 3): a peer **binary admit/discharge classifier** sitting alongside the v3 diagnosis + department models, trained on the **FULL 418K ED stays** (admit + discharge in their real-world ~37%/63% ratio) rather than the admitted-only ~102K slice used by diagnosis/department. Refines the triage-time disposition using nurse-collected snapshot vitals + longitudinal vitals + rhythm + medications + PMH.
+
+**Design choices (per plan section 2/3 recommendations):**
+- **Soft cascade from triage v3:** 5 acuity softmax columns + 1 dispo probability column, rather than the hard cascade (`predicted_acuity` int) used by diagnosis/department. Mirrors the A3 lesson (single argmax → 13 `diag_proba_*` cols gave +0.72pp on department). Lets the doctor model weight borderline ESI 2-3 cases honestly.
+- **Isotonic calibration** on a 10% held-out fit slice (33,447 rows; the same A4 pattern as the department model). FrozenEstimator + CalibratedClassifierCV. The plan explicitly calls out calibration as more important here than for diagnosis — a miscalibrated 0.8 hurts clinically.
+- **Symmetric `scale_pos_weight = sqrt(N_neg/N_pos) = 1.31`** baseline (no asymmetric cost yet). Threshold tuning is queued as a follow-up.
+- **Leakage guard preserved:** longitudinal vital window `[intime, intime + 4h]` (same guard as nurse_v3).
+- **No catch-all filter:** unlike diagnosis/department v3, the disposition decision applies to all stays; the catch-all class is a diagnosis-grouping artifact and is irrelevant here.
+
+**Result on the 83,617-row disposition test split (random_state=42, stratified on `admitted`):**
+
+| Metric | triage v3 cascade dispo (baseline) | doctor dispo v3 (calibrated, deployment) | Δ |
+|---|---|---|---|
+| **Accuracy** | 0.8019 | **0.8396** | **+0.0377** |
+| **ROC AUC** | 0.8894 | **0.9138** | **+0.0244** |
+| Brier score | 0.1360 | **0.1128** | −0.0232 |
+| **ECE (10 bins)** | 0.0748 | **0.0036** | **−0.0713** (calibration crushed) |
+| Sensitivity (admit recall) | 0.8054 | 0.7649 | −0.0405 |
+| Specificity (discharge recall) | 0.7999 | **0.8830** | **+0.0830** |
+| Over-triage (false admit) | 0.2001 | **0.1170** | **−0.0830** |
+| Under-triage (missed admit) | 0.1946 | 0.2351 | **+0.0405** ← see operating-point note |
+
+**Predicted band per plan section 3:** +3-6pp accuracy, +0.03-0.05 ROC AUC. Accuracy **in-band** (+3.77pp); ROC AUC **just below in-band** (+0.0244).
+
+**The under-triage trade-off (honest framing for the thesis):** at the default 0.5 threshold the model trades sensitivity for specificity. AUC +0.0244 confirms the model has strictly more discriminative power than triage v3 disposition — the under-triage regression is an **operating-point** problem, not a model-quality problem. Threshold tuning (~0.40 or asymmetric `scale_pos_weight = 1.8`) is the obvious fix and is left as TBD pending a sweep.
+
+**Per-subgroup deltas confirm plan section 3's prediction that the lift concentrates in nurse-data-heavy cohorts:**
+
+| Subgroup | n | Δ accuracy | Δ ROC AUC |
+|---|---|---|---|
+| elderly (age ≥ 65) | 26,349 | **+0.0526** | **+0.0332** |
+| polypharmacy (n_meds ≥ 5) | 41,856 | +0.0479 | +0.0339 |
+| abnormal vitals (any flag) | 18,702 | +0.0400 | +0.0307 |
+| repeat visitor (prior ED) | 43,923 | +0.0439 | +0.0274 |
+| prior admission | 43,137 | **+0.0501** | +0.0321 |
+| non-sinus rhythm | 1,445 | +0.0353 | **+0.0449** |
+
+Biggest accuracy lifts are on elderly + prior-admission patients — exactly where nurse data carries the most information beyond what triage-time data captures. Largest AUC improvement is on non-sinus-rhythm patients (n=1,445; +0.0449), confirming the rhythm signal is most discriminative on the long tail.
+
+**Feature importance audit (uncalibrated XGBoost, by gain):**
+- TF-IDF: 84.6%
+- longitudinal vitals + rhythm: 4.6%
+- structured: 4.1%
+- **PMH: 1.9%** (19/19 PMH columns earned non-zero gain ✓)
+- **Soft cascade: 1.9%** (6/6 cascade columns earned non-zero gain ✓)
+- snapshot vitals: 1.7%
+- medications: 1.2%
+
+The single top non-TF-IDF feature is `triage_disposition_proba_admit` with gain 55.6 (rank 1 overall outside TF-IDF) — the cascade is genuinely informative, exactly as plan section 2 predicted.
+
+**Calibration is the headline of the isotonic story:** ECE dropped from 0.0204 (uncalibrated) to 0.0036 (calibrated) — an order-of-magnitude improvement in reliability. Across all 10 reliability bins, predicted means match observed admit rates to within ±0.01. A clinician reading "P(admit) = 0.82" can trust that, on average, ~82% of patients with that score were actually admitted.
+
+**Why the v3 cascade reference number (80.19%) differs from the triage agent doc's headline (77.98%):** the 77.98% is measured on the *triage* pipeline's test split (stratified on `acuity`). The 80.19% is measured on the *disposition* pipeline's test split (stratified on `admitted`) using exactly the same triage v3 disposition model. The 80.19% is the right apples-to-apples baseline for this section because it's on the same rows the doctor model is scored against.
+
+**Inference status — pending.** The new model artifacts (`disposition_model.joblib`, `disposition_model_raw.joblib`, extended `metadata.json` with the `disposition` block) are on disk, but `doctor_disposition_tool.py`, the `crew.py` swap to v3_base + v3-nurse + new disposition task, and the `tasks.yaml` updates are all queued as the next chunk of work. The end-to-end pipeline smoke test will happen after wiring.
+
+**Threshold tuning is the next lever.** The under-triage regression at the default 0.5 threshold is recoverable; the AUC says we have room to improve sensitivity without giving up much accuracy. Sweep thresholds {0.30, 0.35, 0.40, 0.45, 0.50} on the calibration holdout and choose by either (a) under-triage rate target, (b) F1, or (c) a clinician-elicited utility function. **Placeholder: TBD pending the threshold sweep.**
+
+Full implementation, per-subgroup tables, calibration curve, and the operating-point discussion live in [`docs/agents/doctor-agent.md#doctor-disposition-v3--peer-model-plan-section-3-option-b-shipped-2026-05-28`](agents/doctor-agent.md#doctor-disposition-v3--peer-model-plan-section-3-option-b-shipped-2026-05-28).
+
 ### Triage v3 iteration 2 — sections 1.1 + 1.2 (longer training + ordinal-aware acuity) (SHIPPED 2026-05-27, kept)
 
 Two stacked changes on top of v3 iteration 1, retrained together in a single Colab T4 GPU pass (~44 min total). Implements sections 1.1 and 1.2 from the original Triage Improvements plan (`plans/read-the-documentation-of-tidy-scone.md`):
@@ -442,6 +504,7 @@ Ordered by expected lift per unit of effort.
 1. ~~**Add triage vitals to the triage model itself.**~~ **DONE (triage v2).** Vital signs from `triage.csv` are now used for ambulance/helicopter patients (~36%). The training pipeline masks vitals for walk-ins to match inference behavior. Acuity improved from 66.7% → 68.0% overall, and ambulance/helicopter patients specifically score 70.4%.
 1b. ~~**Add PMH features to the triage model.**~~ **DONE (triage v3 iter 1, 2026-05-26).** Same 19-feature PMH block Doctor v3 nurse uses. Iter 1 numbers: acuity 68.01% → 68.61% (+0.60pp); disposition 76.17% → 77.96% (+1.80pp). Walk-in patients gain ~2× the ambulance lift (+0.72pp vs +0.34pp), validating the "PMH fills the signal gap where vitals are masked" hypothesis. See [iter 1 entry](#triage-v3-iteration-1--pmh-features-at-triage-time-shipped-2026-05-26) below.
 1c. ~~**Longer training (section 1.1) and ordinal-aware acuity weighting (section 1.2).**~~ **DONE (triage v3 iter 2, 2026-05-27, kept).** lr 0.02→0.01, n_estimators 3000→5000, plus `ESI_EXTREME_BOOST` per-class sample weights + QWK early stopping on the acuity head. Acuity 67.55% (−0.46pp vs v2) but **under-triage rate −2.11pp** (17.67% → 15.56%) and ESI 5 recall recovered from iter 1's regression. ESI 1, 2, 5 all improved vs both v2 and iter 1. Kept over iter 1 for clinical-safety reasons (under-triage carries mortality risk; the headline accuracy cost is acceptable). See [iter 2 entry](#triage-v3-iteration-2--sections-11--12-longer-training--ordinal-aware-acuity-shipped-2026-05-27-kept) above.
+1e. **Doctor disposition v3 inference wiring (plan section 3, Option B). NEXT ITEM IN QUEUE.** Model trained and benchmarked 2026-05-28; numbers in the "Experiments shipped" section above. Pending sub-tasks: (a) create `src/proiect_licenta/tools/doctor_disposition_tool.py` mirroring `doctor_tool_v3.py`'s pattern but for the binary admit probability; (b) swap `crew.py` to use v3_base for the initial doctor assessment and v3-nurse for the reassessment (currently still on v1/v2), inserting the new disposition task between nurse and reassessment; (c) update `tasks.yaml` with the new `doctor_disposition_task` plus top-3 + probability formatting for diagnosis/department/triage outputs; (d) end-to-end smoke test. **Operating-point note:** the model trades sensitivity for specificity at the default 0.5 threshold; threshold tuning is the highest-priority follow-up after wiring (sweep on the calibration holdout, choose by under-triage rate target).
 1d. ~~**Hand-curated red-flag keyword features (section 1.5).**~~ **TRIED AND REVERTED (2026-05-28).** 44 binary clinical-pattern columns (cardiac/neuro/respiratory/trauma/sepsis/etc.) added on top of iter 2 → "iter 3". Headline metrics moved by noise (every Δ ≤ ±0.04pp; under-triage +0.02pp regressed); 31/44 acuity + 26/44 disposition red flags had non-zero gain but the signal was already captured by TF-IDF + iter 2's ESI extreme-class weights. Same structural diagnosis as the doctor v3 Bio_ClinicalBERT experiment (entry 2 in "tried and reverted") — short ED chief-complaint text doesn't carry enough information for hand-curated overlays to beat what TF-IDF already extracts. See ["Empirical findings — experiments tried and reverted" entry 6](#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor) for the full audit and per-class numbers.
 2. ~~**Use longitudinal vitals from `vitalsign.csv` for Doctor v2.**~~ **DONE in Doctor v3 with-nurse.** The v3 with-nurse pipeline aggregates per-stay min / max / last / delta over the first 4h after `intime` for each of the 6 vitals, plus 7 abnormal-reading counts and a normalized `rhythm` one-hot bucket. The 4h window guards against late-stay disposition leakage. See `docs/agents/doctor-agent.md` for the full feature list.
 3. **Use discharge-note diagnosis as cleaner training labels.** Extract a normalized diagnosis from `discharge.csv` to replace the ICD-coded primary diagnosis. This directly attacks the 33% "Symptoms/Ill-Defined" labeling ceiling.

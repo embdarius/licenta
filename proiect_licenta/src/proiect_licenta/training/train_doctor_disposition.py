@@ -7,10 +7,21 @@ this one is a BINARY admit/discharge classifier and is trained on the FULL
 425K ED stays (not just the admitted-only ~102K slice), so it sees the
 positives and negatives in their real-world ratio.
 
-The aim is to refine the triage-time disposition (triage v3 iter 2 ref:
-77.98% acc, ROC AUC 0.8644, under-triage 15.56%, over-triage 16.90% —
-see docs/agents/triage-agent.md) after the nurse step. Expected lift
-band per plan section 3: +3-6pp accuracy, +0.03-0.05 ROC AUC.
+The aim is to refine the triage-time disposition (triage v3 iter 2 dispo
+reference numbers from docs/agents/triage-agent.md: accuracy 77.98%,
+ROC AUC 0.8644) after the nurse step. Expected lift band per plan
+section 3: +3-6pp accuracy, +0.03-0.05 ROC AUC.
+
+NOTE on over/under-triage references: the figures previously cited
+inline (0.1556 / 0.1690) were the triage v3 *acuity* (ESI) model's
+over+under-triage rates and were therefore the wrong category for
+this binary admit/discharge comparison. The correct apples-to-apples
+reference is the triage v3 disposition model's own over/under-triage
+rates, which `train_disposition` now computes on the SAME held-out
+test rows by thresholding the `triage_disposition_proba_admit`
+soft-cascade column at 0.5. Those baseline numbers are printed in the
+test-metric table and persisted under `metrics.triage_v3_dispo_baseline`
+in metadata.json.
 
 Differences vs ``train_nurse_v3``:
 
@@ -579,20 +590,57 @@ def train_disposition(
     ece_uncal = _ece(np.asarray(y_test), proba_uncal)
     ece_cal = _ece(np.asarray(y_test), proba_cal)
 
+    # ── Triage v3 disposition baseline (the right apples-to-apples ref) ──
+    # Both models output P(admit). The triage v3 disposition prediction is
+    # already in the test features as `triage_disposition_proba_admit`,
+    # computed in build_features by calling the v3 disposition_model on
+    # the v3 cascade input. Compute its accuracy / AUC / over+under-triage
+    # on the SAME test rows we just scored the doctor model on, so the
+    # comparison is direct.
+    TRIAGE_V3_DISPO_COL = "triage_disposition_proba_admit"
+    if TRIAGE_V3_DISPO_COL in X_test.columns:
+        tri_proba = X_test[TRIAGE_V3_DISPO_COL].values.astype(float)
+        tri_pred = (tri_proba >= 0.5).astype(int)
+        tri_acc = accuracy_score(y_test, tri_pred)
+        tri_auc = roc_auc_score(y_test, tri_proba)
+        tri_brier = brier_score_loss(y_test, tri_proba)
+        tri_ece = _ece(np.asarray(y_test), tri_proba)
+        tri_cm = confusion_matrix(y_test, tri_pred)
+        tri_tn, tri_fp, tri_fn, tri_tp = tri_cm.ravel()
+        tri_over = tri_fp / max(tri_tn + tri_fp, 1)
+        tri_under = tri_fn / max(tri_fn + tri_tp, 1)
+        tri_sens = tri_tp / max(tri_tp + tri_fn, 1)
+        tri_spec = tri_tn / max(tri_tn + tri_fp, 1)
+    else:
+        # Soft cascade column went missing — non-fatal here, the table just
+        # shows N/A and the benchmark catches it.
+        tri_acc = tri_auc = tri_brier = tri_ece = float("nan")
+        tri_over = tri_under = tri_sens = tri_spec = float("nan")
+
     print(f"\n  ── Test metrics ──")
-    print(f"  Accuracy   uncal {acc_uncal:.4f} | cal {acc_cal:.4f}  "
-          f"(delta {acc_cal - acc_uncal:+.4f})")
-    print(f"  ROC AUC    uncal {auc_uncal:.4f} | cal {auc_cal:.4f}  "
-          f"(delta {auc_cal - auc_uncal:+.4f})")
-    print(f"  Brier      uncal {brier_uncal:.4f} | cal {brier_cal:.4f}  "
-          f"(lower is better)")
-    print(f"  ECE (10b)  uncal {ece_uncal:.4f} | cal {ece_cal:.4f}")
-    print(f"  Over-triage  (false admit ): {over_triage:.4f}  "
-          f"(triage v3 iter 2 reference: 0.1690)")
-    print(f"  Under-triage (missed admit): {under_triage:.4f}  "
-          f"(triage v3 iter 2 reference: 0.1556)")
-    print(f"  Sensitivity (admit recall): {sens:.4f}")
-    print(f"  Specificity (discharge recall): {spec:.4f}")
+    print(f"  {'metric':16s}  {'TRIAGE v3 dispo':>16s}  "
+          f"{'doctor uncal':>14s}  {'doctor CAL':>11s}  {'doc - triage':>13s}")
+    print(f"  {'-'*16}  {'-'*16}  {'-'*14}  {'-'*11}  {'-'*13}")
+    print(f"  {'Accuracy':16s}  {tri_acc:>16.4f}  {acc_uncal:>14.4f}  "
+          f"{acc_cal:>11.4f}  {acc_cal - tri_acc:>+13.4f}")
+    print(f"  {'ROC AUC':16s}  {tri_auc:>16.4f}  {auc_uncal:>14.4f}  "
+          f"{auc_cal:>11.4f}  {auc_cal - tri_auc:>+13.4f}")
+    print(f"  {'Brier (lower=)':16s}  {tri_brier:>16.4f}  {brier_uncal:>14.4f}  "
+          f"{brier_cal:>11.4f}  {brier_cal - tri_brier:>+13.4f}")
+    print(f"  {'ECE 10b (lwr=)':16s}  {tri_ece:>16.4f}  {ece_uncal:>14.4f}  "
+          f"{ece_cal:>11.4f}  {ece_cal - tri_ece:>+13.4f}")
+    print(f"  {'Sensitivity':16s}  {tri_sens:>16.4f}  {'-':>14s}  "
+          f"{sens:>11.4f}  {sens - tri_sens:>+13.4f}")
+    print(f"  {'Specificity':16s}  {tri_spec:>16.4f}  {'-':>14s}  "
+          f"{spec:>11.4f}  {spec - tri_spec:>+13.4f}")
+    print(f"  {'Over-triage':16s}  {tri_over:>16.4f}  {'-':>14s}  "
+          f"{over_triage:>11.4f}  {over_triage - tri_over:>+13.4f}  (lower=better)")
+    print(f"  {'Under-triage':16s}  {tri_under:>16.4f}  {'-':>14s}  "
+          f"{under_triage:>11.4f}  {under_triage - tri_under:>+13.4f}  (lower=better)")
+    print(f"\n  Note: both columns are binary admit/discharge at threshold "
+          f"0.5. The 0.1556 / 0.1690 figures that previously appeared here "
+          f"were the triage v3 *acuity* (ESI) model's over+under-triage "
+          f"rates and were the wrong category for this comparison.")
     print()
     print(classification_report(
         y_test, y_pred_cal,
@@ -617,6 +665,18 @@ def train_disposition(
         "n_test":                int(len(X_test)),
         "scale_pos_weight":      round(float(scale_pos_weight), 4),
         "best_iteration":        int(raw.best_iteration),
+        # Triage v3 dispo baseline on the SAME test rows, for the metadata
+        # so the inference tool / docs can quote it without re-running.
+        "triage_v3_dispo_baseline": {
+            "accuracy":     round(float(tri_acc), 4) if tri_acc == tri_acc else None,
+            "roc_auc":      round(float(tri_auc), 4) if tri_auc == tri_auc else None,
+            "brier":        round(float(tri_brier), 4) if tri_brier == tri_brier else None,
+            "ece":          round(float(tri_ece), 4) if tri_ece == tri_ece else None,
+            "sensitivity":  round(float(tri_sens), 4) if tri_sens == tri_sens else None,
+            "specificity": round(float(tri_spec), 4) if tri_spec == tri_spec else None,
+            "over_triage_rate":  round(float(tri_over), 4) if tri_over == tri_over else None,
+            "under_triage_rate": round(float(tri_under), 4) if tri_under == tri_under else None,
+        },
     }
     return calibrated, raw, metrics
 
@@ -725,15 +785,22 @@ def main():
     print(f"\n{'#'*60}")
     print("  Doctor disposition v3 training complete")
     print(f"{'#'*60}")
-    print(f"  Headline numbers (calibrated, 0.5 threshold):")
-    print(f"    Accuracy   : {metrics['accuracy_calibrated']:.4f}  "
-          f"(triage v3 iter 2 ref: 0.7798)")
-    print(f"    ROC AUC    : {metrics['roc_auc_calibrated']:.4f}  "
-          f"(triage v3 iter 2 ref: 0.8644)")
+    tri = metrics.get("triage_v3_dispo_baseline", {}) or {}
+    print(f"  Headline numbers (calibrated, 0.5 threshold; "
+          f"triage v3 dispo baseline computed on the SAME test rows):")
+    _t = lambda k: (f"{tri[k]:.4f}" if tri.get(k) is not None else "  N/A")
+    print(f"    Accuracy    : {metrics['accuracy_calibrated']:.4f}  "
+          f"(triage v3 dispo: {_t('accuracy')})")
+    print(f"    ROC AUC     : {metrics['roc_auc_calibrated']:.4f}  "
+          f"(triage v3 dispo: {_t('roc_auc')})")
+    print(f"    Brier       : {metrics['brier_calibrated']:.4f}  "
+          f"(triage v3 dispo: {_t('brier')})  lower=better")
+    print(f"    ECE (10b)   : {metrics['ece_calibrated']:.4f}  "
+          f"(triage v3 dispo: {_t('ece')})  lower=better")
     print(f"    Under-triage: {metrics['under_triage_rate']:.4f}  "
-          f"(triage v3 iter 2 ref: 0.1556)")
+          f"(triage v3 dispo: {_t('under_triage_rate')})  lower=better")
     print(f"    Over-triage : {metrics['over_triage_rate']:.4f}  "
-          f"(triage v3 iter 2 ref: 0.1690)")
+          f"(triage v3 dispo: {_t('over_triage_rate')})  lower=better")
 
 
 if __name__ == "__main__":
