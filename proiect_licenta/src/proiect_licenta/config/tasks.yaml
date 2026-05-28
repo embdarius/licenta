@@ -27,6 +27,20 @@ parse_symptoms_task:
     10. Blood pressure (systolic/diastolic, e.g., 120/80)
     For walk-in patients, do NOT ask for vitals.
 
+    Past Medical History (ALL patients — walk-in AND ambulance/helicopter):
+    Ask the patient about chronic conditions and prior hospital admissions. This
+    feeds the v3 triage model's PMH features. Ask both questions even if the
+    patient seems uncomplicated — the model handles "no history" gracefully and
+    uses these signals for the admission/discharge prediction.
+    11. Past medical history / chronic conditions — free-text, comma-separated
+        (e.g., "CHF, diabetes, prior stroke" or "CKD on dialysis"). Accept
+        "skip", "no", "none", or "I don't know" if the patient has nothing to
+        report. Pass the patient's wording through verbatim — the tool parses
+        it against a clinical vocabulary at inference.
+    12. Approximate number of prior hospital admissions — an integer (0 is a
+        valid answer meaning "never admitted before"). Use -1 if the patient
+        skips or doesn't know.
+
     After gathering everything, respond ONLY with valid JSON.
     For walk-in patients:
     {{
@@ -34,7 +48,9 @@ parse_symptoms_task:
       "pain_score": 5,
       "age": 45,
       "gender": "male",
-      "arrival_transport": "walk_in"
+      "arrival_transport": "walk_in",
+      "prior_history": "diabetes, prior MI",
+      "n_prior_admissions": 2
     }}
     For ambulance/helicopter patients (include vitals, use -1 for any unknown):
     {{
@@ -48,11 +64,17 @@ parse_symptoms_task:
       "resprate": 22,
       "o2sat": 94,
       "sbp": 85,
-      "dbp": 55
+      "dbp": 55,
+      "prior_history": "CHF, hypertension, COPD",
+      "n_prior_admissions": 4
     }}
+    For patients with no prior history (or who skipped the questions):
+    use "prior_history": "" and "n_prior_admissions": -1.
   expected_output: >
-    A JSON object with all required fields filled in. For ambulance/helicopter patients,
-    includes vital sign fields (use -1 for unknown). No additional text, only valid JSON.
+    A JSON object with all required fields filled in. For ambulance/helicopter
+    patients, includes vital sign fields (use -1 for unknown). All patients
+    include `prior_history` (string, "" if skipped) and `n_prior_admissions`
+    (integer, -1 if skipped). No additional text, only valid JSON.
   agent: nlp_parser
 
 triage_assessment_task:
@@ -71,12 +93,19 @@ triage_assessment_task:
          pass them as well. Use the values from the JSON directly.
          For walk-in patients these fields will be absent; do not pass them
          (the tool defaults to -1 for missing vitals).
+       - PMH inputs (all patients): pass `prior_history` (string — pass "" if
+         the JSON has it as null, empty, or absent) and `n_prior_admissions`
+         (integer — pass -1 if absent or null). The tool zero-fills to the
+         first-time-patient pattern when these are skip-equivalents.
     3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
        - The confidence of the prediction
        - Whether the patient should be admitted or discharged
        - A brief clinical reasoning explanation
        - If vital signs were provided, note any abnormalities detected by the tool
+       - If `prior_history_used.pmh_categories_fired` is non-empty in the tool
+         output, briefly note which prior-condition categories were recognized
+         (e.g., "Patient's prior CHF and diabetes informed the prediction").
        - Recommended next steps based on the acuity level
 
     Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION,

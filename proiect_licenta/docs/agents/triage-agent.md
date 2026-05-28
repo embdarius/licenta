@@ -136,12 +136,19 @@ Training scripts (canonical paths via `src/proiect_licenta/paths.py`):
 
 ## Tool
 
-Implemented in `src/proiect_licenta/tools/triage_tool.py`. The tool lazy-loads both XGBoost models plus the TF-IDF vectorizer, severity map, and vital medians from `artifacts/triage/v2/`. It rebuilds the 2051-feature vector from the Parser's JSON and returns a structured result that the Doctor Agent consumes. v3 is benchmark-only — the inference tool has not yet been updated to load v3 artifacts or build the PMH columns. That's the next staged change; see the v3 section's "Inference status" note below.
+Implemented in `src/proiect_licenta/tools/triage_tool.py`. The tool lazy-loads both XGBoost models plus the TF-IDF vectorizer, severity map, and vital medians from **`artifacts/triage/v3/`** (the iter-2 kept stack). It rebuilds the **2070-feature vector** (23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF) from the Parser's JSON and returns a structured result that the Doctor Agent consumes.
 
 **Vital sign handling at inference:**
 - Vital inputs default to `-1` (unknown).
 - If a vital value is `-1` or outside its physiological clip range, it is treated as missing: the raw value is set to the training median, the `*_missing` flag is set to 1, and all derived abnormality/interaction flags are set to 0.
 - For ambulance/helicopter patients the NLP Parser collects EMS vitals and passes them through; for walk-in patients vitals remain at their defaults.
+
+**PMH handling at inference (v3, added 2026-05-29):**
+- The NLP Parser asks every patient (walk-in and ambulance/helicopter) about chronic conditions and approximate prior admission count as part of intake.
+- `prior_history` (free-text string) is parsed at inference via the same `pmh_vocab` the training pipeline uses — so "CHF, diabetes, prior stroke" fires the `pmh_Circulatory`, `pmh_Endocrine, Nutritional, Metabolic`, and `pmh_Nervous System and Sense Organs` flags without any additional patient questions.
+- `n_prior_admissions` (integer) is used directly. `days_since_last_admission` / `days_since_last_ed` are zero-filled (not collectible at the bedside) — the model saw the same pattern on ~39% of training rows (first-time MIMIC patients), so the runtime is consistent with training-time distribution.
+- If the patient skips both PMH prompts (`prior_history=""`, `n_prior_admissions=-1`), the tool zero-fills with `no_history=1` — the exact "first-time patient" pattern the v3 model learned to handle gracefully.
+- The result JSON includes a `prior_history_used` block summarizing which PMH category flags fired and whether the patient was treated as first-time, so the downstream Doctor Agent can surface that reasoning in its clinical note.
 
 ---
 
@@ -152,7 +159,7 @@ See [`../future-work.md`](../future-work.md) for the full roadmap. Triage-specif
 - ~~Add more trees — best_iteration was 2999/3000, model had not yet converged.~~ **DONE in v3 iter 2** (lr 0.02→0.01, n_estimators 3000→5000). Acuity converged at best_iteration=2405/5000; disposition still hits the ceiling at 4999/5000 but accuracy is flat past iteration 2000, so further training has ≤0.2pp expected upside.
 - ~~**Ordinal acuity objective.**~~ **DONE in v3 iter 2** via `ESI_EXTREME_BOOST` + `neg_quadratic_kappa` early stopping. ESI 5 recall recovered from 14% to 26.8%; ESI 1, ESI 2 both gained; under-triage rate dropped 2.11pp vs v2.
 - ~~**Hand-curated red-flag keyword features (section 1.5).**~~ **TRIED AND REVERTED in v3 iter 3 (2026-05-28).** Headline metrics within noise floor (±0.04pp); under-triage +0.02pp regressed. See "Tried and reverted" subsection below.
-- **Inference rewiring for v3.** Add a PMH prompt to the NLP Parser so the runtime gets the same prior-history signal the v3 benchmark relies on. **Next staged change.**
+- ~~**Inference rewiring for v3.**~~ **DONE (2026-05-29).** Runtime now loads `artifacts/triage/v3/` and collects `prior_history` + `n_prior_admissions` from the patient at parser intake. See [Inference status](#inference-status--wired-2026-05-29) below for details.
 - Try LightGBM as an alternative to XGBoost.
 - Ensemble methods (stacking multiple models).
 - Neural network with learned embeddings for complaint text.
@@ -299,14 +306,16 @@ Three reasons, in order of weight:
 
 The cost — a 0.46pp headline accuracy drop, a 2.58pp over-triage increase, and a +0.0114 MAE rise — is consistent with the design intent and is documented honestly here for thesis-defense scrutiny.
 
-### Inference status
+### Inference status — wired (2026-05-29)
 
-**v3 is benchmark-only as of 2026-05-27.** The runtime `triage_tool.py` still loads `artifacts/triage/v2/` and builds the 2051-feature vector without PMH columns. Wiring iter 2 into the live crew requires:
+**v3 (iter 2) is now the runtime model.** `triage_tool.py` loads `artifacts/triage/v3/` and builds the 2070-feature vector including the 19-column PMH block on every call. Two coordinated changes landed together:
 
-1. Adding a PMH prompt to the NLP Parser (or a step before triage) so the patient self-reports chronic conditions. The Doctor v3 path already has this prompt in the Nurse Agent — moving it earlier in the pipeline or adding a peer prompt to the Parser would do the job.
-2. Updating `triage_tool.py` to load from `artifacts/triage/v3/` and build the 19-column PMH block from the Parser's output (or zero-fill with `no_history=1` if the patient skips).
+1. **NLP Parser collects PMH at intake.** `config/tasks.yaml`'s `parse_symptoms_task` now instructs the parser to ask every patient (walk-in and ambulance/helicopter alike) about (a) chronic conditions / prior medical history as free text and (b) approximate prior admission count. Both can be skipped; skip-equivalents (`""`, "no", "skip", "none", "I don't know", "no significant pmh") all map to the first-time-patient pattern.
+2. **`triage_tool.py` parses and applies PMH inline.** Same `pmh_flags_from_text` + `PMH_CATEGORIES` + `PMH_NO_PRIOR_DAYS` machinery the doctor v3 tool uses, so the two heads share inference-side PMH parsing. `days_since_last_admission` / `days_since_last_ed` / `same_complaint_as_prior` are zero-filled (uncollectable at bedside, model trained on the same pattern via the 39% first-time-patient rows).
 
-This is the next staged change after iter 2's documentation lands.
+The result JSON's new `prior_history_used` block surfaces which PMH categories fired so the Doctor Agent can include "Patient's prior CHF and diabetes informed the prediction" in its clinical reasoning.
+
+**Operator note: iter-2 v3 weights required on disk.** The runtime expects `artifacts/triage/v3/` to contain the **iter-2** kept artifacts (2070 features). If your Drive currently has iter-3 weights (2114 features, includes the reverted red-flag columns), re-train via the Colab notebook against the post-revert HEAD to restore iter-2 weights. The smoke tests in `tools/triage_tool.py` exercise feature-vector shape (asserts 2070 cols) so a weight mismatch will fail loudly at first call rather than silently corrupting predictions.
 
 ### Implementation
 

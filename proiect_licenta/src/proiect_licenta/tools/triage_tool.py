@@ -1,14 +1,24 @@
 """
-Triage Prediction Tool v2 — CrewAI Tool
+Triage Prediction Tool v3 — CrewAI Tool
 
-Uses TF-IDF + XGBoost models with demographics and vital signs for triage predictions.
-Takes chief complaints, pain score, age, gender, arrival transport, and optional vitals.
-Returns ESI acuity level (1-5), admission/discharge, confidence scores.
+Uses TF-IDF + XGBoost models with demographics, vital signs, and PMH
+(Past Medical History) features for triage predictions. Takes chief
+complaints, pain score, age, gender, arrival transport, optional vitals,
+and optional patient-reported prior history. Returns ESI acuity level
+(1-5), admission/discharge, confidence scores.
 
-Loads models from artifacts/triage/v2/ (triage pipeline v2 with vital signs).
+Loads models from artifacts/triage/v3/ (triage pipeline v3 iter 2: v2 features
++ 19-column PMH block + longer training + ordinal-aware acuity weighting).
+
+PMH inputs (`prior_history`, `n_prior_admissions`) are collected by the NLP
+Parser during patient intake and passed through here. If the patient
+skips them, the tool zero-fills with `no_history=1` — the exact pattern
+used by ~39% of v3 training rows (first-time MIMIC patients), so the model
+learned to handle missing PMH gracefully.
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Optional, Type
 
@@ -22,7 +32,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
 # ---------------------------------------------------------------------------
-from proiect_licenta.paths import TRIAGE_V2_DIR as MODELS_DIR
+from proiect_licenta.paths import TRIAGE_V3_DIR as MODELS_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +44,27 @@ from proiect_licenta.preprocessing import (  # noqa: F401
     ABBREVIATIONS,
     normalize_complaint_text,
 )
+
+
+# ---------------------------------------------------------------------------
+# PMH (Past Medical History) — shared with training pipeline.
+# Same imports and same vocabulary the doctor v3 tool uses, so inference-side
+# parsing matches training-side feature construction.
+# ---------------------------------------------------------------------------
+from proiect_licenta.pmh_features import PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS
+from proiect_licenta.pmh_vocab import (
+    PMH_CATEGORIES,
+    flags_from_text as pmh_flags_from_text,
+)
+
+
+# Patient inputs that should be treated as "no history" / "skip" — matches
+# the doctor_tool_v3.py vocabulary to keep the two tools' behavior consistent.
+_PMH_SKIP_TOKENS = {
+    "", "skip", "unknown", "no", "none", "n/a", "na", "-",
+    "i don't know", "i dont know", "idk",
+    "no significant", "no significant pmh", "no pmh",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +94,56 @@ ABNORMALITY_THRESHOLDS = {
 
 
 # ---------------------------------------------------------------------------
+# Pickle-resolution shim — neg_quadratic_kappa
+# ---------------------------------------------------------------------------
+# The v3 acuity model was trained with `eval_metric=neg_quadratic_kappa`
+# as a custom callable (section 1.2). When training runs via
+# `runpy.run_path(..., run_name='__main__')` (the Colab flow), pickle
+# records the callable's qualified name as `__main__.neg_quadratic_kappa`.
+# At load time pickle needs that name to exist on sys.modules['__main__'].
+# At runtime, sys.modules['__main__'] is the host script (e.g.
+# `run_crew.exe.__main__`), so the lookup fails with:
+#
+#   AttributeError: Can't get attribute 'neg_quadratic_kappa' on <module '__main__' ...>
+#
+# `save_models()` in train_triage_v3.py was fixed to strip eval_metric
+# before joblib.dump (commit on 2026-05-29), but that fix only protects
+# artifacts trained AFTER the fix landed. To keep the runtime resilient
+# to pre-fix artifacts already on disk / on Drive, we inject a shim
+# function into __main__ before any model load.
+#
+# The shim is never actually called at inference — eval_metric only
+# matters during .fit(). It just needs to exist with the right name so
+# pickle's by-name lookup succeeds.
+
+def neg_quadratic_kappa(y_true, y_pred):
+    """Inference-side shim of the training-time eval_metric callable.
+
+    Same signature as `train_triage_v3.neg_quadratic_kappa`. Returns
+    -κ (XGBoost convention: lower is better). Never invoked at inference
+    — exists so `joblib.load` can resolve `__main__.neg_quadratic_kappa`
+    on pre-fix v3 artifacts.
+    """
+    from sklearn.metrics import cohen_kappa_score
+    y_pred_class = np.argmax(y_pred, axis=1)
+    return -cohen_kappa_score(y_true, y_pred_class, weights="quadratic")
+
+
+def _ensure_pickle_compat_in_main():
+    """Inject `neg_quadratic_kappa` into sys.modules['__main__'] so that
+    pre-fix v3 acuity artifacts (which pickled the callable with
+    __module__='__main__') can be loaded via joblib.load without raising
+    AttributeError.
+
+    Idempotent. No-op if __main__ already has the attribute (e.g. when
+    running under the training script itself).
+    """
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None and not hasattr(main_mod, "neg_quadratic_kappa"):
+        main_mod.neg_quadratic_kappa = neg_quadratic_kappa
+
+
+# ---------------------------------------------------------------------------
 # Lazy model loading
 # ---------------------------------------------------------------------------
 _models_cache = None
@@ -71,11 +152,23 @@ _models_cache = None
 def get_models():
     global _models_cache
     if _models_cache is None:
+        # Must run BEFORE joblib.load on the acuity model — see the
+        # _ensure_pickle_compat_in_main docstring above.
+        _ensure_pickle_compat_in_main()
+
         acuity_model = joblib.load(MODELS_DIR / "acuity_model.joblib")
         disposition_model = joblib.load(MODELS_DIR / "disposition_model.joblib")
         tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
         severity_map = joblib.load(MODELS_DIR / "severity_map.joblib")
         vital_medians = joblib.load(MODELS_DIR / "vital_medians.joblib")
+
+        # Defensive: also strip eval_metric on the loaded model in case
+        # downstream code (e.g. doctor_tool_v2's cascade) pickles a copy.
+        # No-op when set_params doesn't accept eval_metric on this estimator.
+        try:
+            acuity_model.set_params(eval_metric=None)
+        except Exception:
+            pass
 
         with open(MODELS_DIR / "model_metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
@@ -149,6 +242,21 @@ class TriageInput(BaseModel):
         default=-1.0,
         description="Diastolic blood pressure in mmHg. Use -1 if unknown."
     )
+    prior_history: str = Field(
+        default="",
+        description="Patient-reported chronic conditions / past medical history "
+                    "as free text (e.g., 'CHF, diabetes, prior stroke', or 'CKD on "
+                    "dialysis'). Use empty string if the patient skipped or has "
+                    "no significant prior history. Parsed at inference against the "
+                    "same pmh_vocab the training pipeline uses, so the 13 binary "
+                    "diagnosis-group flags can fire even from short patient input."
+    )
+    n_prior_admissions: int = Field(
+        default=-1,
+        description="Approximate number of prior hospital admissions the patient "
+                    "reports. Use -1 if not collected / unknown. 0 is a valid value "
+                    "meaning 'never been admitted before'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +270,16 @@ class TriagePredictionTool(BaseTool):
         "Required inputs: chief_complaints (comma-separated string), "
         "pain_score (0-10 or -1 if unknown). "
         "Optional inputs: age, gender, arrival_transport, "
-        "temperature (°F), heartrate (bpm), resprate, o2sat (%), sbp, dbp (mmHg). "
+        "temperature (°F), heartrate (bpm), resprate, o2sat (%), sbp, dbp (mmHg), "
+        "prior_history (free-text chronic conditions, '' if unknown), "
+        "n_prior_admissions (int, -1 if unknown). "
         "Vital signs default to -1 (unknown) — provide them when available "
         "(e.g., ambulance/helicopter patients with EMS vitals). "
-        "Uses XGBoost models trained on 100K+ MIMIC-IV ED visits with vital signs."
+        "PMH inputs (prior_history, n_prior_admissions) default to skip-equivalents "
+        "and zero-fill to first-time-patient pattern when the patient doesn't report. "
+        "Uses XGBoost v3 models (acuity 67.55% / disposition 77.98% on the 83K MIMIC-IV "
+        "test set; under-triage rate 15.56%, ESI 5 recall 26.82% — kept iteration 2 "
+        "stack: PMH features + longer training + ordinal-aware ESI weighting)."
     )
     args_schema: Type[BaseModel] = TriageInput
 
@@ -182,8 +296,10 @@ class TriagePredictionTool(BaseTool):
         o2sat: float = -1.0,
         sbp: float = -1.0,
         dbp: float = -1.0,
+        prior_history: str = "",
+        n_prior_admissions: int = -1,
     ) -> str:
-        """Run triage prediction with optional vital signs."""
+        """Run triage prediction with optional vital signs and PMH inputs."""
         (acuity_model, disposition_model, tfidf, severity_map,
          vital_medians, metadata) = get_models()
 
@@ -289,6 +405,45 @@ class TriagePredictionTool(BaseTool):
         hypoxic_elderly = hypoxic * elderly
         hypotensive_elderly = hypotensive * elderly
 
+        # 10b. PMH features (v3) — mirror doctor_tool_v3.py logic so triage and
+        # doctor share the same inference-time PMH parsing. Empty / skip input
+        # → all flags 0 + no_history=1, matching the first-time-patient pattern
+        # the model saw on ~39% of training rows.
+        pmh_text = (prior_history or "").strip()
+        pmh_unknown = pmh_text == "" or pmh_text.lower() in _PMH_SKIP_TOKENS
+        if pmh_unknown:
+            pmh_flags_active: set = set()
+            pmh_no_history = 1
+        else:
+            pmh_flags_active = pmh_flags_from_text(pmh_text)
+            pmh_no_history = 0
+
+        # n_prior_admissions: if not collected (-1) → 0 + no_history=1.
+        # days_since_last_* are not collectable from the patient at the bedside,
+        # so we always zero-fill (PMH_NO_PRIOR_DAYS sentinel) — the model saw
+        # the same pattern on first-time-patient training rows.
+        if n_prior_admissions is None or n_prior_admissions < 0:
+            n_prior_adm_val = 0
+            n_prior_ed_val = 0
+            pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
+        else:
+            n_prior_adm_val = int(n_prior_admissions)
+            n_prior_ed_val = 0  # not collected separately at inference
+
+        # If the patient reported conditions but skipped the count, still treat
+        # them as having history.
+        if pmh_flags_active and pmh_no_history == 1:
+            pmh_no_history = 0
+
+        pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
+                    for c in PMH_CATEGORIES}
+        pmh_data["n_prior_admissions"] = n_prior_adm_val
+        pmh_data["n_prior_ed_visits"] = n_prior_ed_val
+        pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
+        pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
+        pmh_data["same_complaint_as_prior"] = 0.0
+        pmh_data["no_history"] = pmh_no_history
+
         # 11. Assemble feature vector (must match training order!)
         structured = pd.DataFrame({
             # v1 features
@@ -350,7 +505,14 @@ class TriagePredictionTool(BaseTool):
             "hypoxic_elderly": [hypoxic_elderly],
             "hypotensive_elderly": [hypotensive_elderly],
         })
-        features = pd.concat([structured, tfidf_df], axis=1)
+
+        # v3 — PMH block. Built from the patient-reported prior_history /
+        # n_prior_admissions; column order = PMH_FEATURE_COLS so it matches
+        # the position used by train_triage_v3.build_features (right after
+        # v2 vital cols, before TF-IDF).
+        pmh_df = pd.DataFrame({col: [pmh_data[col]] for col in PMH_FEATURE_COLS})
+
+        features = pd.concat([structured, pmh_df, tfidf_df], axis=1)
 
         # 12. Predict acuity
         acuity_pred_shifted = int(acuity_model.predict(features)[0])
@@ -389,6 +551,17 @@ class TriagePredictionTool(BaseTool):
             flag for flag, val in abnormality_flags.items() if val == 1
         ]
 
+        # Summarize what PMH info was actually applied at inference, so the
+        # caller (and the doctor downstream) can see which flags fired and
+        # whether the patient was treated as first-time.
+        prior_history_summary = {
+            "raw_input": prior_history if prior_history else None,
+            "n_prior_admissions_used": n_prior_adm_val,
+            "no_history_flag": pmh_no_history,
+            "pmh_categories_fired": sorted(pmh_flags_active),
+            "pmh_category_count": len(pmh_flags_active),
+        }
+
         result = {
             "complaint_analysis": {
                 "input_complaints": raw_complaints,
@@ -408,6 +581,7 @@ class TriagePredictionTool(BaseTool):
                 "abnormalities_detected": abnormalities_detected,
                 "abnormal_vital_count": abnormal_vital_count,
             },
+            "prior_history_used": prior_history_summary,
             "acuity_prediction": {
                 "predicted_esi_level": acuity_pred,
                 "description": ACUITY_DESCRIPTIONS.get(acuity_pred, "Unknown"),
