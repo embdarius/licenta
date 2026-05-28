@@ -44,10 +44,11 @@ triage disposition after the nurse step.
 
 ## What this model does
 
-Refines the triage-time disposition (currently 76.2% acc / ROC AUC 0.84)
-using everything nurse data adds: snapshot vitals + longitudinal vitals
-+ rhythm + medications + PMH. Plan section 3 predicted lift band:
-**76.2% → ~80-82%, ROC AUC 0.84 → ~0.88**.
+Refines the triage-time disposition (triage v3 iter 2 production:
+77.98% acc / ROC AUC 0.8644 / under-triage 15.56% / over-triage 16.90%
+— see `docs/agents/triage-agent.md`) using everything nurse data adds:
+snapshot vitals + longitudinal vitals + rhythm + medications + PMH.
+Plan section 3 predicted lift band: **+3-6pp accuracy, +0.03-0.05 ROC AUC**.
 
 ## Key differences vs the diagnosis / department v3 training
 
@@ -65,15 +66,20 @@ using everything nurse data adds: snapshot vitals + longitudinal vitals
   `[intime, intime + 4h]` so late-stay disposition decisions never leak
   back into the feature vector.
 
-## Feature set (~2150 columns)
+## Feature set (~2140 columns)
 
-- ~2069 columns from `train_triage_v3.build_features` (23 structured + ~28 v2 vital + 19 PMH + 2000 TF-IDF)
-- 2000 TF-IDF features
-- 6 **soft cascade** columns from triage v3
-- 20 snapshot vital + clinical-flag features
-- 24 medication features
-- ~40 longitudinal vital + rhythm features
-- 19 PMH features (13 binary + 6 numeric)
+The disposition model reuses the **full triage v3 input vector** as its
+base (so structured + snapshot vitals + PMH + TF-IDF appear inside it),
+then layers the cascade + nurse-only signals on top:
+
+- ~2069 columns from `train_triage_v3.build_features` (23 v1 structured
+  + ~28 v2 vital + 19 PMH + 2000 TF-IDF)
+- 6 **soft cascade** columns from triage v3 (5 acuity softmax + 1 dispo
+  probability)
+- 24 medication features (n_medications + meds_unknown + 22 categories)
+- ~40 longitudinal vital + rhythm features (min/max/last/delta over
+  [intime, intime + 4h], abnormal-reading counts, rhythm buckets +
+  rhythm_irregular flag)
 
 ## Repo layout assumption
 
@@ -309,8 +315,192 @@ if missing_v3:
         f'{missing_v3}. Train triage v3 first (or upload from local).'
     )
 
+# Triage v3 artifact-vs-code compatibility check.
+# The current train_triage_v3.build_features (post-revert of section 1.5)
+# produces a 2069-column vector. If the acuity_model.joblib on Drive was
+# trained against iter 3 (which added ~44 red-flag rf_* columns, then
+# reverted in commit cc348e6), its feature_names_in_ will include rf_*
+# entries and predict_proba will fail mid-cascade with a confusing
+# "feature_names mismatch" deep in XGBoost. Catch it here with a clear
+# message so the user knows to upload the iter-2 artifacts to Drive.
+import joblib as _joblib_check
+_acu = _joblib_check.load(TRIAGE_V3_DIR / 'acuity_model.joblib')
+_acu_feats = list(getattr(_acu, 'feature_names_in_', []))
+_acu_rf = [c for c in _acu_feats if c.startswith('rf_')]
+_acu_n = len(_acu_feats)
+print(f'\\nTriage v3 acuity model expects {_acu_n} input columns.')
+if _acu_rf:
+    raise RuntimeError(
+        f'INCOMPATIBLE TRIAGE V3 ARTIFACTS DETECTED.\\n'
+        f'  The acuity_model.joblib on Drive was trained with iter 3 '
+        f'red-flag features ({len(_acu_rf)} rf_* columns present).\\n'
+        f'  Iter 3 was reverted in commit cc348e6 and the current code '
+        f'produces a 2069-col vector WITHOUT rf_* features.\\n'
+        f'  Fix: upload your iter-2 v3 artifacts (the ones recorded in '
+        f'docs/agents/triage-agent.md as the kept production version: '
+        f'disposition 77.98%, acuity 67.55%) to '
+        f'MyDrive/proiect_licenta/artifacts/triage/v3/ and re-run this '
+        f'cell.\\n'
+        f'  Sample of unexpected rf_* columns: {_acu_rf[:6]}'
+    )
+EXPECTED_V3_FEATURE_COUNT = 2069  # 23 + 28 + 19 + 2000
+if _acu_n != EXPECTED_V3_FEATURE_COUNT:
+    print(f'  WARN: expected {EXPECTED_V3_FEATURE_COUNT} columns (iter 2 production); '
+          f'got {_acu_n}. The cascade may still work if the column set is '
+          f'compatible, but the smoke-test cell will surface any real mismatch.')
+else:
+    print(f'  -> Looks like iter 2 production artifacts (2069 cols, no rf_*). ✓')
+
 print(f'\\nDOCTOR_V3_DIR (disposition_model.joblib will be added here): {DOCTOR_V3_DIR}')
 print('All required checks passed. Ready to train.')""")
+
+
+md("section-smoke-md", """---
+## Section 2.5 - Dry-run smoke test (~30 s, cheap)
+
+Catches the most common pre-flight failures *before* committing to the 60-90 min
+full training run. Specifically:
+
+1. Loads a **500-row sample** of triage.csv + edstays.csv merged.
+2. Synthesizes the minimum columns `train_triage_v3.build_features` needs
+   (PMH cols zeroed out, vitals walk-in-masked the way `build_features`
+   does it at training time).
+3. Calls `train_triage_v3.build_features(fit=False)` against the loaded v3
+   artifacts on Drive.
+4. Calls `acuity_model.predict_proba` + `disposition_model.predict_proba`
+   on the synthesized input. Confirms the cascade math actually runs.
+5. Confirms `disposition_model_raw.joblib` / calibrated wrappers can also
+   be assembled (one-off `CalibratedClassifierCV` smoke fit on the tiny
+   sample, then `.predict_proba`).
+
+If this cell fails, the full run will fail — only with a 25-minute PMH parse
+wasted first. **Run this before cell 7.** Expected runtime: < 30 seconds.""")
+
+
+code("cell-smoke-test", """# Cell 6b: Dry-run smoke test — verifies the v3 cascade before the full train
+import joblib, numpy as np, pandas as pd
+from proiect_licenta.training import train_triage_v3
+from proiect_licenta.pmh_features import PMH_FEATURE_COLS
+
+print('Loading v3 cascade artifacts...')
+v3_tfidf = joblib.load(TRIAGE_V3_DIR / 'tfidf_vectorizer.joblib')
+v3_sev = joblib.load(TRIAGE_V3_DIR / 'severity_map.joblib')
+v3_med = joblib.load(TRIAGE_V3_DIR / 'vital_medians.joblib')
+v3_acu = joblib.load(TRIAGE_V3_DIR / 'acuity_model.joblib')
+v3_disp = joblib.load(TRIAGE_V3_DIR / 'disposition_model.joblib')
+# Strip the custom eval_metric callable that breaks pickle round-tripping
+# on artifacts trained before the `set_params(eval_metric=None)` fix landed.
+try:
+    v3_acu.set_params(eval_metric=None)
+except Exception:
+    pass
+print(f'  acuity expects:      {len(v3_acu.feature_names_in_)} columns')
+print(f'  disposition expects: {len(v3_disp.feature_names_in_)} columns')
+
+print('\\nLoading 500-row sample from triage.csv + edstays.csv...')
+SAMPLE_N = 500
+triage_sample = pd.read_csv(TRIAGE_CSV, nrows=5000)
+edstays_sample = pd.read_csv(
+    EDSTAYS_CSV,
+    usecols=['subject_id', 'stay_id', 'hadm_id', 'intime', 'gender',
+             'arrival_transport', 'disposition'],
+    nrows=20000,
+)
+df = triage_sample.merge(edstays_sample, on=['subject_id', 'stay_id'], how='inner')
+df = df.dropna(subset=['chiefcomplaint'])
+df = df[df['chiefcomplaint'].str.strip() != '']
+df = df.head(SAMPLE_N).reset_index(drop=True)
+print(f'  sample size: {len(df)}')
+
+# Minimum cleaning required by train_triage_v3.build_features
+df['intime'] = pd.to_datetime(df['intime'])
+df['age'] = 50  # dummy — build_features only uses for age_bin / interactions
+df['gender_male'] = (df['gender'] == 'M').astype(int)
+df['arrival_ambulance'] = (df['arrival_transport'] == 'AMBULANCE').astype(int)
+df['arrival_helicopter'] = (df['arrival_transport'] == 'HELICOPTER').astype(int)
+df['arrival_walk_in'] = (df['arrival_transport'] == 'WALK IN').astype(int)
+
+# Pain → int, with _missing flag (build_features uses `pain_missing` directly)
+df['pain_triage'] = pd.to_numeric(df['pain'], errors='coerce')
+df['pain_missing'] = df['pain_triage'].isna().astype(int)
+df['pain'] = df['pain_triage'].fillna(-1).astype(int)
+df.loc[df['pain'] > 10, 'pain'] = -1
+df.loc[df['pain'] < 0, 'pain'] = -1
+
+# Apply walk-in vital masking the same way load_and_clean_data does upstream
+walkin_mask = ~df['arrival_transport'].isin(['AMBULANCE', 'HELICOPTER'])
+for col in train_triage_v3.VITAL_COLS:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.loc[walkin_mask, col] = np.nan
+
+# Synthesize PMH columns (all zero — fine for a smoke test, the disposition
+# pipeline computes them properly via aggregate_pmh in the real run)
+for col in PMH_FEATURE_COLS:
+    if col not in df.columns:
+        df[col] = 0
+df['no_history'] = 1
+
+# Acuity column (build_features only uses for fit=True; we pass fit=False
+# so just put something valid).
+df['acuity'] = 3
+
+print('\\nCalling train_triage_v3.build_features(fit=False)...')
+v3_features, _, _, _ = train_triage_v3.build_features(
+    df, tfidf=v3_tfidf, severity_map=v3_sev,
+    vital_medians=v3_med, fit=False,
+)
+print(f'  v3 features shape: {v3_features.shape}')
+assert v3_features.shape[1] == len(v3_acu.feature_names_in_), (
+    f'FEATURE COUNT MISMATCH: build_features produced {v3_features.shape[1]} cols '
+    f'but acuity model expects {len(v3_acu.feature_names_in_)}. '
+    f'Most likely cause: triage v3 artifacts on Drive were trained on a '
+    f'different code revision than the current train_triage_v3.py.'
+)
+
+print('\\nCalling v3 acuity_model.predict_proba...')
+ap = v3_acu.predict_proba(v3_features)
+print(f'  acuity proba shape: {ap.shape}  (expected (N, 5))')
+assert ap.shape == (len(df), 5), f'unexpected acuity proba shape: {ap.shape}'
+
+print('\\nCalling v3 disposition_model.predict_proba (with cascade)...')
+v3_features_disp = v3_features.copy()
+v3_features_disp['predicted_acuity'] = ap.argmax(axis=1) + 1
+dp = v3_disp.predict_proba(v3_features_disp)
+print(f'  disposition proba shape: {dp.shape}  (expected (N, 2))')
+assert dp.shape == (len(df), 2), f'unexpected disposition proba shape: {dp.shape}'
+
+print('\\nSmoke-fitting CalibratedClassifierCV on the same tiny sample...')
+from sklearn.calibration import CalibratedClassifierCV
+try:
+    from sklearn.frozen import FrozenEstimator
+    _has_frozen = True
+except ImportError:
+    _has_frozen = False
+from xgboost import XGBClassifier
+# Use a real disposition label so the calibration fit doesn't trip on
+# all-one-class. Pick whatever's available in the sample.
+y_smoke = (df['disposition'] == 'ADMITTED').astype(int).values
+if y_smoke.sum() == 0 or y_smoke.sum() == len(y_smoke):
+    print('  (sample is single-class — synthesizing balanced y for smoke fit)')
+    y_smoke = (np.arange(len(df)) % 2).astype(int)
+raw_smoke = XGBClassifier(
+    n_estimators=20, max_depth=4, eval_metric='logloss',
+    objective='binary:logistic', n_jobs=-1, verbosity=0,
+    tree_method='hist', device='cuda',
+)
+raw_smoke.fit(v3_features_disp, y_smoke)
+if _has_frozen:
+    cal_smoke = CalibratedClassifierCV(FrozenEstimator(raw_smoke), method='isotonic', cv=None)
+else:
+    cal_smoke = CalibratedClassifierCV(raw_smoke, method='isotonic', cv='prefit')
+cal_smoke.fit(v3_features_disp, y_smoke)
+proba_smoke = cal_smoke.predict_proba(v3_features_disp)
+print(f'  calibrated proba shape: {proba_smoke.shape}')
+
+print('\\n' + '=' * 60)
+print('SMOKE TEST PASSED. The v3 cascade + calibration pipeline are wired')
+print('correctly. Safe to proceed to the full train (cell 7).')
+print('=' * 60)""")
 
 
 md("section3-md", """---
@@ -321,7 +511,7 @@ Trains the binary disposition model on GPU. Heavy steps inside this cell:
 1. Load `triage.csv` + full `edstays.csv` + `patients.csv` + `medrecon.csv` (~1-2 min).
 2. **Longitudinal vitals aggregation** from `vitalsign.csv` with the [intime, intime + 4h] window (~5-8 min, CPU).
 3. **PMH aggregation** over the full 425K dataset: stream `discharge.csv` (3.3 GB) in chunks, parse PMH sections, OR with ICD-derived flags from `diagnoses_icd.csv`. ~25-40 min, CPU-bound (this dominates total runtime).
-4. Build the feature matrix: 23 triage structured + 2000 TF-IDF + 6 **soft cascade** + 20 snapshot vitals + 24 meds + ~40 longitudinal + 19 PMH = **~2150 features**.
+4. Build the feature matrix: **2069 v3 input cols** (structured + v3 vitals + PMH + TF-IDF, via `train_triage_v3.build_features`) + 6 **soft cascade** + 24 medication + ~40 longitudinal vital + rhythm = **~2140 features**.
 5. Split 80/20 (random_state=42, stratified on admit label).
 6. Split out 10% of train as calibration holdout (A4 pattern).
 7. **Train XGBoost on GPU** (~20-30 min, up to 5000 trees, lr=0.02, early stopping=150).
@@ -339,10 +529,12 @@ Trains the binary disposition model on GPU. Heavy steps inside this cell:
 
 ### Headline numbers to look for
 
-- **Accuracy** > 0.80 (triage v3 reference: 0.762)
-- **ROC AUC** > 0.86 (triage v3 reference: 0.84)
+(Triage v3 iter 2 production baselines: 0.7798 / 0.8644 / 0.1556 / 0.1690.)
+
+- **Accuracy** > 0.81 (triage v3 iter 2: 0.7798)
+- **ROC AUC** > 0.89 (triage v3 iter 2: 0.8644)
 - **ECE (calibrated)** < 0.04 (the whole point of isotonic)
-- **Under-triage** < 0.15 (triage v3 reference: 0.177 — the safety-critical number)
+- **Under-triage** < 0.13 (triage v3 iter 2: 0.1556 — the safety-critical number)
 
 *Expected runtime: 60-90 min on T4 GPU. PMH parse dominates the first half.*""")
 
@@ -395,12 +587,12 @@ print(f'  soft_cascade_cols: {dispo.get(\"soft_cascade_cols\")}')
 
 m = dispo.get('metrics', {})
 print('\\nHeadline metrics (calibrated, 0.5 threshold):')
-print(f'  Accuracy   : {m.get(\"accuracy_calibrated\"):.4f}  (triage v3 ref: ~0.762)')
-print(f'  ROC AUC    : {m.get(\"roc_auc_calibrated\"):.4f}  (triage v3 ref: ~0.84)')
+print(f'  Accuracy   : {m.get(\"accuracy_calibrated\"):.4f}  (triage v3 iter 2: 0.7798)')
+print(f'  ROC AUC    : {m.get(\"roc_auc_calibrated\"):.4f}  (triage v3 iter 2: 0.8644)')
 print(f'  ECE (10b)  : {m.get(\"ece_calibrated\"):.4f}    (calibration error, lower=better)')
 print(f'  Brier      : {m.get(\"brier_calibrated\"):.4f}')
-print(f'  Under-tri  : {m.get(\"under_triage_rate\"):.4f}  (triage v3 ref: ~0.177)')
-print(f'  Over-tri   : {m.get(\"over_triage_rate\"):.4f}  (triage v3 ref: ~0.143)')
+print(f'  Under-tri  : {m.get(\"under_triage_rate\"):.4f}  (triage v3 iter 2: 0.1556)')
+print(f'  Over-tri   : {m.get(\"over_triage_rate\"):.4f}  (triage v3 iter 2: 0.1690)')
 print(f'  Sens       : {m.get(\"sensitivity\"):.4f}')
 print(f'  Spec       : {m.get(\"specificity\"):.4f}')
 
@@ -477,20 +669,20 @@ assert m['ece_calibrated'] <= m['ece_uncalibrated'] + 0.005, (
 print('  -> calibration helped (or stayed flat) ✓')
 
 print('\\n' + '=' * 60)
-print('B. Headline lift audit (vs triage v3 reference of 0.762 / 0.84)')
+print('B. Headline lift audit (vs triage v3 iter 2 production: 0.7798 / 0.8644 / 0.1556)')
 print('=' * 60)
 ACC = m['accuracy_calibrated']
 AUC = m['roc_auc_calibrated']
 UND = m['under_triage_rate']
-print(f'  Accuracy   : {ACC:.4f}  (triage v3 ref: 0.762)')
-print(f'  ROC AUC    : {AUC:.4f}  (triage v3 ref: 0.84)')
-print(f'  Under-tri  : {UND:.4f}  (triage v3 ref: 0.177; lower=better)')
-if ACC < 0.77:
-    print('  WARN: accuracy <= triage v3 reference. Worth investigating before shipping.')
-if AUC < 0.85:
-    print('  WARN: ROC AUC barely above triage v3. Cascade may be under-trusted.')
-if UND > 0.17:
-    print('  WARN: under-triage rate did not improve. The safety-critical metric.')
+print(f'  Accuracy   : {ACC:.4f}  (triage v3 iter 2: 0.7798)')
+print(f'  ROC AUC    : {AUC:.4f}  (triage v3 iter 2: 0.8644)')
+print(f'  Under-tri  : {UND:.4f}  (triage v3 iter 2: 0.1556; lower=better)')
+if ACC < 0.78:
+    print('  WARN: accuracy <= triage v3 iter 2 baseline. Worth investigating before shipping.')
+if AUC < 0.87:
+    print('  WARN: ROC AUC barely above triage v3 iter 2. Cascade may be under-trusted.')
+if UND > 0.155:
+    print('  WARN: under-triage rate did not improve over triage v3 iter 2 — the safety-critical metric.')
 
 print('\\n' + '=' * 60)
 print('C. Soft-cascade wiring audit')
