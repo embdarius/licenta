@@ -74,5 +74,11 @@ DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # v3 tier: catch-all class ("Symptoms, Signs, Ill-Defined") excluded, full
 # admitted-patient dataset (no 100K sub-sample), v3_base mirrors v1's
 # feature set, v3 mirrors v2's plus longitudinal vitals + rhythm.
+# DOCTOR_V3_DIR also holds the peer disposition model
+# (disposition_model.joblib) added under plan section 3 — a binary
+# admit/discharge classifier trained on the FULL 425K dataset (not the
+# admitted-only ~102K slice used by diagnosis + department) and consumed
+# by doctor_disposition_tool to refine the triage disposition after the
+# nurse step. metadata.json gains a "disposition" sub-block.
 DOCTOR_V3_BASE_DIR = ARTIFACTS_DIR / "doctor" / "v3_base"
 DOCTOR_V3_DIR = ARTIFACTS_DIR / "doctor" / "v3"

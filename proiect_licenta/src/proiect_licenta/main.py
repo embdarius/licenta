@@ -89,5 +89,11 @@ def train_nurse_v3():
     train_pipeline()
 
 
+def train_doctor_disposition():
+    """Train Doctor disposition v3 — peer binary admit/discharge model trained on the FULL 425K dataset (plan section 3, Option B)."""
+    from proiect_licenta.training.train_doctor_disposition import main as train_pipeline
+    train_pipeline()
+
+
 if __name__ == "__main__":
     run()

@@ -23,6 +23,7 @@ train_doctor = "proiect_licenta.main:train_doctor"
 train_nurse = "proiect_licenta.main:train_nurse"
 train_doctor_v3 = "proiect_licenta.main:train_doctor_v3"
 train_nurse_v3 = "proiect_licenta.main:train_nurse_v3"
+train_doctor_disposition = "proiect_licenta.main:train_doctor_disposition"
 
 [build-system]
 requires = ["hatchling"]
