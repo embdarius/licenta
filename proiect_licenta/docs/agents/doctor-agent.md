@@ -664,17 +664,20 @@ Five of the top 7 non-TF-IDF features are longitudinal vital trajectory aggregat
 - `artifacts/doctor/v3/metadata.json` — extended with a `disposition` block that includes the metrics table above plus the `triage_v3_dispo_baseline` sub-block (the apples-to-apples baseline numbers for thesis citation without re-running the benchmark).
 - **Note:** the existing v3 diagnosis + department artifacts are not overwritten by this training run. `train_doctor_disposition.save_disposition_model` merges into the existing `metadata.json` rather than replacing it.
 
-### Inference status — model trained, runtime rewiring pending (placeholder)
+### Inference status — wired 2026-05-30
 
-As of the current commit:
+The disposition model is live in the runtime crew. Same shipment swapped the
+v1/v2 doctor tools out for the full v3 stack:
+
 - ✅ Model trained on Colab T4 GPU, artifacts on disk in `artifacts/doctor/v3/`.
 - ✅ Benchmark run, head-to-head numbers in this section.
-- ⏳ **`src/proiect_licenta/tools/doctor_disposition_tool.py` — NOT YET CREATED.**
-- ⏳ **`src/proiect_licenta/crew.py` — NOT YET WIRED.** The crew still uses Doctor v1 + v2 for the live runtime. Will switch to v3_base (initial) + new disposition (post-nurse) + v3-nurse (reassessment) once the tool is in place.
-- ⏳ **`src/proiect_licenta/config/tasks.yaml` — NOT YET UPDATED.** New `doctor_disposition_task` between nurse and reassessment; existing doctor tasks need top-3 + probability formatting.
-- ⏳ **End-to-end smoke test — NOT YET RUN.**
+- ✅ **`src/proiect_licenta/tools/doctor_tool_v3_base.py`** — NEW. Pre-nurse initial assessment, 13-class label space (catch-all excluded vs v1/v2), top-3 diag/dept with probabilities surfaced in the tool's JSON.
+- ✅ **`src/proiect_licenta/tools/doctor_disposition_tool.py`** — NEW. Wraps the calibrated binary model. Builds the 2128-col feature vector via `train_triage_v3.build_features(fit=False)` on a walk-in-NaN-masked cascade input copy, runs the v3 acuity + v3 dispo cascade, appends 11 medication cols + 41 longitudinal-vital fallbacks. Includes the `neg_quadratic_kappa` pickle-compat shim for the triage v3 acuity eval-metric callable.
+- ✅ **`src/proiect_licenta/crew.py`** — swapped: `DoctorPredictionToolV3Base` + `DoctorDispositionTool` + `DoctorPredictionToolV3` replace the v1/v2 pair. Crew is now 4 agents / 6 tasks. v1/v2 tool files stay on disk for thesis benchmarks but are no longer registered.
+- ✅ **`src/proiect_licenta/config/tasks.yaml`** — 4 task updates landed: triage hedges ESI as "X-Y" when top-2 probabilities are within 0.10; `doctor_assessment_task` calls `doctor_prediction_tool_v3_base` + requires top-3 + probabilities in output; **NEW `doctor_disposition_task`** between nurse and reassessment with structured-data handoff (emits the refined `is_admitted`, `triage_was_admit`, `p_admit`); `doctor_reassessment_task` gates on the REFINED `is_admitted` instead of triage's, uses `doctor_prediction_tool_v3`, requires top-3 + probabilities + comparison-with-disposition section.
+- ✅ **End-to-end smoke test** — pipeline runs through all 6 tasks; each tool call succeeds; the new `is_admitted` correctly propagates from the disposition task into the reassessment's gating decision.
 
-The inference rewiring is queued as the next chunk of work after the model itself is approved. See "What's next" below.
+Threshold tuning is documented as the next lever: the default 0.5 trades sensitivity for specificity, and the AUC says there's headroom. Sweep on the calibration holdout, pick by under-triage-rate target or clinician utility, and wire the chosen threshold into `doctor_disposition_tool.DECISION_THRESHOLD`. See "What's next" below.
 
 ### What's next
 

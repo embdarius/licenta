@@ -63,12 +63,14 @@ The system simulates a clinical emergency department workflow: a patient describ
 |     Output: Enhanced diagnosis + department + comparison with v1     |
 |     Tool:   doctor_prediction_tool_v2 (wraps 2 XGBoost v2 models)  |
 |                                                                      |
-|  (Planned) 5b. Doctor Disposition Refinement       [MODEL TRAINED,   |
-|                (ML - XGBoost v3, isotonic-calibrated) WIRING PENDING]|
+|  5b. Doctor Disposition Refinement                 [OPERATIONAL]     |
+|       (ML - XGBoost v3, isotonic-calibrated)                         |
 |     Task:   doctor_disposition_task  (between nurse + reassessment)  |
 |     Input:  Triage softmax + nurse vitals + meds + longitudinal+PMH  |
-|     Output: Calibrated P(admit), refines triage's admit/discharge    |
-|     Tool:   doctor_disposition_tool  (TO BE CREATED)                 |
+|     Output: Calibrated P(admit), refines triage's admit/discharge.   |
+|             The post-nurse reassessment gates on THIS task's verdict |
+|             rather than triage's screening prediction.                |
+|     Tool:   doctor_disposition_tool                                   |
 |     Note:   Plan section 3 / Option B. +3.77pp accuracy over triage  |
 |             v3 cascade dispo on the same test rows. ECE = 0.0036.    |
 |                                                                      |
@@ -78,7 +80,7 @@ The system simulates a clinical emergency department workflow: a patient describ
 +---------------------------------------------------------------------+
 ```
 
-There are 4 distinct agents. The Doctor Agent currently runs **twice** (initial + reassessment), yielding 5 tasks total in the live runtime. When the disposition-refinement task (plan section 3, Option B — model trained, wiring pending) lands, the Doctor Agent will run **three** times for a 6-task pipeline. All tasks execute sequentially via `Process.sequential`.
+There are 4 distinct agents. The Doctor Agent runs **three** times in the live runtime — initial assessment (v3_base), disposition refinement (new binary admit/discharge model from plan section 3, Option B), and enhanced reassessment (v3 with nurse data) — yielding a 6-task pipeline. The reassessment gates on the disposition task's refined `is_admitted` rather than triage's screening verdict. All tasks execute sequentially via `Process.sequential`.
 
 ---
 
@@ -118,7 +120,8 @@ Chief complaints + demographics (+ EMS vitals for ambulance/helicopter) + PMH (a
          |          - Isotonic-calibrated, ECE 0.0036                               |
          |          - Trained on FULL 418K (admit + discharge), not admitted-only   |
          |          - +3.77pp accuracy over the triage v3 cascade dispo on the      |
-         |            same 83,617-row test split. **Inference wiring pending.**     |
+         |            same 83,617-row test split. **Live in the crew as of 2026-05-30** |
+         |            (`doctor_disposition_tool` between nurse + reassessment).     |
          +---------------------------------------------------------------------------+
 ```
 
@@ -126,7 +129,7 @@ Chief complaints + demographics (+ EMS vitals for ambulance/helicopter) + PMH (a
 - **v1 doctor path** uses 2025 features (triage 2023 base + predicted_acuity + predicted_disposition).
 - **v2 doctor path** uses 2056 features (doctor v1 2025 + 20 vital-sign features + 11 medication features).
 - **Doctor v3 nurse path** uses ~2116 features (v2 base + longitudinal vitals + rhythm + PMH + Tier A softmax cascade).
-- **Doctor disposition v3 (new, plan section 3 Option B)** uses **2128 features** = 2069 from the v3 triage input vector (calling `train_triage_v3.build_features(fit=False)` produces structured + v3 vitals + PMH + TF-IDF) + 6 soft cascade cols + 11 medication + 41 longitudinal vital + rhythm + 1 cascade housekeeping col. Trained on the FULL 418K stays (admit + discharge), unlike diagnosis/department which are admitted-only. **Model trained 2026-05-28; inference rewiring pending.**
+- **Doctor disposition v3 (plan section 3 Option B, live since 2026-05-30)** uses **2128 features** = 2069 from the v3 triage input vector (calling `train_triage_v3.build_features(fit=False)` produces structured + v3 vitals + PMH + TF-IDF) + 6 soft cascade cols + 11 medication + 41 longitudinal vital + rhythm + 1 cascade housekeeping col. Trained on the FULL 418K stays (admit + discharge), unlike diagnosis/department which are admitted-only.
 - Both doctor paths run sequentially so the user sees initial results before providing nurse data. The new disposition task (when wired) sits between the nurse step and the reassessment task; the reassessment will gate its tool call on *its* `is_admitted` flag rather than the triage one.
 - The Department model always consumes the predicted diagnosis from its matching-version diagnosis model (diagnosis v1 -> department v1, diagnosis v2 -> department v2).
 

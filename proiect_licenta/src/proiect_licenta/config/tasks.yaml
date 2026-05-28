@@ -100,7 +100,19 @@ triage_assessment_task:
     3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
        - The confidence of the prediction
+       - **If the tool's output includes an `acuity_softmax` array AND the
+         top-2 probabilities are within 0.10 of each other, HEDGE the
+         acuity output**: report it as "ESI X-Y" (e.g., "ESI 2-3") with
+         both probabilities, and briefly explain that the case sits on
+         the boundary between two acuity levels. Otherwise just report
+         the single argmax level. This matches real triage practice
+         where borderline cases get flagged rather than hard-classified.
        - Whether the patient should be admitted or discharged
+       - **For the disposition, report both P(admit) and P(discharge)
+         from the tool output (not just the binary verdict), with a
+         brief calibration note ("triage v3 disposition is approximately
+         calibrated, ROC AUC 0.86"). Downstream tasks read this output
+         and the doctor disposition tool will refine it after nurse data.**
        - A brief clinical reasoning explanation
        - If vital signs were provided, note any abnormalities detected by the tool
        - If `prior_history_used.pmh_categories_fired` is non-empty in the tool
@@ -134,15 +146,19 @@ triage_assessment_task:
 
 doctor_assessment_task:
   description: >
-    You are the doctor reviewing this patient after triage. Read the triage
-    assessment from the previous task carefully.
+    You are the doctor reviewing this patient after triage. This is the INITIAL
+    (pre-nurse) assessment. Read the triage assessment from the previous task
+    carefully.
 
     1. Extract the structured data from the ---STRUCTURED_DATA--- block at the
        end of the triage assessment. Parse each field.
-    2. Determine if the patient is admitted (is_admitted = true) or not.
+    2. Determine if the patient is admitted (is_admitted = true) or not, based
+       on the triage prediction. (The doctor_disposition_task downstream may
+       refine this verdict using nurse data — note that explicitly in your
+       output so the patient/clinician knows this is a preliminary screen.)
 
-    IF THE PATIENT IS ADMITTED:
-      Call the doctor_prediction_tool with these parameters:
+    IF THE PATIENT IS ADMITTED (per triage):
+      Call the **doctor_prediction_tool_v3_base** with these parameters:
         - chief_complaints (comma-separated string)
         - pain_score (integer)
         - age (integer)
@@ -151,21 +167,36 @@ doctor_assessment_task:
         - predicted_acuity (integer 1-5)
         - is_admitted (true)
       Then provide a comprehensive INITIAL doctor assessment:
-        - The predicted diagnosis category and top alternatives
-        - The recommended hospital department and alternatives
-        - Confidence levels for each prediction
-        - Clinical reasoning connecting the complaints to the diagnosis
-        - Note that this is a PRELIMINARY assessment and will be enhanced
-          with vital signs and medication data from the nurse
+        - **The predicted diagnosis category WITH explicit top-3 alternatives
+          and their probabilities** (e.g., "Most likely: Circulatory (47.3%);
+          alternatives: Respiratory (22.1%), Digestive (15.4%)"). Pull these
+          from the tool's `diagnosis_prediction.top_3_categories` array.
+        - **The recommended hospital department WITH explicit top-3
+          alternatives and their probabilities** (e.g., "Recommended: CMED
+          (39.8%); alternatives: MED (28.1%), SURG (12.6%)"). Pull these
+          from the tool's `department_prediction.top_3_departments` array.
+          Use the human-readable `name` field, not just the code.
+        - Confidence levels for each top prediction.
+        - Clinical reasoning connecting the complaints to the diagnosis.
+        - Note that this is a PRELIMINARY assessment based on triage data
+          only. The disposition task and v3-nurse reassessment will refine
+          it once vital signs, medication, and PMH data are collected.
+        - Note explicitly that the model uses a 13-class label space (the
+          "Symptoms, Signs, Ill-Defined" catch-all is excluded vs the older
+          v1/v2 models).
 
-    IF THE PATIENT IS NOT ADMITTED (DISCHARGE):
+    IF THE PATIENT IS NOT ADMITTED (DISCHARGE, per triage):
       Do NOT call the tool. Instead provide:
-        - A brief summary confirming the discharge recommendation
-        - Possible outpatient diagnoses to investigate
-        - Follow-up recommendations (when to return, what to watch for)
+        - A brief summary confirming the discharge recommendation.
+        - Possible outpatient diagnoses to investigate.
+        - Follow-up recommendations (when to return, what to watch for).
+        - Note that the doctor_disposition_task downstream will still run
+          with nurse data and may upgrade the disposition to admit if
+          warranted.
 
-    Format your response with clear sections: INITIAL DIAGNOSIS, DEPARTMENT
-    ASSIGNMENT (if admitted), CLINICAL REASONING, and NEXT STEPS.
+    Format your response with clear sections: INITIAL DIAGNOSIS (top-3 with
+    probabilities), DEPARTMENT ASSIGNMENT (top-3 with probabilities, if
+    admitted), CLINICAL REASONING, and NEXT STEPS.
 
     IMPORTANT: At the END of your response, include the structured data block
     so the nurse and enhanced assessment can use it:
@@ -220,57 +251,168 @@ nurse_data_collection_task:
     - triage_assessment_task
     - doctor_assessment_task
 
-doctor_reassessment_task:
+doctor_disposition_task:
   description: >
-    You are the doctor performing an ENHANCED reassessment using the nurse's
-    vital signs and medication data.
+    You are the doctor running the REFINED admit/discharge prediction using
+    all data collected so far: triage features + the nurse's vital signs,
+    cardiac rhythm, medications, and past medical history. This task
+    REFINES the triage-time disposition; its verdict becomes the
+    authoritative admit/discharge decision for the diagnosis/department
+    reassessment task that follows.
 
     1. Extract the structured data from the ---STRUCTURED_DATA--- block in
        the initial doctor assessment (chief_complaints, pain_score, age,
-       gender, arrival_transport, predicted_acuity, is_admitted).
+       gender, arrival_transport, predicted_acuity, is_admitted). Treat
+       `is_admitted` from triage as `triage_is_admitted` — it's the
+       SCREENING verdict that this task may override.
 
-    2. Extract vital signs, medications, and past medical history from the
-       nurse's data collection. Parse the JSON from the nurse's output to get:
-       - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1 if null/missing)
-       - medications_raw (the raw medication text, or "unknown" if not provided)
-       - rhythm (the cardiac rhythm string, or "" if not provided) — only
-         used by the v3 tool; the v2 tool ignores this field.
-       - prior_history (free-text chronic conditions / PMH, or "" if not
-         provided) — only used by the v3 tool; the v2 tool ignores it.
-       - n_prior_admissions (integer count, or -1 if not provided) — only
-         used by the v3 tool; the v2 tool ignores it.
+    2. Extract vital signs, medications, rhythm, and PMH from the nurse's
+       data collection JSON:
+       - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1.0 if
+         null/missing — the tool handles fallback to population medians)
+       - rhythm (cardiac rhythm string, or "" if not provided)
+       - medications_raw (raw medication text, or "unknown")
+       - prior_history (free-text chronic conditions, or "")
+       - n_prior_admissions (integer, or -1 if not collected)
 
-    3. IF THE PATIENT IS ADMITTED:
-       Call the doctor_prediction_tool_v2 with ALL available data:
-         - chief_complaints, pain_score, age, gender, arrival_transport
-         - predicted_acuity, is_admitted
-         - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1.0 for missing)
-         - medications_raw
-       (To switch the live runtime to v3: change the tool name above to
-        doctor_prediction_tool_v3, register DoctorPredictionToolV3 in crew.py,
-        and also pass `rhythm`, `prior_history`, and `n_prior_admissions`
-        from the nurse JSON.)
+    3. Call the **doctor_disposition_tool** with ALL of the above. ALWAYS
+       call this tool — both for triage-admit and triage-discharge cases.
+       The model was trained on the full 425K stays (admit + discharge in
+       their real-world ratio), so it can both confirm an admit and flip
+       a triage-discharge to admit when warranted.
 
-       Then provide an enhanced assessment that includes:
-         - Updated diagnosis category and top alternatives
-         - Updated department recommendation
-         - Comparison with your initial v1 assessment (what changed and why)
-         - How the vital signs and medications influenced the prediction
-         - Final clinical reasoning and recommendations
+    4. From the tool output, extract:
+       - `disposition_prediction.is_admitted` (bool — the REFINED verdict)
+       - `disposition_prediction.p_admit` and `p_discharge` (calibrated)
+       - `triage_v3_baseline.doctor_overrode_triage` and `override_direction`
+         (flag whether this task flipped triage's verdict, and which way)
+       - `reasoning` array (concise bullets from top contributing signals)
 
-    4. IF THE PATIENT IS NOT ADMITTED:
-       Skip the tool call. Provide a brief note that the discharge recommendation
-       stands, and note any vital sign concerns from the nurse data.
+    5. Produce a comprehensive disposition refinement report:
+       - **DISPOSITION:** the binary decision (ADMIT / DISCHARGE).
+       - **Calibrated probabilities:** report both P(admit) and P(discharge)
+         with the explicit calibration note from the tool (ECE 0.0036 on
+         the held-out test set — these probabilities are reliable, a
+         reading of P(admit)=0.82 means ~82% of historically-similar
+         patients were admitted).
+       - **Comparison with triage:** if `doctor_overrode_triage` is true,
+         say so explicitly and explain the override direction.
+         Otherwise note "confirms triage disposition" or similar.
+       - **Clinical reasoning:** list the `reasoning` bullets from the
+         tool plus any additional inference (PMH categories that fired,
+         abnormal vital signs, non-sinus rhythm, polypharmacy, etc.).
+       - **Operating point note:** the model uses a 0.5 threshold by
+         default; mention this so the threshold choice is transparent.
 
-    Format your response with: ENHANCED DIAGNOSIS, DEPARTMENT ASSIGNMENT,
-    COMPARISON WITH INITIAL ASSESSMENT, VITAL SIGNS IMPACT, and
-    FINAL RECOMMENDATIONS.
+    IMPORTANT: At the END of your response, you MUST include the updated
+    structured data block so the reassessment task uses THIS task's
+    refined is_admitted, NOT the triage one:
+
+    ---STRUCTURED_DATA---
+    chief_complaints: <comma-separated complaints>
+    pain_score: <integer>
+    age: <integer>
+    gender: <male or female>
+    arrival_transport: <ambulance, walk_in, or helicopter>
+    predicted_acuity: <integer 1-5>
+    is_admitted: <true or false — THE REFINED VERDICT from this tool>
+    triage_was_admit: <true or false — what triage originally said>
+    p_admit: <float 0-1 — for the reassessment task to display>
+    ---END_DATA---
   expected_output: >
-    An enhanced doctor assessment incorporating vital signs and medication data.
-    Includes comparison with initial assessment, noting any changes in diagnosis
-    or department. Final clinical reasoning and recommendations for the patient.
+    A disposition refinement report with the binary decision, calibrated
+    P(admit) / P(discharge), explicit comparison against the triage verdict
+    (confirmed or overridden + direction), clinical reasoning, and an
+    operating-point note. Must end with a ---STRUCTURED_DATA--- block where
+    `is_admitted` reflects the REFINED verdict.
   agent: doctor_agent
   context:
     - triage_assessment_task
     - doctor_assessment_task
     - nurse_data_collection_task
+
+doctor_reassessment_task:
+  description: >
+    You are the doctor performing the ENHANCED diagnosis + department
+    reassessment using the nurse's data. Reads the REFINED disposition
+    from doctor_disposition_task and gates on THAT, not on the triage
+    verdict.
+
+    1. Extract the structured data from the ---STRUCTURED_DATA--- block at
+       the end of doctor_disposition_task (the REFINED block — chief
+       complaints, pain, age, gender, arrival, predicted_acuity, and
+       importantly `is_admitted` from THIS task, not triage). The block
+       also includes `triage_was_admit` and `p_admit` for the comparison
+       report.
+
+    2. Extract vital signs, rhythm, medications, and PMH from the nurse's
+       data collection JSON (same fields as the disposition task used):
+       - temperature, heartrate, resprate, o2sat, sbp, dbp (use -1.0 for missing)
+       - rhythm
+       - medications_raw
+       - prior_history
+       - n_prior_admissions
+
+    3. IF THE REFINED is_admitted IS TRUE (regardless of what triage said):
+       Call the **doctor_prediction_tool_v3** with ALL available data:
+         - chief_complaints, pain_score, age, gender, arrival_transport
+         - predicted_acuity, is_admitted (the REFINED value)
+         - temperature, heartrate, resprate, o2sat, sbp, dbp
+         - rhythm
+         - medications_raw
+         - prior_history
+         - n_prior_admissions
+
+       Then provide an enhanced assessment that includes:
+         - **Updated diagnosis WITH explicit top-3 + probabilities** from
+           the tool's `diagnosis_prediction.top_3_categories` array
+           (e.g., "Most likely: Circulatory (52.1%); alternatives:
+           Respiratory (18.7%), Digestive (11.4%)").
+         - **Updated department WITH explicit top-3 + probabilities** from
+           the tool's `department_prediction.top_3_departments` array.
+           Include the human-readable `name` field for each.
+         - Comparison with the initial v3_base assessment: what changed and
+           why (was diagnosis/department altered by nurse data? was the
+           confidence higher or lower? did the top-3 reshuffle?).
+         - **Comparison with the disposition refinement:** if
+           `triage_was_admit` differs from the refined `is_admitted`,
+           explicitly call out that the disposition flipped and how the
+           full diagnosis/department workup was triggered (or skipped) as
+           a result.
+         - How the vital signs, medications, rhythm, and PMH influenced
+           the prediction. Pull from the tool's `nurse_data_used` block.
+         - Final clinical reasoning and recommendations.
+
+    4. IF THE REFINED is_admitted IS FALSE (regardless of what triage said):
+       Do NOT call the diagnosis/department tool. Instead:
+       - Confirm the discharge recommendation from the disposition task.
+       - If the disposition task overrode triage's admit to discharge,
+         explain the clinical rationale (calibrated P(discharge) was high
+         enough at the 0.5 threshold).
+       - Suggest outpatient diagnoses to investigate based on the
+         complaint pattern.
+       - Provide follow-up recommendations (when to return, what to
+         watch for, red-flag symptoms).
+       - Note any abnormal vital signs from the nurse data that should
+         be acted on before discharge even though the overall prediction
+         is discharge.
+
+    Format your response with: ENHANCED DIAGNOSIS (top-3 + probabilities,
+    if admitted), DEPARTMENT ASSIGNMENT (top-3 + probabilities, if
+    admitted), COMPARISON WITH INITIAL ASSESSMENT, COMPARISON WITH
+    DISPOSITION REFINEMENT, VITAL SIGNS / MEDS / PMH IMPACT, and FINAL
+    RECOMMENDATIONS.
+  expected_output: >
+    An enhanced doctor assessment. For admitted patients (REFINED admit):
+    top-3 diagnoses with probabilities, top-3 departments with probabilities,
+    explicit comparison with the v3_base initial assessment and the
+    disposition refinement, vitals/meds/PMH impact analysis, and clinical
+    reasoning. For discharged patients (REFINED discharge): discharge
+    confirmation with follow-up instructions, calling out any triage
+    override and the rationale.
+  agent: doctor_agent
+  context:
+    - triage_assessment_task
+    - doctor_assessment_task
+    - nurse_data_collection_task
+    - doctor_disposition_task
