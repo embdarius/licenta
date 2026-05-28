@@ -265,7 +265,9 @@ Hand-picked-defaults baseline on the OUTER test split (the current production v3
 
 ## Empirical findings — experiments tried and reverted
 
-A round of v3 improvements was implemented, trained, and benchmarked end-to-end (commit reverted). Three changes were tested together; their cumulative effect on **v3 with-nurse** measured against the unchanged held-out test set (20,420 stays, `random_state=42` stratified split) was **+0.18pp diagnosis** top-1 (63.08% → 63.26%) and **−0.30pp department** top-1 (67.11% → 66.81%). Each experiment, in turn, with the empirical reason for reverting:
+Six experiments below — five on the doctor v3 nurse model (entries 1-5), one on the triage v3 model (entry 6). Each was implemented end-to-end (training + benchmark + audit), then reverted because the lift didn't clear the noise floor or moved a metric the wrong way.
+
+The first three entries (1-3) come from a single batch of v3 improvements that were tested together; their cumulative effect on **v3 with-nurse** measured against the unchanged held-out test set (20,420 stays, `random_state=42` stratified split) was **+0.18pp diagnosis** top-1 (63.08% → 63.26%) and **−0.30pp department** top-1 (67.11% → 66.81%). Each experiment, in turn, with the empirical reason for reverting:
 
 ### 1. `is_surgical` specialty-conditional gating flag — REVERTED, net negative on department
 
@@ -372,9 +374,62 @@ The surgical-recovery hypothesis was *partially* validated — TRAUM did recover
 
 The implementation, training pipeline, benchmark wiring, and inference-side soft-blend were all reverted (commit reset to `c40f15b`) — only this writeup is retained.
 
+### 6. Triage v3 section 1.5 — hand-curated red-flag keyword features — REVERTED, lift within noise floor
+
+Implemented from section 1.5 of the original Triage Improvements plan (`plans/read-the-documentation-of-tidy-scone.md`). A new `src/proiect_licenta/red_flag_vocab.py` module added **44 binary feature columns** to the triage v3 feature matrix (on top of iter 2's 1.1 + 1.2 stack):
+
+- **42 hand-curated `rf_<name>` binary flags** across 9 clinical categories: cardiac (chest+crushing, chest+radiating, syncope, palpitations, ...), neuro (stroke, face droop, slurred speech, worst headache, altered mental status, seizure, ...), respiratory (resp distress, cyanosis, stridor, ...), trauma (gunshot, stab, MVC+ejected, fall from height, ...), sepsis/shock (septic shock, fever+altered, hypotension+fever), hemorrhage (active bleeding, GI bleed, hemoptysis), OB/GYN emergencies (ectopic, imminent delivery, pregnant+bleed), anaphylaxis (anaphylaxis, airway swelling), overdose / self-harm (overdose, suicide attempt).
+- **2 summary columns**: `rf_any_count` (sum of all rf_* flags) and `rf_any` (binary, 1 if any flag fired).
+- Patterns matched against the already-normalized chief-complaint text (post-`normalize_complaint_text`), so they target expanded forms — "chest pain" not "cp", "motor vehicle" not "mvc", "altered mental status" not "ams", "cerebrovascular accident stroke" not "cva". Multi-token red flags use AND-logic with stem-prefix matching. 11 hardcoded smoke tests pass at training start to catch regex breakage.
+
+Hypothesis: TF-IDF treats "chest pain crushing radiating left arm" as a bag of independent trigrams; co-occurrence patterns over 3+ tokens (and rare-but-critical terms like "anaphylaxis", "stridor", "ectopic" that fall below the `min_df=20` TF-IDF cutoff) should give the model an easier high-signal handle for ESI 1/2 routing. Plan predicted **+0.5-1pp top-1, +2-3pp ESI 1/2 recall**.
+
+**Result on the same 83,617-row test split (random_state=42):**
+
+| Metric | iter 2 (kept) | iter 3 (section 1.5) | Δ |
+|---|---|---|---|
+| Acuity exact | 67.55% | 67.54% | **−0.01pp** (flat) |
+| Acuity within-1 | 98.18% | 98.20% | +0.02pp |
+| Acuity MAE | 0.3437 | 0.3437 | 0.0 |
+| Cohen's κ (quadratic) | 0.6449 | 0.6452 | +0.0003 |
+| Over-triage rate | 16.90% | 16.88% | −0.02pp |
+| **Under-triage rate** | **15.56%** | **15.58%** | **+0.02pp (regressed)** |
+| Disposition accuracy | 77.98% | 78.02% | +0.04pp |
+| Disposition ROC AUC | 0.8644 | 0.8644 | ~0 |
+
+**Per-class acuity recall vs iter 2:** ESI 1 = 0.603 (flat), ESI 2 = 0.708 (flat), ESI 3 = 0.672 (flat), ESI 4 = 0.619 (+0.2pp), ESI 5 = 0.277 (+0.9pp — but on 220 samples, well within noise; a single extra correct prediction is 0.45pp).
+
+Every metric movement is within the noise floor (±0.04pp on 83,617 samples ≈ ±34 patients). Under-triage rate — the metric we explicitly kept iter 2 for — actually slightly regressed, directly contradicting the section 1.5 hypothesis.
+
+**The red flags engaged — but the gain didn't translate.** The feature-importance audit shows the wiring was sound:
+
+| Audit | Result |
+|---|---|
+| Red-flag features with non-zero gain (acuity) | **31/44** (~70%) |
+| Red-flag features with non-zero gain (disposition) | **26/44** (~59%) |
+| Top red flag — acuity | `rf_unilateral_weak` at rank 33, gain 0.00201 |
+| Top red flag — disposition | **`rf_palpitations` at rank 13**, gain 0.00355 (higher than 3 of 5 top PMH features) |
+| Other notable disposition red flags | `rf_gi_bleed_severe` rank 21, `rf_assault` rank 52, `rf_syncope` rank 56, `rf_overdose` rank 109 |
+| Smoke tests | 11/11 pass |
+
+So XGBoost did consume the features. The bottleneck wasn't wiring — it was that the signal was already in the model.
+
+**Why it didn't move headline metrics — structural diagnosis:**
+
+1. **TF-IDF on 1-3 grams already captures the high-frequency red flags.** Iter 2's top-30 features included "vehicle collision", "motor vehicle", "abdominal pain", "chest pain", "rash allergic". `rf_mvc_ejected` (motor vehicle + ejected) targets a refinement of patients who were already being routed correctly by the bigram "motor vehicle". Adding "ejected" only flips a few hundred edge cases.
+2. **Low-frequency red flags fire on too few training rows.** `rf_anaphylaxis`, `rf_stridor`, `rf_ectopic`, `rf_imminent_delivery`, `rf_cardiac_arrest` — each fires on a few dozen training rows out of 334K. XGBoost can't learn anything reliable from a feature that rare, especially when those patients were already routed correctly by their TF-IDF tokens.
+3. **Section 1.2's ESI extreme-class weights already squeeze the rare-class signal.** When `rf_unilateral_weak` fires for a stroke patient, that patient was almost certainly already routed to ESI 1-2 via the ESI 1 × 1.5 / ESI 2 × 1.3 sample-weight boost. The red flag confirms the routing but doesn't add new correctness.
+
+**Conclusion.** Same dynamic as **experiment 2 (Bio_ClinicalBERT on doctor v3)**: *"Short ED chief-complaint text doesn't contain enough signal to disambiguate clinically-similar categories regardless of how it's encoded."* Hand-curated red flags are a different encoding of the same surface text TF-IDF already covers. The information ceiling is in the data, not the encoding. Reverted in commit `cc348e6` (revert of `adec4d3`); only this writeup retained.
+
+**Lessons forward:**
+1. **Test new feature-engineering ideas with an interaction probe before training.** Before another 44-min training run, check whether the new feature has joint predictive power *conditional on* the existing features (e.g., a small Logistic Regression with just the new features vs with new + existing features — if the AUC delta is < 0.005, expect no headline lift). This would have caught section 1.5 in under a minute.
+2. **The infrastructure is retained.** The `red_flag_vocab.py` module is gone from the project (deleted with the revert) but the smoke-test discipline + audit pattern can be reused. If a future experiment needs hand-curated clinical patterns, the implementation template lives in the chat-only history of this experiment.
+3. **The model's headline ceiling on triage acuity is structural** — it's a labeling / data-quality issue, not a feature-engineering one. ESI labels in MIMIC reflect what triage nurses actually wrote, which already drew on red-flag-like reasoning; adding the same reasoning to the model post-hoc doesn't beat the nurses' implicit version that's baked into the labels. Future lifts should come from cleaner labels, longitudinal signals, or different cohorts — not surface text overlays.
+
 ### Net assessment
 
-None of the five experiments above is worth keeping in its current form. The v3 with-nurse model at commit `34fbe24` (the Change 1 head — TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm + PMH features) remains the best-measured configuration: **64.16% top-1 / 85.71% top-3 / 92.88% top-5 diagnosis, 68.61% top-1 / 94.04% top-3 department**. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag *or* a feature-deprived gate, that the diagnosis ceiling is a labeling problem rather than a text-encoding problem, and that a sibling-head blend needs orthogonal signal to clear the noise floor — feed forward into the recommendations below.
+None of the six experiments above is worth keeping in its current form. The v3 with-nurse model at commit `34fbe24` (the Change 1 head — TF-IDF + structured triage features + cascading triage predictions + snapshot vitals + medications + longitudinal vitals + rhythm + PMH features) remains the best-measured configuration: **64.16% top-1 / 85.71% top-3 / 92.88% top-5 diagnosis, 68.61% top-1 / 94.04% top-3 department**. The structural lessons — that surgical/medical routing needs an architectural fix rather than a feature flag *or* a feature-deprived gate, that the diagnosis ceiling is a labeling problem rather than a text-encoding problem, and that a sibling-head blend needs orthogonal signal to clear the noise floor — feed forward into the recommendations below.
 
 ---
 
@@ -387,6 +442,7 @@ Ordered by expected lift per unit of effort.
 1. ~~**Add triage vitals to the triage model itself.**~~ **DONE (triage v2).** Vital signs from `triage.csv` are now used for ambulance/helicopter patients (~36%). The training pipeline masks vitals for walk-ins to match inference behavior. Acuity improved from 66.7% → 68.0% overall, and ambulance/helicopter patients specifically score 70.4%.
 1b. ~~**Add PMH features to the triage model.**~~ **DONE (triage v3 iter 1, 2026-05-26).** Same 19-feature PMH block Doctor v3 nurse uses. Iter 1 numbers: acuity 68.01% → 68.61% (+0.60pp); disposition 76.17% → 77.96% (+1.80pp). Walk-in patients gain ~2× the ambulance lift (+0.72pp vs +0.34pp), validating the "PMH fills the signal gap where vitals are masked" hypothesis. See [iter 1 entry](#triage-v3-iteration-1--pmh-features-at-triage-time-shipped-2026-05-26) below.
 1c. ~~**Longer training (section 1.1) and ordinal-aware acuity weighting (section 1.2).**~~ **DONE (triage v3 iter 2, 2026-05-27, kept).** lr 0.02→0.01, n_estimators 3000→5000, plus `ESI_EXTREME_BOOST` per-class sample weights + QWK early stopping on the acuity head. Acuity 67.55% (−0.46pp vs v2) but **under-triage rate −2.11pp** (17.67% → 15.56%) and ESI 5 recall recovered from iter 1's regression. ESI 1, 2, 5 all improved vs both v2 and iter 1. Kept over iter 1 for clinical-safety reasons (under-triage carries mortality risk; the headline accuracy cost is acceptable). See [iter 2 entry](#triage-v3-iteration-2--sections-11--12-longer-training--ordinal-aware-acuity-shipped-2026-05-27-kept) above.
+1d. ~~**Hand-curated red-flag keyword features (section 1.5).**~~ **TRIED AND REVERTED (2026-05-28).** 44 binary clinical-pattern columns (cardiac/neuro/respiratory/trauma/sepsis/etc.) added on top of iter 2 → "iter 3". Headline metrics moved by noise (every Δ ≤ ±0.04pp; under-triage +0.02pp regressed); 31/44 acuity + 26/44 disposition red flags had non-zero gain but the signal was already captured by TF-IDF + iter 2's ESI extreme-class weights. Same structural diagnosis as the doctor v3 Bio_ClinicalBERT experiment (entry 2 in "tried and reverted") — short ED chief-complaint text doesn't carry enough information for hand-curated overlays to beat what TF-IDF already extracts. See ["Empirical findings — experiments tried and reverted" entry 6](#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor) for the full audit and per-class numbers.
 2. ~~**Use longitudinal vitals from `vitalsign.csv` for Doctor v2.**~~ **DONE in Doctor v3 with-nurse.** The v3 with-nurse pipeline aggregates per-stay min / max / last / delta over the first 4h after `intime` for each of the 6 vitals, plus 7 abnormal-reading counts and a normalized `rhythm` one-hot bucket. The 4h window guards against late-stay disposition leakage. See `docs/agents/doctor-agent.md` for the full feature list.
 3. **Use discharge-note diagnosis as cleaner training labels.** Extract a normalized diagnosis from `discharge.csv` to replace the ICD-coded primary diagnosis. This directly attacks the 33% "Symptoms/Ill-Defined" labeling ceiling.
 4. ~~**Train on the full 157K admitted rows** instead of the 100K sample.~~ **DONE in Doctor v3.** v3 trains on the full filtered admitted dataset (~102K rows after the catch-all exclusion). The 100K sub-sample cap is no longer applied.
@@ -414,6 +470,7 @@ Ordered by expected lift per unit of effort.
 - ~~Include triage vital signs from `triage.csv`.~~ **DONE in triage v2.**
 - ~~Add PMH features at triage time (mirror Doctor Change 1 recipe).~~ **DONE in triage v3 iter 1 (2026-05-26).**
 - ~~**Ordinal acuity objective + ESI 1/5 reweighting.**~~ **DONE in triage v3 iter 2** via the `ESI_EXTREME_BOOST` sample-weight multiplier + `neg_quadratic_kappa` early-stopping metric. ESI 5 recall recovered from 14% to 26.8%; ESI 1 and ESI 2 both gained. The QWK eval metric is mostly cosmetic — the sample-weight boost is the dominant lever. Open knob: dial the ESI 5 boost from 2.0× to 1.5× if a future training run wants to recover some headline accuracy without giving up the under-triage win.
+- ~~**Hand-curated red-flag keyword features (section 1.5).**~~ **TRIED AND REVERTED (2026-05-28).** A 44-column block of cardiac/neuro/respiratory/trauma/sepsis red flags was added on top of iter 2 (giving "iter 3"). Result: every headline metric within ±0.04pp noise floor; under-triage rate actually +0.02pp (slightly worse). 31/44 acuity red flags + 26/44 disposition red flags had non-zero gain — the features did engage (rf_palpitations was rank 13 on disposition), but TF-IDF and the ESI extreme-class weights from iter 2 already covered the same signal. See ["Empirical findings — experiments tried and reverted" entry 6](#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor) for the full audit.
 - **Wire v3 into runtime inference.** v3 (iter 2) is benchmark-only as of shipment — `triage_tool.py` still loads v2. Requires a PMH prompt at the NLP Parser stage so the patient self-reports chronic conditions before triage runs. **Next staged change.**
 - Try LightGBM as an alternative to XGBoost.
 - Ensemble methods (stacking multiple models).
