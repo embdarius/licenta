@@ -3,9 +3,10 @@ Benchmark for Doctor disposition v3 (plan section 3, Option B).
 
 Reproduces the exact train/test split from training (random_state=42,
 stratified) and evaluates the new doctor disposition model against the
-triage v1 cascade baseline that's already encoded in the soft-cascade
-features. Also runs an optional comparison against the live triage v3
-disposition model if triage v3 artifacts are present locally.
+triage v3 cascade baseline that's already encoded in the soft-cascade
+features (`triage_disposition_proba_admit`). Since the live runtime
+also uses triage v3, this is a directly apples-to-apples comparison
+against what the user would see in production.
 
 Outputs:
   - Headline accuracy / ROC AUC / Brier / ECE deltas
@@ -122,7 +123,7 @@ def expected_calibration_error(y_true, y_proba, n_bins: int = 10) -> float:
 def main():
     print("\n" + "#" * 72)
     print("  DOCTOR DISPOSITION v3 — BENCHMARK")
-    print("  Head-to-head vs triage v1 cascade baseline")
+    print("  Head-to-head vs triage v3 cascade baseline")
     print("#" * 72)
 
     # ── Load + rebuild the exact training pipeline ──
@@ -152,10 +153,10 @@ def main():
     calibrated = joblib.load(model_path)
     raw = joblib.load(raw_path) if raw_path.exists() else None
 
-    # ── Baseline 1: triage v1 cascade dispo probability ──
-    print_section("BASELINE — TRIAGE v1 CASCADE DISPOSITION")
+    # ── Baseline 1: triage v3 cascade dispo probability ──
+    print_section("BASELINE — TRIAGE v3 CASCADE DISPOSITION")
     triage_v1_proba = X_test["triage_disposition_proba_admit"].values.astype(float)
-    base_metrics = report_binary("triage v1 cascade", y_test, triage_v1_proba)
+    base_metrics = report_binary("triage v3 cascade", y_test, triage_v1_proba)
     base_ece = expected_calibration_error(y_test.values, triage_v1_proba)
     print(f"    ECE (10 bins)   : {base_ece:.4f}")
 
@@ -176,7 +177,7 @@ def main():
               f"(lower is better)]")
 
     # ── Headline delta ──
-    print_section("HEADLINE DELTA — TRIAGE v1 CASCADE → DOCTOR DISPOSITION v3")
+    print_section("HEADLINE DELTA — TRIAGE v3 CASCADE → DOCTOR DISPOSITION v3")
     print(f"  Accuracy   :  {base_metrics['accuracy']:.4f} -> "
           f"{doc_metrics['accuracy']:.4f}   delta {doc_metrics['accuracy']-base_metrics['accuracy']:+.4f}")
     print(f"  ROC AUC    :  {base_metrics['roc_auc']:.4f} -> "

@@ -7,8 +7,10 @@ this one is a BINARY admit/discharge classifier and is trained on the FULL
 425K ED stays (not just the admitted-only ~102K slice), so it sees the
 positives and negatives in their real-world ratio.
 
-The aim is to refine the triage-time disposition (76.2% acc, ROC AUC 0.84)
-after the nurse step. Expected lift band: +3–6pp accuracy, +0.04 ROC AUC.
+The aim is to refine the triage-time disposition (triage v3 iter 2 ref:
+77.98% acc, ROC AUC 0.8644, under-triage 15.56%, over-triage 16.90% —
+see docs/agents/triage-agent.md) after the nurse step. Expected lift
+band per plan section 3: +3-6pp accuracy, +0.03-0.05 ROC AUC.
 
 Differences vs ``train_nurse_v3``:
 
@@ -126,7 +128,7 @@ def _make_xgb_progress_callback(n_total: int, desc: str):
 # Paths + shared helpers (reuse everything from nurse_v3 / preprocessing)
 # ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
-    TRIAGE_V1_DIR as TRIAGE_MODELS_DIR,
+    TRIAGE_V3_DIR as TRIAGE_MODELS_DIR,
     DOCTOR_V3_DIR,
     TRIAGE_CSV, VITALSIGN_CSV, EDSTAYS_CSV, PATIENTS_CSV,
     DIAGNOSIS_CSV, MEDRECON_CSV,
@@ -146,6 +148,16 @@ from proiect_licenta.training.train_nurse import (
 from proiect_licenta.training.train_nurse_v3 import (
     _aggregate_vitalsigns, _fill_longitudinal_vitals,
     LONG_VITAL_FEATURE_COLS, _LONG_WINDOW_HOURS, _RHYTHM_BUCKETS,
+)
+# Triage v3 cascade source. We import the v3 feature builder + vital
+# constants to construct the v3-shaped input vector exactly as the v3
+# acuity / disposition models expect it. Train/inference symmetry: at
+# runtime `triage_tool.py` also loads v3 artifacts, so the soft cascade
+# the doctor disposition model learns is the same softmax it sees live.
+from proiect_licenta.training import train_triage_v3 as _triage_v3
+from proiect_licenta.training.train_triage_v3 import (
+    VITAL_COLS as _V3_VITAL_COLS,
+    build_features as _build_v3_features,
 )
 # Reuse the catch-all label name + diagnosis grouping ONLY for the PMH step,
 # which still needs to bucket prior ICDs into categories. We do NOT filter on
@@ -321,117 +333,105 @@ SOFT_CASCADE_COLS = [
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Build feature matrix: triage + soft cascade + snapshot vitals + meds
-    + longitudinal vitals + rhythm + PMH.
+    """Build feature matrix using **triage v3** as the cascade source.
+
+    Pipeline:
+      1. Load triage v3 artifacts (tfidf, severity_map, vital_medians,
+         acuity_model, disposition_model).
+      2. Construct a "cascade input" copy of ``df`` with vitals re-masked
+         to NaN for walk-ins (since v3 was trained that way at
+         ``train_triage_v3.load_and_clean_data:301``). The ``_missing``
+         flags inside ``train_triage_v3.build_features`` then compute
+         correctly even though ``df``'s main vital columns are already
+         imputed by ``_clean_vitals`` upstream for the disposition
+         model's own non-cascade use.
+      3. Call ``train_triage_v3.build_features(fit=False)`` to build the
+         v3 input vector (~2069 cols: 23 v1 structured + ~28 v2 vital +
+         19 PMH + 2000 TF-IDF). Single source of truth — if v3 changes
+         layout, this picks it up automatically.
+      4. Compute the soft cascade:
+           - ``acuity_proba``  = v3 acuity model softmax (5 cols)
+           - ``predicted_acuity_int`` = argmax + 1 (v3 disposition model
+             was trained with this int alongside the 2069-col base; see
+             ``train_triage_v3.py:843-846``).
+           - ``dispo_proba_admit`` = v3 disposition model on
+             (v3 features + predicted_acuity).
+      5. Final disposition feature matrix = v3 features + 6 soft cascade
+         + 24 medication cols + ~40 longitudinal vital + rhythm cols. PMH
+         and snapshot vitals are already included via the v3 features
+         matrix (no duplication).
     """
     print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering")
+    print("STEP 2: Feature engineering (triage v3 cascade)")
     print("=" * 60)
 
-    df = df.copy()
-
+    # ── Load triage v3 artifacts ──
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(TRIAGE_MODELS_DIR / "severity_map.joblib")
+    vital_medians_v3 = joblib.load(TRIAGE_MODELS_DIR / "vital_medians.joblib")
     acuity_model = joblib.load(TRIAGE_MODELS_DIR / "acuity_model.joblib")
     disposition_model = joblib.load(TRIAGE_MODELS_DIR / "disposition_model.joblib")
-    print(f"  Loaded triage artifacts from {TRIAGE_MODELS_DIR.name}/")
+    print(f"  Loaded triage v3 artifacts from {TRIAGE_MODELS_DIR.name}/")
 
-    # Text features
-    df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
-    df["n_complaints"] = df["chiefcomplaint"].apply(
-        lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
+    # Defensive: strip the custom `neg_quadratic_kappa` eval_metric callable
+    # off the v3 acuity model so unpickled artifacts trained before the
+    # `set_params(eval_metric=None)` fix in train_triage_v3 don't blow up
+    # at predict_proba time. The shim that triage_tool.py uses for the
+    # same reason is also picked up here implicitly via sys.modules patch
+    # if/when this script is run under runpy with __main__ set.
+    try:
+        acuity_model.set_params(eval_metric=None)
+    except Exception:
+        pass
+
+    # ── Build cascade-input copy with walk-in vital masking ──
+    # train_triage_v3.build_features sets `<col>_missing = df[col].isna()`
+    # before fillna. Since `_clean_vitals` already imputed our `df`'s
+    # vital columns, NaN has been lost — we have to restore it on a copy
+    # for the cascade input so the `_missing` flags compute the way the
+    # v3 model expects.
+    df_cascade = df.copy()
+    walkin_mask = ~df_cascade["arrival_transport"].isin(["AMBULANCE", "HELICOPTER"])
+    for col in _V3_VITAL_COLS:
+        df_cascade.loc[walkin_mask, col] = np.nan
+    n_walkin = int(walkin_mask.sum())
+    print(f"  Cascade input: re-masked vitals to NaN for "
+          f"{n_walkin:,} walk-in rows ({100*n_walkin/len(df_cascade):.1f}%)")
+
+    # ── Run v3 build_features (transform mode) to get the cascade input ──
+    triage_features, _, _, _ = _build_v3_features(
+        df_cascade, tfidf=tfidf, severity_map=severity_map,
+        vital_medians=vital_medians_v3, fit=False,
     )
-    df["complaint_length"] = df["complaint_text"].apply(len)
+    triage_features = triage_features.reset_index(drop=True)
+    print(f"  v3 cascade input shape: {triage_features.shape}")
 
-    tfidf_matrix = tfidf.transform(df["complaint_text"])
-    tfidf_df = pd.DataFrame(
-        tfidf_matrix.toarray(),
-        columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
-        index=df.index,
-    )
-    print(f"  TF-IDF features: {tfidf_df.shape[1]}")
-
-    # Severity priors
-    def compute_severity_priors(text: str) -> tuple:
-        words = text.split()
-        severities = [severity_map[w] for w in words if w in severity_map]
-        if severities:
-            return (min(severities), float(np.mean(severities)),
-                    max(severities), float(np.std(severities)) if len(severities) > 1 else 0.0)
-        return 3.0, 3.0, 3.0, 0.0
-
-    sev = df["complaint_text"].apply(compute_severity_priors)
-    df["min_severity_prior"] = sev.apply(lambda x: x[0])
-    df["mean_severity_prior"] = sev.apply(lambda x: x[1])
-    df["max_severity_prior"] = sev.apply(lambda x: x[2])
-    df["std_severity_prior"] = sev.apply(lambda x: x[3])
-
-    # Age/pain bins
-    df["age_bin"] = pd.cut(
-        df["age"], bins=[0, 18, 35, 50, 65, 80, 120], labels=[0, 1, 2, 3, 4, 5],
-    ).astype(float).fillna(2)
-    df["pain_low"] = ((df["pain"] >= 0) & (df["pain"] <= 3)).astype(int)
-    df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
-    df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
-
-    # Interaction features
-    df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
-    df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
-    df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
-    df["high_pain_ambulance"] = df["pain_high"] * df["arrival_ambulance"]
-    df["elderly"] = (df["age"] >= 65).astype(int)
-    df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
-
-    # Triage structured (same 23 cols as nurse_v3)
-    structured_cols = [
-        "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
-        "n_complaints", "complaint_length",
-        "min_severity_prior", "mean_severity_prior",
-        "max_severity_prior", "std_severity_prior",
-        "age", "age_bin", "gender_male",
-        "arrival_ambulance", "arrival_helicopter", "arrival_walk_in",
-        "age_ambulance", "pain_x_min_severity", "age_severity",
-        "high_pain_ambulance", "elderly", "elderly_ambulance",
-    ]
-    structured = df[structured_cols].reset_index(drop=True)
-    tfidf_df = tfidf_df.reset_index(drop=True)
-    triage_features = pd.concat([structured, tfidf_df], axis=1)
-
-    # ── Soft cascade — full triage acuity softmax + dispo probability ──
-    print("  Generating SOFT-cascade triage predictions "
+    # ── Soft cascade — v3 acuity softmax + v3 disposition probability ──
+    print("  Generating SOFT-cascade predictions on v3 features "
           "(5-class acuity softmax + dispo probability)...")
     acuity_proba = acuity_model.predict_proba(triage_features)
     if acuity_proba.shape[1] != 5:
         raise ValueError(
-            f"Expected triage acuity model to output 5 classes, "
+            f"Expected triage v3 acuity model to output 5 classes; "
             f"got {acuity_proba.shape[1]}."
         )
-    # Triage v1 dispo model expects `predicted_acuity` int alongside the
-    # 2023-col base vector (the v1 / v2 cascade contract). Reproduce that
-    # input here even though the doctor disposition model itself consumes
-    # the soft cascade — we still need to call the dispo model the way it
-    # was trained.
+    # Triage v3 disposition model expects `predicted_acuity` int alongside
+    # the v3 base vector (see train_triage_v3.py:843-846 — the v3 cascade
+    # contract is hard-int from acuity argmax + 1). Reproduce that input
+    # here. The doctor disposition model receives the SOFT softmax, but
+    # we still call the triage v3 dispo model the way it was trained.
     predicted_acuity_int = acuity_proba.argmax(axis=1) + 1
     triage_features_disp = triage_features.copy()
     triage_features_disp["predicted_acuity"] = predicted_acuity_int
     dispo_proba_admit = disposition_model.predict_proba(triage_features_disp)[:, 1]
 
+    # Append the soft-cascade columns onto the v3 features matrix. These
+    # 6 floats are what the doctor disposition model will treat as the
+    # "what triage v3 thinks" cascade signal.
     for k in range(5):
         triage_features[f"triage_acuity_proba_{k + 1}"] = acuity_proba[:, k]
     triage_features["triage_disposition_proba_admit"] = dispo_proba_admit
-    # Sanity: column names line up with SOFT_CASCADE_COLS.
     assert all(c in triage_features.columns for c in SOFT_CASCADE_COLS)
-
-    # ── Snapshot vitals + clinical flags ──
-    vital_cols = [
-        "temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp",
-        "temperature_missing", "heartrate_missing", "resprate_missing",
-        "o2sat_missing", "sbp_missing", "dbp_missing",
-        "fever", "tachycardia", "bradycardia", "tachypnea",
-        "hypoxia", "hypertension", "hypotension", "map",
-    ]
-    vitals = df[vital_cols].reset_index(drop=True)
-    print(f"  Snapshot vital features: {len(vital_cols)}")
 
     # ── Medications ──
     med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
@@ -442,12 +442,22 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     long_vitals = df[LONG_VITAL_FEATURE_COLS].reset_index(drop=True)
     print(f"  Longitudinal + rhythm features: {len(LONG_VITAL_FEATURE_COLS)}")
 
-    # ── PMH ──
-    pmh = df[PMH_FEATURE_COLS].reset_index(drop=True)
-    print(f"  PMH features: {len(PMH_FEATURE_COLS)}")
-
-    features = pd.concat([triage_features, vitals, meds, long_vitals, pmh], axis=1)
-    print(f"  Total features: {features.shape[1]}")
+    # ── Assemble final feature matrix ──
+    # v3 features (~2069: structured + v3 vitals + PMH + TF-IDF) already
+    # contains structured + snapshot vitals + PMH + TF-IDF. We do NOT
+    # re-append a separate "snapshot vital block" or a "PMH block" — they
+    # are already in `triage_features`. Adding them again would create
+    # duplicate column names and inflate the importance of those signals.
+    features = pd.concat([triage_features, meds, long_vitals], axis=1)
+    print(f"  Total features: {features.shape[1]}  "
+          f"(v3 base + 6 cascade + {len(med_cols)} meds + "
+          f"{len(LONG_VITAL_FEATURE_COLS)} longitudinal)")
+    # Sanity: no duplicate columns after the concat.
+    dup = features.columns[features.columns.duplicated()].tolist()
+    if dup:
+        raise ValueError(
+            f"Feature matrix has duplicate columns after concat: {dup[:10]}"
+        )
     return features
 
 
@@ -578,9 +588,9 @@ def train_disposition(
           f"(lower is better)")
     print(f"  ECE (10b)  uncal {ece_uncal:.4f} | cal {ece_cal:.4f}")
     print(f"  Over-triage  (false admit ): {over_triage:.4f}  "
-          f"(triage v3 reference: ~0.143)")
+          f"(triage v3 iter 2 reference: 0.1690)")
     print(f"  Under-triage (missed admit): {under_triage:.4f}  "
-          f"(triage v3 reference: ~0.177)")
+          f"(triage v3 iter 2 reference: 0.1556)")
     print(f"  Sensitivity (admit recall): {sens:.4f}")
     print(f"  Specificity (discharge recall): {spec:.4f}")
     print()
@@ -717,13 +727,13 @@ def main():
     print(f"{'#'*60}")
     print(f"  Headline numbers (calibrated, 0.5 threshold):")
     print(f"    Accuracy   : {metrics['accuracy_calibrated']:.4f}  "
-          f"(triage v3 ref: ~0.762)")
+          f"(triage v3 iter 2 ref: 0.7798)")
     print(f"    ROC AUC    : {metrics['roc_auc_calibrated']:.4f}  "
-          f"(triage v3 ref: ~0.84)")
+          f"(triage v3 iter 2 ref: 0.8644)")
     print(f"    Under-triage: {metrics['under_triage_rate']:.4f}  "
-          f"(triage v3 ref: ~0.177)")
+          f"(triage v3 iter 2 ref: 0.1556)")
     print(f"    Over-triage : {metrics['over_triage_rate']:.4f}  "
-          f"(triage v3 ref: ~0.143)")
+          f"(triage v3 iter 2 ref: 0.1690)")
 
 
 if __name__ == "__main__":

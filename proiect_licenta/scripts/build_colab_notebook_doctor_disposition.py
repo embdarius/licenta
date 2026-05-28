@@ -2,7 +2,7 @@
 
 Parallel to scripts/build_colab_notebook_triage_v3.py. Generates the Colab
 notebook that trains `artifacts/doctor/v3/disposition_model.joblib` on
-Colab GPU and runs the head-to-head benchmark against the triage v1
+Colab GPU and runs the head-to-head benchmark against the triage v3
 cascade baseline.
 
 Edit cell sources here, then run:
@@ -67,9 +67,9 @@ using everything nurse data adds: snapshot vitals + longitudinal vitals
 
 ## Feature set (~2150 columns)
 
-- 23 v1 structured triage features
+- ~2069 columns from `train_triage_v3.build_features` (23 structured + ~28 v2 vital + 19 PMH + 2000 TF-IDF)
 - 2000 TF-IDF features
-- 6 **soft cascade** columns from triage v1
+- 6 **soft cascade** columns from triage v3
 - 20 snapshot vital + clinical-flag features
 - 24 medication features
 - ~40 longitudinal vital + rhythm features
@@ -100,7 +100,7 @@ CUDA device.
 ## One-Time Drive Setup
 
 Required Drive structure (most of this is the same as the Doctor v3-nurse
-notebook — same heavy CSVs, plus the existing triage v1 artifacts for the
+notebook — same heavy CSVs, plus the existing triage v3 artifacts as the
 soft cascade):
 
 ```
@@ -124,7 +124,7 @@ MyDrive/proiect_licenta/
 |               +-- discharge.csv/
 |                   +-- discharge.csv    (~3.3 GB)
 +-- artifacts/
-    +-- triage/v1/         <- REQUIRED (soft cascade source — same as nurse_v3 uses)
+    +-- triage/v3/         <- REQUIRED (soft cascade source; the live runtime also loads v3)
     +-- doctor/v3/         <- will gain a new disposition_model.joblib (will NOT
                               overwrite existing diagnosis_model / department_model)
 ```
@@ -228,7 +228,7 @@ md("section-gpu-md", """---
 Cell 5 is the **gate** for the rest of the notebook:
 1. Confirms `nvidia-smi` sees a CUDA device.
 2. Confirms XGBoost >= 2.0 can build a small model on the GPU end-to-end.
-3. Confirms all required MIMIC-IV files and the triage v1 cascade artifacts are reachable through the symlinks set up in Cell 3.
+3. Confirms all required MIMIC-IV files and the triage v3 cascade artifacts are reachable through the symlinks set up in Cell 3.
 
 **If any check fails, stop and fix it before proceeding.**""")
 
@@ -263,7 +263,7 @@ from proiect_licenta.paths import (
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV,
     DIAGNOSES_ICD_CSV, ADMISSIONS_CSV, DISCHARGE_NOTES_CSV,
     VITALSIGN_CSV, MEDRECON_CSV,
-    TRIAGE_V1_DIR, DOCTOR_V3_DIR,
+    TRIAGE_V3_DIR, DOCTOR_V3_DIR,
 )
 
 checks = {
@@ -276,7 +276,7 @@ checks = {
     'diagnoses_icd.csv (~181 MB)':                 DIAGNOSES_ICD_CSV,
     'admissions.csv (~94 MB)':                     ADMISSIONS_CSV,
     'discharge.csv (~3.3 GB)':                     DISCHARGE_NOTES_CSV,
-    'artifacts/triage/v1/ (soft-cascade source)':  TRIAGE_V1_DIR,
+    'artifacts/triage/v3/ (soft-cascade source)':  TRIAGE_V3_DIR,
 }
 
 required = set(checks.keys())
@@ -296,16 +296,17 @@ if missing_required:
         '. Upload them to Drive, re-run Cell 3 + this cell.'
     )
 
-# triage v1 must have its cascade artifacts (tfidf, severity_map,
-# acuity_model, disposition_model). Check explicitly so a half-baked v1
+# triage v3 must have its cascade artifacts (tfidf, severity_map,
+# acuity_model, disposition_model, vital_medians). Check explicitly so a half-baked v3
 # folder doesn't silently break training.
-needed_v1 = ['tfidf_vectorizer.joblib', 'severity_map.joblib',
+needed_v3 = ['tfidf_vectorizer.joblib', 'severity_map.joblib',
+             'vital_medians.joblib',
              'acuity_model.joblib', 'disposition_model.joblib']
-missing_v1 = [f for f in needed_v1 if not (TRIAGE_V1_DIR / f).exists()]
-if missing_v1:
+missing_v3 = [f for f in needed_v3 if not (TRIAGE_V3_DIR / f).exists()]
+if missing_v3:
     raise RuntimeError(
-        f'triage v1 cascade artifacts missing in {TRIAGE_V1_DIR}: '
-        f'{missing_v1}. Train triage v1 first (or upload from local).'
+        f'triage v3 cascade artifacts missing in {TRIAGE_V3_DIR}: '
+        f'{missing_v3}. Train triage v3 first (or upload from local).'
     )
 
 print(f'\\nDOCTOR_V3_DIR (disposition_model.joblib will be added here): {DOCTOR_V3_DIR}')
@@ -409,13 +410,13 @@ print(f'\\nPreserved diag/dept metadata fields: {preserved}')""")
 
 
 md("section4-md", """---
-## Section 4 - Benchmark (head-to-head vs triage v1 cascade)
+## Section 4 - Benchmark (head-to-head vs triage v3 cascade)
 
 Runs `benchmark_doctor_disposition.py`, which:
 
 1. Re-runs `load_and_clean_data` from `train_doctor_disposition.py` (full PMH/long-vitals pipeline).
 2. Reproduces the same 80/20 stratified split via `random_state=42`.
-3. Compares **triage v1 cascade dispo** (already in the soft-cascade features) vs the new **calibrated doctor dispo** on the same test rows.
+3. Compares **triage v3 cascade dispo** (already in the soft-cascade features) vs the new **calibrated doctor dispo** on the same test rows.
 4. Reports the Δ on accuracy / ROC AUC / Brier / ECE / sensitivity / specificity / over-triage / under-triage.
 5. Per-subgroup breakdown — plan section 3 predicts the lift concentrates in **elderly / polypharmacy / abnormal-vitals / repeat-visitors / prior-admission / non-sinus-rhythm** cohorts.
 6. Calibration curve (10 reliability bins).
@@ -430,7 +431,7 @@ Runs `benchmark_doctor_disposition.py`, which:
 *Expected runtime: 3-5 min.*""")
 
 
-code("cell-benchmark", """# Cell 9: Benchmark - triage v1 cascade vs doctor disposition v3
+code("cell-benchmark", """# Cell 9: Benchmark - triage v3 cascade vs doctor disposition v3
 runpy.run_path(
     f'{PROJECT_PATH}/benchmarks/benchmark_doctor_disposition.py',
     run_name='__main__',
@@ -445,7 +446,7 @@ Fail-fast verification gates. Failing any of these should block trusting the new
 - **Calibration fitted:** `disposition_model.joblib` must wrap the raw XGBoost in a `CalibratedClassifierCV`.
 - **Calibrated ECE < uncalibrated ECE:** isotonic should NOT hurt calibration.
 - **No catastrophic accuracy loss from calibration:** calibrated accuracy must be within 1.5pp of uncalibrated accuracy.
-- **Headline lift achieved:** calibrated doctor accuracy must beat the triage v1 cascade baseline (~76.2% reference) — if not, the model adds no value and we shouldn't ship it.
+- **Headline lift achieved:** calibrated doctor accuracy must beat the triage v3 cascade baseline (~78% disposition reference from v3 iter 2 — see `docs/agents/triage-agent.md`) — if not, the model adds no value and we shouldn't ship it.
 - **Soft cascade carries weight:** at least 4 of the 6 soft-cascade columns must have non-zero importance in the raw XGBoost.""")
 
 
