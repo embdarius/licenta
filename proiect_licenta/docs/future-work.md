@@ -554,10 +554,32 @@ Ordered by expected lift per unit of effort.
 
 ## Planned future phases
 
-### Phase 4: Text Generation Agent
-- Generates synthetic natural language patient descriptions from structured data.
-- E.g., structured `"abdominal pain, pain=7"` -> *"I've been having this terrible stomach ache since this morning, it's really bad"*.
-- Used for creating test cases, validating the system, and training ML models.
+### Phase 4: Text Generation / Case Generation Agent — IN PROGRESS
+
+The **Case Generation Agent** (`src/proiect_licenta/case_generation.py`,
+`uv run generate_cases`) is shipped as the first piece of this phase.
+
+- Translates real MIMIC-IV tabular ED rows into realistic natural-language
+  patient descriptions — e.g. structured `"abd pain, n/v, pain=7"` →
+  *"I've got really bad stomach pain, and a lot of nausea and vomiting — it's
+  about a 7 out of 10."* — **grounded strictly in the row** (the LLM only
+  phrases the narrative; everything else is deterministic; a validator rejects
+  invented age/pain/vitals).
+- Carries **all** inputs the live crew consumes (complaints, demographics,
+  arrival, EMS vitals, nurse vitals, rhythm, medications, PMH free-text,
+  prior-admission count) so a generated case can be run end-to-end.
+- `benchmarks/benchmark_pipeline_e2e.py` runs a stratified 20-case set
+  (13 admitted + 7 discharged, from the held-out test splits) **end-to-end
+  through the full crew** and compares accuracy against two tabular baselines
+  on the same stay_ids: **tool-direct** (same tools, exact values, no LLM) and
+  **feature-vector** (the existing `build_features → predict` methodology).
+  This quantifies the accuracy lost to the NL-translation layer.
+- Offline / benchmark-only — not wired into the live patient crew. Uses
+  dedicated `config/case_generation_{agents,tasks}.yaml`. Full design in
+  [`agents/case-generation-agent.md`](agents/case-generation-agent.md).
+
+Remaining for the phase: scale beyond the 20-case validation set; optionally
+use generated cases as augmentation for model training.
 
 ### Phase 5: Hospital Infrastructure
 - Synthetic real-time database of hospital rooms and available beds.

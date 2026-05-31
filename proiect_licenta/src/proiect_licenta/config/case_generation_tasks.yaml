@@ -1,0 +1,37 @@
+# Case Generation task (Phase 4). Separate file from tasks.yaml — see the note
+# in case_generation_agents.yaml for why.
+
+generate_case_task:
+  description: >
+    You are given the structured facts of one real (de-identified) ED encounter
+    as JSON:
+
+    {patient_data}
+
+    Fields:
+    - chief_complaints: the symptoms that brought the patient in (clinical
+      shorthand, comma-separated).
+    - age: patient age in years.
+    - gender: "male", "female", or "unknown".
+    - arrival_transport: how they arrived ("ambulance", "walk_in", "helicopter",
+      "other", "unknown").
+    - pain_score: 0-10, or "unknown".
+
+    Write ONE realistic first-person sentence or two (max three) describing, in a
+    layperson's own words, why they came to the emergency department. Voice ONLY
+    the facts above. Paraphrase clinical shorthand into everyday language, but do
+    not add, drop, or alter any complaint. Do NOT mention vital signs, medications,
+    past medical history, lab values, or diagnoses — those are collected later.
+    Any age or pain number you state must match the data exactly; prefer to weave
+    them in naturally (e.g. mention arriving by ambulance only if arrival_transport
+    says so).
+
+    Respond with ONLY valid JSON, nothing else:
+    {{
+      "narrative": "<the patient's first-person description>"
+    }}
+  expected_output: >
+    A JSON object with a single key "narrative" whose value is a 1-3 sentence,
+    first-person, lay-language description of the patient's reason for the ED
+    visit, grounded strictly in the provided facts. No other text.
+  agent: case_generator

@@ -14,6 +14,16 @@ Flow:
 import sys
 import warnings
 
+# Force UTF-8 stdout/stderr BEFORE crewai is imported (it wraps the streams).
+# MIMIC loaders + the LLM narratives emit non-cp1252 characters (e.g. "≥",
+# em-dashes), which crash the default Windows cp1252 console. errors="replace"
+# guarantees a print never aborts a long run. See docs/future-work.md known issues.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from proiect_licenta.crew import ProiectLicenta
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
@@ -93,6 +103,36 @@ def train_doctor_disposition():
     """Train Doctor disposition v3 — peer binary admit/discharge model trained on the FULL 425K dataset (plan section 3, Option B)."""
     from proiect_licenta.training.train_doctor_disposition import main as train_pipeline
     train_pipeline()
+
+
+def generate_cases():
+    """Generate synthetic natural-language test cases from MIMIC-IV tabular rows
+    (Phase 4 — Case Generation Agent). Samples a stratified admit/discharge set
+    from the held-out test splits, voices each row as a realistic patient
+    narrative via the LLM (grounded, validated), and persists them under
+    data/derived/synthetic_cases/. Optional `--limit N` for a smoke run.
+
+    Drives benchmarks/benchmark_pipeline_e2e.py.
+    """
+    import argparse
+    from proiect_licenta.case_generation import (
+        generate_and_save_cases, DEFAULT_N_ADMITTED, DEFAULT_N_DISCHARGED, DEFAULT_SEED,
+    )
+
+    parser = argparse.ArgumentParser(description="Generate synthetic ED test cases.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Only generate the first N sampled cases (smoke test).")
+    parser.add_argument("--n-admitted", type=int, default=DEFAULT_N_ADMITTED)
+    parser.add_argument("--n-discharged", type=int, default=DEFAULT_N_DISCHARGED)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    args = parser.parse_args()
+
+    generate_and_save_cases(
+        n_admitted=args.n_admitted,
+        n_discharged=args.n_discharged,
+        seed=args.seed,
+        limit=args.limit,
+    )
 
 
 if __name__ == "__main__":

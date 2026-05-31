@@ -12,6 +12,7 @@
 | [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage: acuity + disposition models, training evolution v1 → v3b, benchmarks |
 | [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor v1 + v2: 4 XGBoost models, grouping tables, vital/medication processing |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse: interactive collection flow, partial data handling |
+| [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case; 3-way E2E vs tabular benchmark |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference (used + inspected-but-unused, leakage notes) |
 | [`docs/future-work.md`](docs/future-work.md) | Why v2 gains were modest, prioritized roadmap, known issues, planned phases 4 + 5 |
 
@@ -24,6 +25,7 @@
 - **Datasets and trained model artifacts are not committed.** Raw MIMIC-IV CSVs live under `data/` (gitignored). Trained `.joblib` files live under `artifacts/{triage,doctor}/{v1,v2}/` (gitignored).
 - **Single source of truth for paths.** `src/proiect_licenta/paths.py` exports every dataset and artifact directory constant — `TRIAGE_V1_DIR`, `TRIAGE_V2_DIR`, `DOCTOR_V1_DIR`, `DOCTOR_V2_DIR`, `TRIAGE_CSV`, `EDSTAYS_CSV`, etc. Every tool, training pipeline, and benchmark imports from there. Never hard-code paths.
 - **Shared complaint preprocessing.** `src/proiect_licenta/preprocessing.py` owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1, v2, doctor, nurse, and the runtime tools all import from here so v1 and v2 stay peers (neither imports from the other).
+- **Case Generation Agent is offline/benchmark-only** (`src/proiect_licenta/case_generation.py`, `uv run generate_cases`). It is NOT in the live patient crew. It uses **dedicated** `config/case_generation_{agents,tasks}.yaml` — do NOT add its agent/task to the shared `agents.yaml`/`tasks.yaml`, because `@CrewBase` maps every task in a file to an `@agent` method and that would break the live `ProiectLicenta` crew. Generated cases live under `data/derived/synthetic_cases/` (gitignored — MIMIC DUA).
 
 ## Source layout
 
