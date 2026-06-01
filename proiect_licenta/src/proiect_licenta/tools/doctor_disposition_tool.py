@@ -85,6 +85,8 @@ from proiect_licenta.training.train_nurse_v3 import (
     _VITAL_COLS_LONG,
     LONG_VITAL_FEATURE_COLS,
 )
+from proiect_licenta.vital_trajectory import build_longitudinal_block
+from proiect_licenta.tools.vital_trajectory_io import parse_vital_trajectory
 from proiect_licenta.training import train_triage_v3 as _triage_v3
 from proiect_licenta.training.train_triage_v3 import (
     build_features as _build_v3_features,
@@ -238,6 +240,19 @@ class DoctorDispositionInput(BaseModel):
         default=-1,
         description="Patient-reported approximate number of prior hospital admissions, or -1 if not collected.",
     )
+    vital_trajectory_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON string of MULTIPLE chronological vital readings "
+            "collected during the stay, e.g. "
+            '{\"heartrate\": [88, 105, 112], \"o2sat\": [98, 95, 93]}. '
+            "Copy the nurse tool's `vital_trajectory` block here verbatim. "
+            "When provided, the model uses real vital trends (min/max/last/"
+            "delta, abnormal-reading counts) instead of a single-snapshot "
+            "fallback — this materially improves the admit/discharge "
+            "prediction. Empty string if only one reading is available."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +295,7 @@ class DoctorDispositionTool(BaseTool):
         medications_raw: str = "unknown",
         prior_history: str = "",
         n_prior_admissions: int = -1,
+        vital_trajectory_json: str = "",
     ) -> str:
         models = get_disposition_models()
         tfidf = models["tfidf"]
@@ -422,31 +438,21 @@ class DoctorDispositionTool(BaseTool):
         med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORIES)
         meds_df = pd.DataFrame({col: [med_info[col]] for col in med_cols})
 
-        # ── 8. Longitudinal vital fallback (snapshot == min == max == last) ──
-        clinical_flags = {
-            "n_fever_readings": fever,
-            "n_tachycardia_readings": tachycardia,
-            "n_bradycardia_readings": bradycardia,
-            "n_tachypnea_readings": tachypnea,
-            "n_hypoxia_readings": hypoxia,
-            "n_hypertension_readings": hypertension,
-            "n_hypotension_readings": hypotension,
-        }
-        long_data = {}
-        for vital in _VITAL_COLS_LONG:
-            v = vital_values[vital]
-            long_data[f"{vital}_min"] = v
-            long_data[f"{vital}_max"] = v
-            long_data[f"{vital}_last"] = v
-            long_data[f"{vital}_delta"] = 0.0
-        long_data.update(clinical_flags)
-
+        # ── 8. Longitudinal vital block ──
+        # If the nurse supplied a multi-reading trajectory, build REAL
+        # min/max/last/delta + abnormal-reading counts from it (and set
+        # has_longitudinal_vitals=1). Otherwise fall back to the single
+        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) — the
+        # historical behavior. Snapshot-only systematically under-states the
+        # admit probability vs the training distribution, so the trajectory
+        # path matters for disposition accuracy.
+        trajectory = parse_vital_trajectory(vital_trajectory_json)
+        long_data = build_longitudinal_block(
+            snapshot=vital_values, readings=trajectory, rhythm=rhythm,
+        )
         bucket = _normalize_rhythm(rhythm) if rhythm else ""
-        for b in _RHYTHM_BUCKETS:
-            long_data[f"rhythm_{b}"] = 1 if bucket == b else 0
-        long_data["rhythm_irregular"] = 1 if bucket and bucket != "sinus" else 0
-        long_data["has_longitudinal_vitals"] = 0
         long_df = pd.DataFrame({col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS})
+        used_trajectory = int(long_data["has_longitudinal_vitals"]) == 1
 
         # ── 9. Assemble final feature matrix (matches train_doctor_disposition) ──
         features = pd.concat([triage_features, meds_df, long_df], axis=1)
@@ -546,6 +552,7 @@ class DoctorDispositionTool(BaseTool):
                     k: v for k, v in vitals_raw_in.items()
                     if v is not None and v != -1.0
                 },
+                "used_vital_trajectory": used_trajectory,
                 "rhythm_raw": rhythm if rhythm else None,
                 "rhythm_bucket": bucket if bucket else None,
                 "rhythm_irregular": int(long_data["rhythm_irregular"]),

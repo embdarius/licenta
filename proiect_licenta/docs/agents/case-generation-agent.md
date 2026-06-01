@@ -104,24 +104,34 @@ but their `acuity` rows are not guaranteed held out from the triage model. At a
 
 ---
 
-## End-to-end benchmark (3 modes, same stay_ids)
+## End-to-end benchmark (4 modes, same stay_ids)
 
-`benchmarks/benchmark_pipeline_e2e.py` scores three prediction modes against
+`benchmarks/benchmark_pipeline_e2e.py` scores four prediction modes against
 ground truth on the same cases:
 
 1. **E2E (real crew)** — feeds only `narrative` into the full `ProiectLicenta`
    crew. The interactive tools are monkeypatched: `AskPatientTool` answers the
    parser's follow-ups from the structured fields (keyword-routed);
-   `NurseDataCollectionTool` returns the case's deterministic nurse JSON. The
-   four prediction tools are wrapped to **tee their exact JSON output** into a
-   capture dict — predictions are read from the model output, never parsed from
-   LLM prose. Crew gating is honored (diagnosis/department only fire when the
-   refined disposition = admit).
+   `NurseDataCollectionTool` returns the case's deterministic nurse JSON
+   (including the multi-reading `vital_trajectory`). The four prediction tools
+   are wrapped to **tee their exact JSON output** into a capture dict —
+   predictions are read from the model output, never parsed from LLM prose. Crew
+   gating is honored (diagnosis/department only fire when the refined disposition
+   = admit).
 2. **Tool-direct** — calls the same crew tools directly with the exact tabular
-   field values (no LLM), replicating the gating in Python. Isolates the
-   NL-translation layer (same models, cascade, PMH parsing as E2E).
+   field values (no LLM), replicating the gating in Python, and passes the real
+   `vital_trajectory_json` so the runtime feature path matches training. Isolates
+   the NL-translation layer.
 3. **Feature-vector** — predicts from the cached `build_features` rows + trained
-   models (the existing benchmark methodology), restricted to the sampled rows.
+   models (the existing `benchmark_nurse_v3` methodology), restricted to the
+   sampled rows. Diagnosis/department scored **unconditionally** (no disposition
+   gate) — the upper reference.
+4. **Feature-vector-gated** — feature-vector, but diagnosis/department only count
+   when the disposition model's own real-feature verdict is admit. This makes the
+   feature-vector path apples-to-apples with the gated tool/E2E columns, so the
+   table cleanly separates **gate cost** (feature-vector → gated), **runtime
+   feature-degradation cost** (gated → tool-direct), and **LLM cost**
+   (tool-direct → E2E).
 
 Targets: ESI acuity, refined disposition, diagnosis top-1/top-3, department
 top-1/top-3. Output includes a per-target accuracy table across modes, a
@@ -159,7 +169,7 @@ iteration.
 
 ---
 
-## Results (first 20-case validation run)
+## Results (20-case validation run)
 
 Seed `20260529`, 13 admitted + 7 discharged, all from the held-out test splits.
 All 20 narratives passed grounding on the first attempt (0 flagged); all 20 ran
@@ -167,83 +177,103 @@ through the crew with no errors.
 
 **20 cases is a smoke/validation scale** — per-target deltas are noisy (one case
 = 5pp on the 20-case targets, ≈ 7.7pp on the 13 admitted-GT diagnosis/department
-cases). Read the deltas as directional, not precise.
+cases). The *tabular* columns (tool-direct, feature-vector) are deterministic and
+are the trustworthy signal; the **E2E column also carries LLM run-to-run jitter**
+(the parser/triage agent calls are nondeterministic — E2E acuity moved 60%↔70%
+across reruns of the *same* narratives). Read E2E as "tracks tool-direct, ±1–2
+cases of LLM noise."
+
+### The four columns (what each isolates)
+
+| Column | Disposition gate? | Vital features | NL layer | Purpose |
+|---|---|---|---|---|
+| **feature-vector** | no (scores all admitted-GT) | real longitudinal | no | the existing `benchmark_nurse_v3` methodology — the upper reference |
+| **feature-vector-gated** | yes (disposition model's own verdict) | real longitudinal | no | isolates the cost of the **gate** |
+| **tool-direct** | yes (runtime gate) | runtime (trajectory or snapshot) | no | the real pipeline minus the LLM |
+| **E2E** | yes (runtime gate) | runtime | yes | the full crew from free text |
+
+`feature-vector → feature-vector-gated` = cost of the **disposition gate**;
+`feature-vector-gated → tool-direct` = cost of **runtime feature degradation**;
+`tool-direct → E2E` = cost of the **LLM/NLP layer**.
+
+### Headline (after the multi-reading-vitals fix)
 
 Accuracy on the same stay_ids (acuity/disposition over all 20; diagnosis/
 department over the 13 admitted-GT cases):
 
-| Target | tool-direct | feature-vector | E2E (NL crew) |
+| Target | tool-direct | feature-vector-gated | feature-vector | E2E |
+|---|---|---|---|---|
+| ESI acuity | 70.0% | 70.0% | 70.0% | 70.0% |
+| Disposition (refined) | **80.0%** | 85.0% | 85.0% | 75.0% |
+| Diagnosis @1 | **46.2%** | 53.8% | 69.2% | 38.5% |
+| Diagnosis @3 | **69.2%** | 76.9% | 100.0% | 69.2% |
+| Department @1 | 46.2% | 46.2% | 69.2% | 53.8% |
+| Department @3 | **69.2%** | 76.9% | 100.0% | 69.2% |
+
+Dx coverage (cases where the gated pipeline actually produced a diagnosis):
+tool-direct **9/13**, E2E 9/13, feature-vector-gated 10/13, feature-vector 13/13.
+
+### The runtime multi-reading-vitals fix (the big lever)
+
+The original runtime collapsed the longitudinal-vitals features from a **single
+snapshot** (`min=max=last=snapshot`, `delta=0`, `has_longitudinal_vitals=0`),
+because the live nurse only took one reading. Measured effect on the 13 admitted
+cases: mean disposition P(admit) **0.624 → 0.486**, pushing 4 true-admits below
+the 0.5 gate (so the gated pipeline diagnosed only 6/13).
+
+The fix (Stage B): the nurse tool now optionally collects a **second set of
+readings**; a shared `build_longitudinal_block` (`src/proiect_licenta/vital_trajectory.py`,
+the same aggregation as `train_nurse_v3`) builds **real** min/max/last/delta +
+abnormal-reading counts when ≥1 trajectory is present, and `has_longitudinal_vitals=1`.
+The doctor disposition + v3 tools accept it via a `vital_trajectory_json`
+argument (empty → snapshot fallback, fully backward-compatible). The benchmark
+and case generator feed the real `vitalsign.csv` trajectory.
+
+**tool-direct, snapshot → trajectory:**
+
+| Target | snapshot | trajectory | gated ceiling |
 |---|---|---|---|
-| ESI acuity | 70.0% | 70.0% | **60.0%** |
-| Disposition (refined) | 65.0% | 85.0% | 70.0% |
-| Diagnosis @1 | 23.1% | 69.2% | 30.8% |
-| Diagnosis @3 | 46.2% | 100.0% | 53.8% |
-| Department @1 | 38.5% | 69.2% | 46.2% |
-| Department @3 | 46.2% | 100.0% | 53.8% |
+| Disposition | 65.0% | **80.0%** | 85.0% |
+| Diagnosis @1 | 23.1% | **46.2%** | 53.8% |
+| Diagnosis @3 | 46.2% | **69.2%** | 76.9% |
+| Dx coverage | 6/13 | **9/13** | 10/13 |
 
-**The three columns do not measure the same thing — read them carefully:**
+The trajectory recovers almost the entire feature-degradation gap: tool-direct is
+now within ~1 case of its true (gated) ceiling on every target. 16/20 cases had
+real `vitalsign.csv` coverage; the other 4 fall back to snapshot (matching the
+~5–7% of training stays with no longitudinal coverage).
 
-- **feature-vector** is the *unconditional per-model* methodology used by the
-  existing benchmarks (`benchmark_nurse_v3.py`): every admitted-GT case is scored
-  by the diagnosis/department models directly, regardless of what the disposition
-  model would have decided. It produced a Dx for **13/13** admitted cases.
-- **tool-direct** and **E2E** run the *gated pipeline*: diagnosis/department only
-  fire when the pipeline's own refined disposition says admit. tool-direct
-  produced a Dx for **6/13**, E2E for **7/13** — the other cases were routed to
-  discharge and counted as diagnosis/department misses. This is why their
-  diagnosis/department numbers are far below feature-vector's: most of that gap is
-  the **disposition gate**, not the diagnosis model and not the LLM.
+### What each comparison says now
 
-**What each comparison actually isolates:**
+1. **Acuity is the clean NL signal.** All three tabular columns tie at 70.0%, so
+   any E2E acuity movement is purely the LLM paraphrase + run-to-run jitter.
+2. **Runtime vital degradation — mostly fixed.** `feature-vector-gated →
+   tool-direct` on diagnosis@1 is now 53.8% → 46.2% (one case) vs the 53.8% →
+   23.1% chasm before the fix. Disposition closed 65% → 80% against the 85%
+   gated reference.
+3. **The residual gap to the *ungated* feature-vector is the disposition gate
+   itself**, by design: tool-direct/E2E can't diagnose a case the pipeline routes
+   to discharge. tool-direct diagnosis@1 (46.2%) is close to its real ceiling
+   (feature-vector-gated 53.8%); the remaining lift requires either **threshold
+   tuning** (3 true-admits sit at P(admit) ≈ 0.47, just under the 0.5 gate) or a
+   stronger disposition model — not anything the NL layer or the Case Generation
+   Agent controls.
 
-1. **Acuity is the clean NL-translation signal.** tool-direct and feature-vector
-   are *identical* (70.0%) — the only target where the two tabular paths tie — so
-   the E2E drop to 60.0% (−10pp = 2 cases) is attributable to the LLM paraphrase
-   changing the chief-complaint text the acuity model keys on.
+**NL-fidelity (parser-extracted vs tabular truth):** cases with parser output
+20/20; age 19/20; gender 20/20; arrival transport 20/20; mean chief-complaint
+token Jaccard **0.663**. Demographics survive the round-trip (recoverable via the
+parser's follow-up questions); the chief-complaint text is the lossy channel
+(~66% token overlap after lay paraphrase).
 
-2. **The big diagnosis/department gap is the disposition gate + runtime vital
-   degradation, not the LLM.** The disposition *tool* (which rebuilds longitudinal
-   vitals from a single snapshot — `has_longitudinal_vitals = 0`) is markedly more
-   discharge-prone than the feature-vector path (which uses the real
-   `vitalsign.csv` trajectories): disposition accuracy 65–70% vs 85%. Because the
-   gated pipeline under-admits, it never gets to diagnose ~half the admitted-GT
-   cases. This is a genuine, documentable finding about **runtime feature
-   degradation**, surfaced precisely because the harness compares the gated tool
-   path against the unconditional feature path.
+### Remaining levers (to push tool-direct/E2E toward the *ungated* feature-vector)
 
-3. **The LLM layer adds little beyond what the gated runtime pipeline already
-   costs.** E2E tracks tool-direct closely and is even *slightly higher* on
-   diagnosis (30.8% vs 23.1%) and department (46.2% vs 38.5%) — driven by E2E
-   admitting one more case (7 vs 6), i.e. noise at this scale. So once you hold the
-   pipeline (gating + runtime vitals) fixed, swapping exact tabular values for the
-   LLM-parsed narrative mostly costs the acuity −10pp above; diagnosis/department
-   are dominated by the gate.
-
-**NL-fidelity (what the parser re-extracted from the narrative vs the tabular truth):**
-
-| Field | Correct |
-|---|---|
-| cases with parser output | 20/20 (no crew failures) |
-| age | 18/20 |
-| gender | 20/20 |
-| arrival transport | 20/20 |
-| mean chief-complaint token Jaccard | **0.663** |
-
-Demographics survive the round-trip almost perfectly (the harness answers the
-parser's follow-up questions from the true fields, so they are recoverable). The
-**chief-complaint text is the lossy channel** — the LLM paraphrases clinical
-shorthand into lay language, so only ~66% of normalized complaint tokens overlap
-with the raw MIMIC text. That lexical drift is what drives the acuity dip.
-
-**Follow-ups this run surfaced:**
-
-1. **Scale up.** 20 cases is too few to separate signal from noise on the 13-case
-   diagnosis/department targets — a few hundred cases would tighten every estimate.
-2. **The runtime disposition tool under-admits vs its own training feature
-   distribution** (snapshot-only longitudinal fallback). This is the single
-   biggest driver of the gated-vs-unconditional gap and is worth its own
-   investigation — it is a property of the *live pipeline*, independent of the
-   Case Generation Agent.
-3. Consider also reporting a *gated* feature-vector variant (apply the disposition
-   model's own verdict before scoring diagnosis/department) so the feature-vector
-   column is directly comparable to the gated tool/E2E columns.
+1. **Disposition threshold tuning (kept at 0.5 for now, by decision).** Lowering
+   to ~0.45 recovers the 3 true-admits parked at P(admit) ≈ 0.47, lifting Dx
+   coverage 9/13 → 12/13 at a small specificity cost on the discharge cases.
+   The honest reporting at 0.5 stands; a threshold sweep is the documented next step.
+2. **Scale beyond 20 cases.** Needed to make the 13-case diagnosis/department
+   numbers statistically meaningful and to average out the LLM jitter on E2E.
+3. **A stronger / recalibrated disposition model** would raise the
+   feature-vector-gated ceiling itself (currently 10/13 admit recall on real
+   features) — the one lever that lifts the gated diagnosis ceiling for *every*
+   downstream column.

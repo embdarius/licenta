@@ -570,10 +570,21 @@ The **Case Generation Agent** (`src/proiect_licenta/case_generation.py`,
   prior-admission count) so a generated case can be run end-to-end.
 - `benchmarks/benchmark_pipeline_e2e.py` runs a stratified 20-case set
   (13 admitted + 7 discharged, from the held-out test splits) **end-to-end
-  through the full crew** and compares accuracy against two tabular baselines
-  on the same stay_ids: **tool-direct** (same tools, exact values, no LLM) and
-  **feature-vector** (the existing `build_features → predict` methodology).
-  This quantifies the accuracy lost to the NL-translation layer.
+  through the full crew** and compares accuracy against three tabular baselines
+  on the same stay_ids: **tool-direct** (same tools, exact values, no LLM),
+  **feature-vector** (the existing `build_features → predict` methodology,
+  unconditional), and **feature-vector-gated** (gated by the disposition model's
+  own verdict). The four columns separate the three losses — disposition-gate,
+  runtime feature-degradation, and LLM/NLP.
+- The benchmark surfaced a live-pipeline issue (the runtime under-admitted
+  because it rebuilt longitudinal vitals from one snapshot) and drove the
+  **multi-reading-vitals fix**: the nurse tool can collect an optional second
+  reading, and a shared `vital_trajectory.build_longitudinal_block` produces
+  real min/max/last/delta + abnormal-reading counts (consumed by the disposition
+  + v3 doctor tools via a new `vital_trajectory_json` arg; snapshot fallback
+  preserved). On the 20-case set this lifted tool-direct disposition 65%→80% and
+  diagnosis@1 23%→46% (admit coverage 6/13→9/13, gated ceiling 10/13). Remaining
+  levers: disposition threshold tuning (kept at 0.5) and scaling past 20 cases.
 - Offline / benchmark-only — not wired into the live patient crew. Uses
   dedicated `config/case_generation_{agents,tasks}.yaml`. Full design in
   [`agents/case-generation-agent.md`](agents/case-generation-agent.md).

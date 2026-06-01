@@ -134,6 +134,10 @@ def run_tool_direct(case) -> dict:
     out["triage_admit"] = _to_admit(triage_j["disposition_prediction"]["prediction"])
 
     nv = n["vitals"]
+    # Real multi-reading trajectory the runtime would have if it collected
+    # several readings. Passed as the doctor tools' vital_trajectory_json so
+    # they build real longitudinal features instead of the snapshot fallback.
+    traj_json = json.dumps(n.get("vital_trajectory") or {})
     dispo_j = json.loads(tools["dispo"]._run(
         chief_complaints=t["chief_complaints"], pain_score=t["pain_score"],
         predicted_acuity=out["acuity"], triage_is_admitted=out["triage_admit"],
@@ -143,6 +147,7 @@ def run_tool_direct(case) -> dict:
         sbp=_vital_arg(nv["sbp"]), dbp=_vital_arg(nv["dbp"]),
         rhythm=n["rhythm"], medications_raw=(n["medications_raw"] or "unknown"),
         prior_history=n["prior_history"], n_prior_admissions=n["n_prior_admissions"],
+        vital_trajectory_json=traj_json,
     ))
     out["refined_admit"] = bool(dispo_j["disposition_prediction"]["is_admitted"])
 
@@ -157,6 +162,7 @@ def run_tool_direct(case) -> dict:
             sbp=_vital_arg(nv["sbp"]), dbp=_vital_arg(nv["dbp"]),
             medications_raw=(n["medications_raw"] or "unknown"), rhythm=n["rhythm"],
             prior_history=n["prior_history"], n_prior_admissions=n["n_prior_admissions"],
+            vital_trajectory_json=traj_json,
         ))
         out["diag_top3"] = _diag_top3(v3_j)
         out["dept_top3"] = _dept_top3(v3_j)
@@ -266,6 +272,10 @@ def _nurse_json(case: dict) -> str:
     v = n["vitals"]
     result = {
         "vital_signs": {k: v[k] for k in VITAL_COLS},
+        # Real multi-reading trajectory (what a nurse collecting several
+        # readings would record). The doctor agent copies this into the
+        # disposition / v3 tools' vital_trajectory_json arg.
+        "vital_trajectory": n.get("vital_trajectory") or {},
         "rhythm": n["rhythm"] or None,
         "medications_raw": n["medications_raw"] or None,
         "prior_history": n["prior_history"] or None,
@@ -468,6 +478,27 @@ def main():
             except Exception as e:
                 print(f"  stay {c['stay_id']}: ERROR {type(e).__name__}: {e}")
 
+        # Derived: feature-vector GATED by the disposition model's OWN verdict
+        # (on real longitudinal features). This makes the feature-vector column
+        # apples-to-apples with the gated tool/E2E columns: diagnosis/department
+        # only count when the disposition model would have admitted. Comparing
+        #   feature_vector  -> feature_vector_gated : cost of the disposition gate
+        #   feature_vector_gated -> tool_direct     : cost of runtime feature degradation
+        #   tool_direct -> e2e                      : cost of the LLM/NLP layer
+        print_section("MODE: feature-vector-gated (gated by disposition model's own verdict)")
+        preds["feature_vector_gated"] = {}
+        modes.append("feature_vector_gated")
+        for c in cases:
+            base = preds["feature_vector"].get(c["stay_id"])
+            if base is None:
+                continue
+            g = dict(base)
+            if not base.get("refined_admit"):
+                g["diag_top3"] = None
+                g["dept_top3"] = None
+            preds["feature_vector_gated"][c["stay_id"]] = g
+        print(f"  derived for {len(preds['feature_vector_gated'])} cases")
+
     # E2E (last — heaviest, runs the LLM crew)
     if not args.skip_e2e:
         print_section("MODE: E2E (real crew, narrative -> NLP parser -> models)")
@@ -487,9 +518,9 @@ def main():
     # ── Headline table ──
     rows = score(cases, preds, modes)
     print_section("ACCURACY ON THE SAME CASES  (per target, per mode)")
-    header = f"  {'target':16s}" + "".join(f"{m:>16s}" for m in modes)
+    header = f"  {'target':16s}" + "".join(f"{m:>22s}" for m in modes)
     print(header)
-    print("  " + "-" * (16 + 16 * len(modes)))
+    print("  " + "-" * (16 + 22 * len(modes)))
     for target, label in [
         ("acuity", "ESI acuity"),
         ("dispo", "disposition"),
@@ -498,7 +529,7 @@ def main():
         ("dept_top1", "department @1"),
         ("dept_top3", "department @3"),
     ]:
-        line = f"  {label:16s}" + "".join(f"{_fmt(rows[m][target]):>16s}" for m in modes)
+        line = f"  {label:16s}" + "".join(f"{_fmt(rows[m][target]):>22s}" for m in modes)
         print(line)
     # Diagnosis/department coverage note
     print()

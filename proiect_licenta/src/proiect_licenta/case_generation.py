@@ -191,6 +191,37 @@ def pull_raw_rhythm(stay_intime: dict) -> dict:
     return out
 
 
+def pull_vital_trajectory(stay_intime: dict) -> dict:
+    """{stay_id: {vital: [chronological readings]}} — the REAL multi-reading
+    trajectory within [intime, intime + 4h], same window + clip parity as
+    train_nurse_v3._aggregate_vitalsigns. This is what a runtime that collected
+    several readings during the stay would have; the benchmark feeds it into the
+    doctor tools' new `vital_trajectory_json` arg to undo snapshot degradation."""
+    stay_set = set(int(s) for s in stay_intime)
+    vs = pd.read_csv(
+        VITALSIGN_CSV, usecols=["stay_id", "charttime"] + VITAL_COLS,
+    )
+    vs = vs[vs["stay_id"].isin(stay_set)].copy()
+    if vs.empty:
+        return {}
+    vs["charttime"] = pd.to_datetime(vs["charttime"], errors="coerce")
+    intime_s = pd.to_datetime(pd.Series(stay_intime))
+    vs["intime"] = vs["stay_id"].map(intime_s)
+    window_end = vs["intime"] + pd.Timedelta(hours=4)
+    vs = vs[(vs["charttime"] >= vs["intime"]) & (vs["charttime"] <= window_end)]
+    vs = vs.sort_values(["stay_id", "charttime"])
+    out = {}
+    for sid, grp in vs.groupby("stay_id"):
+        traj = {}
+        for v in VITAL_COLS:
+            vals = [round(float(x), 1) for x in grp[v].tolist() if pd.notna(x)]
+            if vals:
+                traj[v] = vals
+        if traj:
+            out[int(sid)] = traj
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Field extraction (one tabular row -> the full input bundle + ground truth)
 # ---------------------------------------------------------------------------
@@ -200,6 +231,7 @@ def extract_fields(
     dept_gt: Optional[str],
     med_names: str,
     rhythm_raw: str,
+    vital_trajectory: Optional[dict] = None,
 ) -> dict:
     """Assemble all crew inputs + ground truth for a single stay from the
     disposition-loader row. Nothing is invented; vitals reflect what was
@@ -245,9 +277,13 @@ def extract_fields(
             "prior_history": pmh_text,
             "n_prior_admissions": n_prior_adm,
         },
-        # What the nurse tool collects (all patients).
+        # What the nurse tool collects (all patients). `vital_trajectory` is the
+        # real multi-reading sequence within [intime,+4h] — what a runtime that
+        # took several readings would have. Snapshot `vitals` is kept too so the
+        # snapshot-fallback path stays testable.
         "nurse_inputs": {
             "vitals": {v: vitals[v] for v in VITAL_COLS},
+            "vital_trajectory": vital_trajectory or {},
             "rhythm": rhythm_raw or "",
             "medications_raw": med_names or "",
             "prior_history": pmh_text,
@@ -500,11 +536,12 @@ def sample_and_extract(
     print(f"\n[3/4] Sampled {len(chosen)} cases "
           f"({n_admitted} admitted + {n_discharged} discharged)")
 
-    # ── Targeted raw pulls (med names, rhythm) ──
-    print("\n[4/4] Pulling raw medication names + cardiac rhythm...")
+    # ── Targeted raw pulls (med names, rhythm, vital trajectory) ──
+    print("\n[4/4] Pulling raw medication names + cardiac rhythm + vital trajectory...")
     med_names = pull_medrecon_names(chosen)
     intime_by_stay = dict(zip(df_d["stay_id"].astype(int), df_d["intime"]))
     rhythm_raw = pull_raw_rhythm({s: intime_by_stay[s] for s in chosen})
+    vital_traj = pull_vital_trajectory({s: intime_by_stay[s] for s in chosen})
 
     # ── Build features ONLY for the sampled rows (memory-safe) ──
     print("\n  Building features for the sampled rows only "
@@ -533,6 +570,7 @@ def sample_and_extract(
             dept_gt=dept_by_stay.get(sid) if is_admitted else None,
             med_names=med_names.get(sid, ""),
             rhythm_raw=rhythm_raw.get(sid, ""),
+            vital_trajectory=vital_traj.get(sid, {}),
         )
         cases.append(fields)
 

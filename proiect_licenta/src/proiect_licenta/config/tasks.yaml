@@ -239,9 +239,11 @@ nurse_data_collection_task:
 
     Include the FULL JSON output from the tool in your response so the doctor
     can parse it for the enhanced assessment. The JSON contains `rhythm`,
-    `prior_history`, and `n_prior_admissions` fields in addition to
+    `prior_history`, `n_prior_admissions`, and `vital_trajectory` (multiple
+    readings per vital, if a second set was collected) in addition to
     `vital_signs` and `medications_raw`; the v2 doctor tool ignores the
-    extras, the v3 doctor tool consumes them.
+    extras, the v3 doctor + disposition tools consume them. Preserve the
+    `vital_trajectory` object verbatim so the doctor can forward it.
   expected_output: >
     A summary of collected vital signs, cardiac rhythm, medications, and
     past medical history, plus the full JSON output from the
@@ -274,6 +276,13 @@ doctor_disposition_task:
        - medications_raw (raw medication text, or "unknown")
        - prior_history (free-text chronic conditions, or "")
        - n_prior_admissions (integer, or -1 if not collected)
+       - vital_trajectory: if the nurse JSON contains a non-empty
+         `vital_trajectory` object (multiple readings per vital, e.g.
+         {{"heartrate": [88, 105, 112]}}), serialize it to a JSON STRING and
+         pass it as `vital_trajectory_json`. This lets the model use real
+         vital TRENDS (min/max/last/delta) instead of a single snapshot and
+         materially improves the admit/discharge prediction. If the block is
+         absent or empty, pass an empty string "".
 
     3. Call the **doctor_disposition_tool** with ALL of the above. ALWAYS
        call this tool — both for triage-admit and triage-discharge cases.
@@ -362,6 +371,10 @@ doctor_reassessment_task:
          - medications_raw
          - prior_history
          - n_prior_admissions
+         - vital_trajectory_json: same as the disposition task — if the nurse
+           JSON has a non-empty `vital_trajectory` object, serialize it to a
+           JSON string and pass it so the diagnosis/department models also use
+           real vital trends; otherwise pass "".
 
        Then provide an enhanced assessment that includes:
          - **Updated diagnosis WITH explicit top-3 + probabilities** from

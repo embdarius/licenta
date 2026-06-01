@@ -100,6 +100,38 @@ class NurseDataCollectionTool(BaseTool):
         print("\n  [Nurse]: What is your blood pressure? (e.g., 120/80)")
         sbp, dbp = _parse_bp(input("  [You]:   "))
 
+        # Optional SECOND set of readings — lets the doctor models use real
+        # vital TRENDS (min/max/last/delta) instead of a single snapshot, which
+        # materially improves the admit/discharge prediction. Entirely
+        # skippable; the first reading above is always kept.
+        print("\n  [Nurse]: I'd like a second set of readings if available to")
+        print("           track any trend (e.g. after a few minutes). You can")
+        print("           skip any of these.")
+        print("  [Nurse]: Second temperature? (Fahrenheit)")
+        temp2 = _parse_numeric(input("  [You]:   "))
+        print("\n  [Nurse]: Second heart rate? (bpm)")
+        hr2 = _parse_numeric(input("  [You]:   "))
+        print("\n  [Nurse]: Second respiratory rate? (breaths/min)")
+        rr2 = _parse_numeric(input("  [You]:   "))
+        print("\n  [Nurse]: Second oxygen saturation? (%)")
+        o22 = _parse_numeric(input("  [You]:   "))
+        print("\n  [Nurse]: Second blood pressure? (e.g. 120/80)")
+        sbp2, dbp2 = _parse_bp(input("  [You]:   "))
+
+        # Build the chronological trajectory per vital from the first + second
+        # readings (dropping any the patient skipped). Order is preserved so
+        # `last` and `delta` are time-correct downstream.
+        _traj_pairs = {
+            "temperature": (temp, temp2), "heartrate": (hr, hr2),
+            "resprate": (rr, rr2), "o2sat": (o2, o22),
+            "sbp": (sbp, sbp2), "dbp": (dbp, dbp2),
+        }
+        vital_trajectory = {}
+        for _vname, _readings in _traj_pairs.items():
+            _seq = [float(x) for x in _readings if x is not None]
+            if _seq:
+                vital_trajectory[_vname] = _seq
+
         # Cardiac rhythm
         print("\n  [Nurse]: Cardiac rhythm — what does the heart monitor show?")
         print("           (e.g., 'sinus', 'normal sinus rhythm', 'atrial fibrillation',")
@@ -150,6 +182,11 @@ class NurseDataCollectionTool(BaseTool):
                 "sbp": sbp,
                 "dbp": dbp,
             },
+            # Multi-reading trajectory (first + optional second readings). The
+            # doctor disposition + v3 tools accept this as `vital_trajectory_json`
+            # and build real min/max/last/delta features from it; empty -> the
+            # tools fall back to the single snapshot. The v2 tool ignores it.
+            "vital_trajectory": vital_trajectory,
             "rhythm": rhythm_raw,
             "medications_raw": meds_raw,
             "prior_history": prior_history_raw,

@@ -89,10 +89,16 @@ Separate from the live runtime above, the **Case Generation Agent**
 (`src/proiect_licenta/case_generation.py`) turns real MIMIC-IV tabular rows into
 grounded natural-language patient cases, and `benchmarks/benchmark_pipeline_e2e.py`
 runs them back through the *whole* live crew to measure how much accuracy the
-NL-translation layer costs versus feeding the models tabular columns directly
-(tool-direct and feature-vector baselines, same stay_ids). This is the only
-LLM-generation component and it never sits in the patient-facing pipeline. Full
-design in [`agents/case-generation-agent.md`](agents/case-generation-agent.md).
+NL-translation layer costs versus feeding the models tabular columns directly.
+The benchmark reports four columns on the same stay_ids — tool-direct,
+feature-vector, feature-vector-gated, and E2E — which between them separate the
+disposition-gate cost, the runtime feature-degradation cost, and the LLM cost.
+This is the only LLM-generation component and it never sits in the
+patient-facing pipeline. It also drove a live-pipeline improvement — the
+**multi-reading-vitals fix** (the nurse tool can collect a second reading so the
+disposition + v3 doctor tools build real longitudinal-vital features via
+`build_longitudinal_block` instead of a single-snapshot fallback). Full design
+in [`agents/case-generation-agent.md`](agents/case-generation-agent.md).
 
 There are 4 distinct agents. The Doctor Agent runs **three** times in the live runtime — initial assessment (v3_base), disposition refinement (new binary admit/discharge model from plan section 3, Option B), and enhanced reassessment (v3 with nurse data) — yielding a 6-task pipeline. The reassessment gates on the disposition task's refined `is_admitted` rather than triage's screening verdict. All tasks execute sequentially via `Process.sequential`.
 

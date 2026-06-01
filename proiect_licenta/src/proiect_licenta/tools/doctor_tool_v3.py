@@ -67,6 +67,8 @@ from proiect_licenta.training.train_nurse_v3 import (
     PMH_NO_PRIOR_DAYS,
     build_diag_cascade_cols,
 )
+from proiect_licenta.vital_trajectory import build_longitudinal_block
+from proiect_licenta.tools.vital_trajectory_io import parse_vital_trajectory
 
 # PMH vocabulary — same map used at training time. Free-text the patient
 # gives us is parsed against the same keywords so training/inference share
@@ -243,6 +245,18 @@ class DoctorV3Input(BaseModel):
             "fallback observed at training time."
         ),
     )
+    vital_trajectory_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON string of MULTIPLE chronological vital readings "
+            "collected during the stay, e.g. "
+            '{\"heartrate\": [88, 105, 112], \"o2sat\": [98, 95, 93]}. '
+            "Copy the nurse tool's `vital_trajectory` block here verbatim. "
+            "When provided, the model uses real vital trends (min/max/last/"
+            "delta, abnormal-reading counts) instead of a single-snapshot "
+            "fallback. Empty string if only one reading is available."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +294,7 @@ class DoctorPredictionToolV3(BaseTool):
         rhythm: str = "",
         prior_history: str = "",
         n_prior_admissions: int = -1,
+        vital_trajectory_json: str = "",
     ) -> str:
         """Run v3 doctor prediction with full nurse data."""
 
@@ -460,11 +475,13 @@ class DoctorPredictionToolV3(BaseTool):
             "has_anticonvulsant_meds": [med_info["has_anticonvulsant_meds"]],
         })
 
-        # ── 10. Longitudinal vitals (degraded trajectory from snapshot) ──
-        # The nurse only collected one reading; we synthesize the trajectory
-        # features as if min == max == last == snapshot, delta == 0, and
-        # the abnormal-reading counts == the corresponding clinical flag.
-        # This matches the fall-back path in train_nurse_v3._fill_longitudinal_vitals.
+        # ── 10. Longitudinal vitals ──
+        # If the nurse supplied a multi-reading trajectory, build REAL
+        # min/max/last/delta + abnormal-reading counts from it (and set
+        # has_longitudinal_vitals=1). Otherwise fall back to the single
+        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) — the
+        # historical degraded path. Shared builder = same aggregation as
+        # train_nurse_v3, so training and inference can't drift.
         clinical_flags = {
             "n_fever_readings": fever,
             "n_tachycardia_readings": tachycardia,
@@ -474,21 +491,12 @@ class DoctorPredictionToolV3(BaseTool):
             "n_hypertension_readings": hypertension,
             "n_hypotension_readings": hypotension,
         }
-        long_data = {}
-        for vital in _VITAL_COLS_LONG:
-            v = vital_values[vital]
-            long_data[f"{vital}_min"] = v
-            long_data[f"{vital}_max"] = v
-            long_data[f"{vital}_last"] = v
-            long_data[f"{vital}_delta"] = 0.0
-        long_data.update(clinical_flags)
-
-        # Rhythm one-hot (nurse-provided string -> bucket)
+        trajectory = parse_vital_trajectory(vital_trajectory_json)
+        long_data = build_longitudinal_block(
+            snapshot=vital_values, readings=trajectory, rhythm=rhythm,
+        )
         bucket = _normalize_rhythm(rhythm) if rhythm else ""
-        for b in _RHYTHM_BUCKETS:
-            long_data[f"rhythm_{b}"] = 1 if bucket == b else 0
-        long_data["rhythm_irregular"] = 1 if bucket and bucket != "sinus" else 0
-        long_data["has_longitudinal_vitals"] = 0  # nurse provides snapshot only
+        used_trajectory = int(long_data["has_longitudinal_vitals"]) == 1
 
         long_df = pd.DataFrame(
             {col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS}
@@ -632,6 +640,7 @@ class DoctorPredictionToolV3(BaseTool):
                     for k, v in vital_missing.items() if v == 1
                 ],
                 "clinical_flags": clinical_flags_active if clinical_flags_active else ["None"],
+                "used_vital_trajectory": used_trajectory,
                 "rhythm_raw": rhythm if rhythm else None,
                 "rhythm_bucket": bucket if bucket else None,
                 "rhythm_irregular": bool(long_data["rhythm_irregular"]),
