@@ -168,9 +168,13 @@ def pull_medrecon_names(stay_ids) -> dict:
     return out
 
 
-def pull_raw_rhythm(stay_intime: dict) -> dict:
-    """{stay_id: 'sinus' | 'atrial fibrillation' | ...} — first non-null rhythm
-    reading within [intime, intime + 4h] (same leakage guard as training)."""
+def pull_rhythm_readings(stay_intime: dict) -> dict:
+    """{stay_id: ['sinus', 'atrial fibrillation', ...]} — ALL non-null rhythm
+    readings within [intime, intime + 4h], chronological (same leakage guard +
+    window as training's `_aggregate_vitalsigns`). Returning the full sequence
+    (not just the first) lets the doctor tools reproduce training's rhythm
+    aggregation — mode bucket + any-non-sinus `rhythm_irregular` — closing the
+    single-reading divergence (#3)."""
     stay_set = set(int(s) for s in stay_intime)
     vs = pd.read_csv(VITALSIGN_CSV, usecols=["stay_id", "charttime", "rhythm"])
     vs = vs[vs["stay_id"].isin(stay_set)].dropna(subset=["rhythm"])
@@ -187,7 +191,7 @@ def pull_raw_rhythm(stay_intime: dict) -> dict:
     for sid, grp in vs.groupby("stay_id"):
         rhythms = [str(r).strip() for r in grp["rhythm"].tolist() if str(r).strip()]
         if rhythms:
-            out[int(sid)] = rhythms[0]
+            out[int(sid)] = rhythms
     return out
 
 
@@ -230,14 +234,24 @@ def extract_fields(
     diag_gt: Optional[str],
     dept_gt: Optional[str],
     med_names: str,
-    rhythm_raw: str,
+    rhythm_readings: Optional[list] = None,
     vital_trajectory: Optional[dict] = None,
 ) -> dict:
     """Assemble all crew inputs + ground truth for a single stay from the
     disposition-loader row. Nothing is invented; vitals reflect what was
-    actually measured (missing -> None), PMH reflects the loader's flags."""
+    actually measured (missing -> None), PMH reflects the loader's flags.
+
+    `rhythm_readings` is the full chronological rhythm sequence in the 4h window;
+    the first is surfaced as the single `rhythm` field (v2 tool / display) and
+    the whole list is carried inside `vital_trajectory['rhythm']` so the v3 +
+    disposition tools aggregate it the way training does."""
     arrival = transport_to_input(row["arrival_transport"])
     is_ems = arrival in ("ambulance", "helicopter")
+    rhythm_list = list(rhythm_readings or [])
+    rhythm_raw = rhythm_list[0] if rhythm_list else ""
+    traj = dict(vital_trajectory or {})
+    if rhythm_list:
+        traj["rhythm"] = rhythm_list
 
     # Vitals: real measured value when present, None when the triage row had it
     # missing (the patient "doesn't know"). _<vital>_missing flags come from
@@ -287,8 +301,8 @@ def extract_fields(
         # snapshot-fallback path stays testable.
         "nurse_inputs": {
             "vitals": {v: vitals[v] for v in VITAL_COLS},
-            "vital_trajectory": vital_trajectory or {},
-            "rhythm": rhythm_raw or "",
+            "vital_trajectory": traj,
+            "rhythm": rhythm_raw,
             "medications_raw": med_names or "",
             "prior_history": pmh_text,
             "n_prior_admissions": n_prior_adm,
@@ -544,7 +558,7 @@ def sample_and_extract(
     print("\n[4/4] Pulling raw medication names + cardiac rhythm + vital trajectory...")
     med_names = pull_medrecon_names(chosen)
     intime_by_stay = dict(zip(df_d["stay_id"].astype(int), df_d["intime"]))
-    rhythm_raw = pull_raw_rhythm({s: intime_by_stay[s] for s in chosen})
+    rhythm_readings = pull_rhythm_readings({s: intime_by_stay[s] for s in chosen})
     vital_traj = pull_vital_trajectory({s: intime_by_stay[s] for s in chosen})
 
     # ── Build features ONLY for the sampled rows (memory-safe) ──
@@ -573,7 +587,7 @@ def sample_and_extract(
             diag_gt=diag_by_stay.get(sid) if is_admitted else None,
             dept_gt=dept_by_stay.get(sid) if is_admitted else None,
             med_names=med_names.get(sid, ""),
-            rhythm_raw=rhythm_raw.get(sid, ""),
+            rhythm_readings=rhythm_readings.get(sid, []),
             vital_trajectory=vital_traj.get(sid, {}),
         )
         cases.append(fields)

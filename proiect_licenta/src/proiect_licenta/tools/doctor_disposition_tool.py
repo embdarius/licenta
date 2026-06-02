@@ -88,7 +88,9 @@ from proiect_licenta.training.train_nurse_v3 import (
     LONG_VITAL_FEATURE_COLS,
 )
 from proiect_licenta.vital_trajectory import build_longitudinal_block
-from proiect_licenta.tools.vital_trajectory_io import parse_vital_trajectory
+from proiect_licenta.tools.vital_trajectory_io import (
+    parse_vital_trajectory, parse_rhythm_readings,
+)
 from proiect_licenta.training import train_triage_v3 as _triage_v3
 from proiect_licenta.training.train_triage_v3 import (
     build_features as _build_v3_features,
@@ -524,10 +526,15 @@ class DoctorDispositionTool(BaseTool):
         # admit probability vs the training distribution, so the trajectory
         # path matters for disposition accuracy.
         trajectory = parse_vital_trajectory(vital_trajectory_json)
+        rhythm_readings = parse_rhythm_readings(vital_trajectory_json)
         long_data = build_longitudinal_block(
             snapshot=vital_values, readings=trajectory, rhythm=rhythm,
+            rhythm_readings=rhythm_readings,
         )
-        bucket = _normalize_rhythm(rhythm) if rhythm else ""
+        # Display bucket: primary reported rhythm, else the first trajectory
+        # reading (the rhythm_irregular flag below comes from the aggregate).
+        _display_rhythm = rhythm or (rhythm_readings[0] if rhythm_readings else "")
+        bucket = _normalize_rhythm(_display_rhythm) if _display_rhythm else ""
         long_df = pd.DataFrame({col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS})
         used_trajectory = int(long_data["has_longitudinal_vitals"]) == 1
 

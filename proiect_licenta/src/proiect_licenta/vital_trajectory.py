@@ -26,6 +26,7 @@ from `train_nurse_v3` so training and inference cannot drift.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Optional
 
 from proiect_licenta.training.train_nurse_v3 import (
@@ -98,6 +99,7 @@ def build_longitudinal_block(
     snapshot: dict,
     readings: Optional[dict] = None,
     rhythm: str = "",
+    rhythm_readings: Optional[list] = None,
 ) -> dict:
     """Build the 41-column longitudinal feature block.
 
@@ -111,7 +113,15 @@ def build_longitudinal_block(
         Multiple chronological readings per vital (the trajectory). Empty/None
         for any vital falls back to ``snapshot`` for that vital.
     rhythm : str
-        Free-text cardiac rhythm; bucketed via the shared ``_normalize_rhythm``.
+        Free-text cardiac rhythm (single reading). Used when ``rhythm_readings``
+        is not supplied. Bucketed via the shared ``_normalize_rhythm``.
+    rhythm_readings : list[str] | None
+        Multiple rhythm strings collected during the stay. When supplied, the
+        block is built the SAME way training aggregates the ``vitalsign.csv``
+        rhythm column (``_aggregate_vitalsigns``): the one-hot is the MODE
+        (most common bucket) and ``rhythm_irregular`` is 1 if ANY reading is
+        non-sinus. A single ``rhythm`` string is the degenerate one-reading
+        case of this, so the two paths agree.
 
     Returns
     -------
@@ -148,11 +158,26 @@ def build_longitudinal_block(
         else:
             block[count_col] = int(_SNAPSHOT_FLAG[count_col](snapshot))
 
-    # ── Rhythm one-hot ──
-    bucket = _normalize_rhythm(rhythm) if rhythm else ""
+    # ── Rhythm one-hot ── (mirror train_nurse_v3._aggregate_vitalsigns: bucket
+    # every reading, one-hot the MODE, rhythm_irregular = ANY non-sinus.) A
+    # single `rhythm` string is the one-reading degenerate case of this.
+    if rhythm_readings:
+        buckets = [_normalize_rhythm(r) for r in rhythm_readings]
+    elif rhythm:
+        buckets = [_normalize_rhythm(rhythm)]
+    else:
+        buckets = []
+    buckets = [b for b in buckets if b]  # drop empties (matches training)
+
     for b in _RHYTHM_BUCKETS:
-        block[f"rhythm_{b}"] = 1 if bucket == b else 0
-    block["rhythm_irregular"] = 1 if bucket and bucket != "sinus" else 0
+        block[f"rhythm_{b}"] = 0
+    block["rhythm_irregular"] = 0
+    if buckets:
+        top = Counter(buckets).most_common(1)[0][0]
+        block[f"rhythm_{top}"] = 1
+        block["rhythm_irregular"] = int(
+            any(b not in ("sinus", "") for b in buckets)
+        )
 
     # ── Coverage flag ── 1 if we had any real reading (matches training's
     # "stay had vitalsign.csv coverage"); 0 = pure snapshot fallback.

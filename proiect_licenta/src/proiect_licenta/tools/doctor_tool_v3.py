@@ -68,7 +68,9 @@ from proiect_licenta.training.train_nurse_v3 import (
     build_diag_cascade_cols,
 )
 from proiect_licenta.vital_trajectory import build_longitudinal_block
-from proiect_licenta.tools.vital_trajectory_io import parse_vital_trajectory
+from proiect_licenta.tools.vital_trajectory_io import (
+    parse_vital_trajectory, parse_rhythm_readings,
+)
 
 # PMH vocabulary — same map used at training time. Free-text the patient
 # gives us is parsed against the same keywords so training/inference share
@@ -529,10 +531,13 @@ class DoctorPredictionToolV3(BaseTool):
             "n_hypotension_readings": hypotension,
         }
         trajectory = parse_vital_trajectory(vital_trajectory_json)
+        rhythm_readings = parse_rhythm_readings(vital_trajectory_json)
         long_data = build_longitudinal_block(
             snapshot=vital_values, readings=trajectory, rhythm=rhythm,
+            rhythm_readings=rhythm_readings,
         )
-        bucket = _normalize_rhythm(rhythm) if rhythm else ""
+        _display_rhythm = rhythm or (rhythm_readings[0] if rhythm_readings else "")
+        bucket = _normalize_rhythm(_display_rhythm) if _display_rhythm else ""
         used_trajectory = int(long_data["has_longitudinal_vitals"]) == 1
 
         long_df = pd.DataFrame(

@@ -117,6 +117,10 @@ class NurseDataCollectionTool(BaseTool):
         o22 = _parse_numeric(input("  [You]:   "))
         print("\n  [Nurse]: Second blood pressure? (e.g. 120/80)")
         sbp2, dbp2 = _parse_bp(input("  [You]:   "))
+        print("\n  [Nurse]: Second cardiac rhythm reading? (skip if none)")
+        rhythm2_raw = input("  [You]:   ").strip()
+        if rhythm2_raw.lower() in SKIP_WORDS:
+            rhythm2_raw = None
 
         # Build the chronological trajectory per vital from the first + second
         # readings (dropping any the patient skipped). Order is preserved so
@@ -139,6 +143,15 @@ class NurseDataCollectionTool(BaseTool):
         rhythm_raw = input("  [You]:   ").strip()
         if rhythm_raw.lower() in SKIP_WORDS:
             rhythm_raw = None
+
+        # Carry BOTH rhythm readings (first + optional second) inside the
+        # vital_trajectory blob under a "rhythm" key, so the doctor tools can
+        # aggregate them the way training does (mode bucket + any-non-sinus
+        # rhythm_irregular) instead of seeing only one reading. The top-level
+        # `rhythm` string below stays the first reading for the v2 tool + display.
+        _rhythm_readings = [r for r in (rhythm_raw, rhythm2_raw) if r]
+        if _rhythm_readings:
+            vital_trajectory["rhythm"] = _rhythm_readings
 
         # Medications
         print("\n  [Nurse]: Are you currently taking any medications?")

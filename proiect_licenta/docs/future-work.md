@@ -622,6 +622,18 @@ read `tool_direct_lookup` vs `tool_direct`. Magnitude unconfirmed at 20 cases;
 mechanism is certain. Full writeup in
 [`agents/case-generation-agent.md`](agents/case-generation-agent.md#patient-history-lookup-for-returning-patients-ehr-integration--implemented).
 
+**Rhythm divergence (#3) — CLOSED.** The runtime previously bucketed a single
+rhythm string while training aggregated all readings in the 4h window (mode
+one-hot + any-non-sinus `irregular`). Now the nurse collects a second rhythm
+reading, the readings travel inside the `vital_trajectory` blob (`"rhythm"` key,
+`parse_rhythm_readings`), and `build_longitudinal_block` aggregates them with the
+exact training logic; a single reading is the degenerate case (unchanged). The
+benchmark's `pull_rhythm_readings` feeds the full in-window sequence so
+`tool-direct` matches the feature-vector rhythm features. Unit-tested; needs a
+`generate_cases` regen to exercise it in the E2E benchmark. The remaining
+feature-degradation divergences are now just medication vocab (~93% aligned) and
+the derivative cascade columns — both likely below the 20-case noise floor.
+
 ### Phase 5: Hospital Infrastructure
 - Synthetic real-time database of hospital rooms and available beds.
 - Admission routing based on department prediction and bed availability.

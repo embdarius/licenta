@@ -282,9 +282,17 @@ gate decision (P(admit) crossing 0.40) or a top-1 argmax; at 13 cases one flip =
    flags directly from prior discharge-note parsing + ICD codes; tool-direct
    reverse-maps those flags to phrases ("congestive heart failure") and re-parses
    them through `pmh_vocab`. Asymmetric vocab coverage can drop/add a flag.
-3. **Rhythm: one reading vs many.** The loader aggregates rhythm across all
-   readings in the 4h window (`irregular=1` if *any* reading is non-sinus); the
-   runtime buckets only the first reported rhythm string.
+3. **Rhythm: one reading vs many — CLOSED.** The loader aggregates rhythm across
+   all readings in the 4h window (one-hot = mode bucket, `irregular=1` if *any*
+   reading is non-sinus). The runtime previously bucketed only the first reported
+   string. Now the nurse collects a second rhythm reading, the readings ride
+   inside the `vital_trajectory` blob under a `"rhythm"` key (parsed by
+   `parse_rhythm_readings`), and `build_longitudinal_block` aggregates them with
+   the *exact* training logic (mode + any-non-sinus). A single reading is the
+   degenerate one-element case, so behavior is unchanged when only one is
+   available. In the benchmark, `pull_rhythm_readings` supplies the full
+   in-window sequence, so `tool-direct` now matches the feature-vector's rhythm
+   features.
 4. **Medications: different vocab coverage.** feature-vector flags come from the
    real `medrecon` aggregation (drug name + pharmacy-class `etcdescription`);
    tool-direct re-parses only patient-reported drug names through `med_vocab`.

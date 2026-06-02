@@ -56,3 +56,40 @@ def parse_vital_trajectory(raw) -> dict:
         if cleaned:
             out[vital] = cleaned
     return out
+
+
+def parse_rhythm_readings(raw) -> list:
+    """Extract the list of rhythm strings from the same vital-trajectory blob's
+    ``rhythm`` key, else []. Tolerant: scalar -> [str], list -> [str, ...],
+    drops None / empty / skip-words. Never raises.
+
+    Carried inside ``vital_trajectory_json`` (rather than as a separate tool arg)
+    so the existing single-blob plumbing flows nurse -> tools -> benchmark
+    unchanged. ``parse_vital_trajectory`` ignores the ``rhythm`` key (it only
+    reads the 6 numeric vitals), so the two parsers don't collide."""
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        obj = raw
+    else:
+        s = str(raw).strip()
+        if s.lower() in _SKIP:
+            return []
+        try:
+            obj = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if not isinstance(obj, dict):
+            return []
+    val = obj.get("rhythm")
+    if val is None:
+        return []
+    seq = val if isinstance(val, (list, tuple)) else [val]
+    out = []
+    for r in seq:
+        if r is None:
+            continue
+        s = str(r).strip()
+        if s and s.lower() not in _SKIP:
+            out.append(s)
+    return out
