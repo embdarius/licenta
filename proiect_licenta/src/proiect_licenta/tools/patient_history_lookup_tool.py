@@ -90,6 +90,25 @@ def _subject_known(index: dict, subject_id: int) -> bool:
     )
 
 
+def _latest_encounter_time(index: dict, subject_id: int):
+    """Most recent admission/ED-visit timestamp for a subject (lists are sorted,
+    so the last element is latest). Returns None if the subject is unknown.
+
+    Used to anchor the 'now' sentinel: MIMIC timestamps are de-identified into
+    the future, so a real wall-clock 'now' would precede every encounter and
+    report "no prior history". Treating the subject's most recent recorded visit
+    as "today's visit" makes the < filter return everything strictly before it —
+    the same scenario the offline benchmark exercises with a real stay intime."""
+    times = []
+    adm = index.get("adm_by_subject", {}).get(subject_id)
+    if adm:
+        times.append(adm[-1][0])
+    ed = index.get("ed_by_subject", {}).get(subject_id)
+    if ed:
+        times.append(ed[-1][0])
+    return max(times) if times else None
+
+
 # ---------------------------------------------------------------------------
 # Tool Input Schema
 # ---------------------------------------------------------------------------
@@ -109,7 +128,10 @@ class PatientHistoryLookupInput(BaseModel):
         description=(
             "The CURRENT ED arrival timestamp (ISO 8601, e.g. "
             "'2150-03-14 18:22:00'). Only encounters strictly BEFORE this time "
-            "are used — this is the leakage guard."
+            "are used — this is the leakage guard. For a LIVE patient arriving "
+            "right now, pass the literal string 'now' and the tool uses the "
+            "current date/time (so all of a known patient's past encounters "
+            "count as prior)."
         ),
     )
     chief_complaints: str = Field(
@@ -150,18 +172,30 @@ class PatientHistoryLookupTool(BaseTool):
         chief_complaints: str = "",
     ) -> str:
         index = get_history_index()
+        sid = int(subject_id) if subject_id is not None else -1
 
-        # A missing / unparseable arrival time means the leakage filter can't be
-        # applied safely -> refuse the lookup rather than risk leaking or
-        # silently overriding self-report with an empty block.
-        intime_valid = bool(str(current_intime).strip()) and not pd.isna(
-            pd.to_datetime(current_intime, errors="coerce")
-        )
+        # Resolve the arrival time. The 'now'/'current'/'today' sentinel is for a
+        # LIVE patient: MIMIC timestamps are de-identified into the future, so the
+        # real wall-clock now would precede every encounter and yield "no prior
+        # history". Instead we anchor to the subject's most recent recorded
+        # encounter (treat it as today's visit) so the < filter returns everything
+        # strictly before it. An explicit ISO timestamp (the benchmark path) is
+        # used as-is. A missing / unparseable value means the leakage filter
+        # can't be applied -> refuse the lookup rather than leak or silently
+        # override self-report with an empty block.
+        raw_intime = str(current_intime).strip()
+        if raw_intime.lower() in ("now", "current", "today"):
+            resolved_intime = (
+                _latest_encounter_time(index, sid)
+                if (index is not None and sid > 0) else None
+            )
+        else:
+            resolved_intime = pd.to_datetime(raw_intime, errors="coerce")
+        intime_valid = resolved_intime is not None and not pd.isna(resolved_intime)
 
         # No index built, no/unknown subject, or no valid intime -> ask-the-patient.
-        if index is None or subject_id is None or int(subject_id) <= 0 \
-                or not intime_valid \
-                or not _subject_known(index, int(subject_id)):
+        if index is None or sid <= 0 or not intime_valid \
+                or not _subject_known(index, sid):
             if index is None:
                 note = ("Patient-history index not built (run `uv run "
                         "build_history_index`); ask-the-patient fallback used.")
@@ -174,15 +208,15 @@ class PatientHistoryLookupTool(BaseTool):
                         "(first-time-patient fallback).")
             return json.dumps({
                 "known_patient": False,
-                "subject_id": int(subject_id) if subject_id is not None else -1,
+                "subject_id": sid,
                 "pmh_block": None,
                 "note": note,
             }, indent=2)
 
         complaint_norm = normalize_complaint_text(chief_complaints or "")
         pmh_block = assemble_pmh_for_stay(
-            subject_id=int(subject_id),
-            intime=current_intime,
+            subject_id=sid,
+            intime=resolved_intime,
             complaint_norm=complaint_norm,
             index=index,
         )
@@ -196,7 +230,7 @@ class PatientHistoryLookupTool(BaseTool):
 
         return json.dumps({
             "known_patient": True,
-            "subject_id": int(subject_id),
+            "subject_id": sid,
             "has_prior_history": bool(has_prior),
             # The 19-column block, ready to paste into the doctor tools'
             # pmh_lookup_json argument verbatim.

@@ -7,6 +7,13 @@ parse_symptoms_task:
     piece of information, use the ask_patient tool to ask them directly.
     Ask one question at a time, and be friendly.
 
+    Patient identifier (ask FIRST, before symptoms):
+    0. Medical record number (MRN) - ask whether the patient has been treated
+       at this hospital before and, if so, for their MRN (an integer). This
+       lets the system pull their real prior medical history instead of relying
+       on recall. If they are new, decline, or don't know, record subject_id
+       as -1 (a first-time patient). Do NOT invent or guess an MRN.
+
     Required information:
     1. Chief complaints - what symptoms/issues brought them to the ED.
        Use standard ED terminology (e.g., "abd pain", "chest pain", "dyspnea",
@@ -44,6 +51,7 @@ parse_symptoms_task:
     After gathering everything, respond ONLY with valid JSON.
     For walk-in patients:
     {{
+      "subject_id": -1,
       "chief_complaints": ["complaint1", "complaint2"],
       "pain_score": 5,
       "age": 45,
@@ -54,6 +62,7 @@ parse_symptoms_task:
     }}
     For ambulance/helicopter patients (include vitals, use -1 for any unknown):
     {{
+      "subject_id": 17287581,
       "chief_complaints": ["complaint1", "complaint2"],
       "pain_score": 7,
       "age": 68,
@@ -68,12 +77,14 @@ parse_symptoms_task:
       "prior_history": "CHF, hypertension, COPD",
       "n_prior_admissions": 4
     }}
-    For patients with no prior history (or who skipped the questions):
+    Use "subject_id": -1 for any patient who is new, declines, or doesn't know
+    their MRN. For patients with no prior history (or who skipped the questions):
     use "prior_history": "" and "n_prior_admissions": -1.
   expected_output: >
-    A JSON object with all required fields filled in. For ambulance/helicopter
-    patients, includes vital sign fields (use -1 for unknown). All patients
-    include `prior_history` (string, "" if skipped) and `n_prior_admissions`
+    A JSON object with all required fields filled in. Includes `subject_id`
+    (integer MRN, -1 if new/unknown). For ambulance/helicopter patients,
+    includes vital sign fields (use -1 for unknown). All patients include
+    `prior_history` (string, "" if skipped) and `n_prior_admissions`
     (integer, -1 if skipped). No additional text, only valid JSON.
   agent: nlp_parser
 
@@ -127,6 +138,7 @@ triage_assessment_task:
     so the doctor agent can use it. Format it exactly like this:
 
     ---STRUCTURED_DATA---
+    subject_id: <integer MRN from the parsed JSON, or -1 if new/unknown>
     chief_complaints: <comma-separated complaints from the parsed input>
     pain_score: <integer>
     age: <integer>
@@ -202,6 +214,7 @@ doctor_assessment_task:
     so the nurse and enhanced assessment can use it:
 
     ---STRUCTURED_DATA---
+    subject_id: <integer MRN carried over from the triage block, or -1>
     chief_complaints: <comma-separated complaints>
     pain_score: <integer>
     age: <integer>
@@ -263,8 +276,8 @@ doctor_disposition_task:
     reassessment task that follows.
 
     1. Extract the structured data from the ---STRUCTURED_DATA--- block in
-       the initial doctor assessment (chief_complaints, pain_score, age,
-       gender, arrival_transport, predicted_acuity, is_admitted). Treat
+       the initial doctor assessment (subject_id, chief_complaints, pain_score,
+       age, gender, arrival_transport, predicted_acuity, is_admitted). Treat
        `is_admitted` from triage as `triage_is_admitted` — it's the
        SCREENING verdict that this task may override.
 
@@ -284,17 +297,21 @@ doctor_disposition_task:
          materially improves the admit/discharge prediction. If the block is
          absent or empty, pass an empty string "".
 
-    2b. EHR history lookup (returning patients only). If the structured data
-        carries a patient MRN / subject_id (a positive integer), FIRST call
-        the **patient_history_lookup_tool** with that subject_id, the patient's
-        arrival time (current_intime), and the chief_complaints. If it returns
-        `known_patient: true`, serialize its `pmh_block` object to a JSON STRING
-        and pass it to the disposition tool as `pmh_lookup_json` — this supplies
-        the REAL prior-encounter record (PMH flags + the days-since-last-visit /
-        same-complaint numerics a patient can't report at the bedside), which
-        OVERRIDES the self-reported prior_history / n_prior_admissions. If there
-        is no MRN, or it returns `known_patient: false`, pass an empty string ""
-        for `pmh_lookup_json` and rely on the patient's self-report.
+    2b. EHR history lookup (returning patients only). Read `subject_id` from the
+        structured data block. If it is a POSITIVE integer (the patient gave an
+        MRN), FIRST call the **patient_history_lookup_tool** with:
+          - subject_id: that integer
+          - current_intime: the literal string "now" (a live patient is arriving
+            now, so all of their past encounters count as prior)
+          - chief_complaints: the current complaints
+        If it returns `known_patient: true`, serialize its `pmh_block` object to
+        a JSON STRING and pass it to the disposition tool as `pmh_lookup_json` —
+        this supplies the REAL prior-encounter record (PMH flags + the
+        days-since-last-visit / same-complaint numerics a patient can't report
+        at the bedside), which OVERRIDES the self-reported prior_history /
+        n_prior_admissions. If subject_id is -1 (or absent), or the tool returns
+        `known_patient: false`, pass an empty string "" for `pmh_lookup_json`
+        and rely on the patient's self-report.
 
     3. Call the **doctor_disposition_tool** with ALL of the above (including
        `pmh_lookup_json` from step 2b when available). ALWAYS call this tool —
@@ -335,6 +352,7 @@ doctor_disposition_task:
     refined is_admitted, NOT the triage one:
 
     ---STRUCTURED_DATA---
+    subject_id: <integer MRN carried over, or -1>
     chief_complaints: <comma-separated complaints>
     pain_score: <integer>
     age: <integer>

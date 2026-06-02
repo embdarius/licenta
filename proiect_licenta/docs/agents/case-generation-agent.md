@@ -370,6 +370,26 @@ complementary half: **fetch** prior data for patients already in the system.
   alongside the no-lookup `tool_direct`. The case bundle now carries `intime`
   (the leakage cutoff). The gap between the two columns = **the value of EHR
   access at triage**.
+- **Live intake path (wired)** — the NLP parser (`parse_symptoms_task`) now asks,
+  *first*, whether the patient has been treated here before and for their MRN,
+  emitting `subject_id` (an integer, `-1` if new/unknown) in its JSON. That
+  `subject_id` is threaded through every `---STRUCTURED_DATA---` block
+  (triage → initial doctor → disposition), and `doctor_disposition_task` calls
+  `patient_history_lookup_tool` with it (and `current_intime="now"`) before the
+  disposition tool, forwarding the resulting `pmh_block` as `pmh_lookup_json`.
+  So entering a known `subject_id` at intake (e.g. `17287581`) flips the case to
+  a returning patient with real prior history; `-1` keeps the ask-the-patient
+  path. **MIMIC date caveat:** MIMIC timestamps are de-identified into the future,
+  so a real wall-clock "now" would precede every encounter (→ "no prior
+  history"). The tool therefore resolves the `"now"` sentinel to the subject's
+  **most recent recorded encounter** (treated as today's visit), so the `< intime`
+  filter returns everything strictly before it. (An explicit ISO timestamp — the
+  benchmark path — is used verbatim, which is why the benchmark sees stay
+  `37744212`'s exact 3-prior-admissions / 2.71-day numbers while a live `"now"`
+  lookup for the same subject sees their full pre-latest-visit history.) This is
+  inherently a **simulation**: a live MRN only matches if it equals a real MIMIC
+  `subject_id`, so casual testing with a made-up number correctly shows a
+  first-time patient.
 
 **Leakage discipline (the critical risk):** `assemble_pmh_for_stay` filters to
 encounters strictly *before* the current `intime` and asserts no surviving prior
