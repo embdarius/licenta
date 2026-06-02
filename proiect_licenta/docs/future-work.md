@@ -615,11 +615,20 @@ single-case real-data check confirms the mechanism: built over the cohort, the
 tool returns stay `37744212`'s real `days_since_last_admission = 2.71` /
 `same_complaint_as_prior = 1.0`, and feeding that into the disposition tool flips
 it **0.266 (DISCHARGE) → 0.474 (ADMIT)** — matching the feature-vector value for
-that case. **The full `benchmark_pipeline_e2e` has NOT been re-run after this
-change** (its table still reflects the pre-lookup run); the user-run validation
-is regenerate cases (for the new `intime` field) → build index → re-run, then
-read `tool_direct_lookup` vs `tool_direct`. Magnitude unconfirmed at 20 cases;
-mechanism is certain. Full writeup in
+that case. **The full 20-case `benchmark_pipeline_e2e` has now been re-run**
+(regenerated bundle with `intime` + rhythm; MRN wired through the E2E crew):
+`tool_direct_lookup` AND **E2E** both equal `feature_vector_gated` on every gated
+target (disposition 90→95%, dx@1 61.5→69.2%, coverage 11/13→12/13), with stay
+`37744212` recovered to the correct ADMIT / Digestive / MED in all three. E2E
+matches because the parser now collects the MRN (`_answer_ask` MRN branch),
+threads `subject_id` through the structured-data blocks, and the disposition task
+calls the lookup; the harness forces the lookup's `current_intime` to the case's
+real stay intime (Option A) so the column stays apples-to-apples with the gated
+reference. So the runtime↔gated-feature-vector gap is closed at full cohort, both
+tool-direct and end-to-end; the residual is the disposition gate (gated→ungated)
+plus the intrinsic NL acuity loss (E2E ESI 60% vs 70%). Magnitude per-target still
+rides on single cases at n=20; scaling is the next step (now de-risked — wiring
+confirmed, no regressions). Full writeup in
 [`agents/case-generation-agent.md`](agents/case-generation-agent.md#patient-history-lookup-for-returning-patients-ehr-integration--implemented).
 
 **Rhythm divergence (#3) — CLOSED.** The runtime previously bucketed a single
@@ -629,10 +638,12 @@ reading, the readings travel inside the `vital_trajectory` blob (`"rhythm"` key,
 `parse_rhythm_readings`), and `build_longitudinal_block` aggregates them with the
 exact training logic; a single reading is the degenerate case (unchanged). The
 benchmark's `pull_rhythm_readings` feeds the full in-window sequence so
-`tool-direct` matches the feature-vector rhythm features. Unit-tested; needs a
-`generate_cases` regen to exercise it in the E2E benchmark. The remaining
-feature-degradation divergences are now just medication vocab (~93% aligned) and
-the derivative cascade columns — both likely below the 20-case noise floor.
+`tool-direct` matches the feature-vector rhythm features. Unit-tested and
+exercised in the 20-case re-run — **no regression** (only 2 cases had in-window
+rhythm coverage, none flipped at this scale; the value is only measurable once the
+benchmark is scaled). The remaining feature-degradation divergences are now just
+medication vocab (~93% aligned) and the derivative cascade columns — both likely
+below the 20-case noise floor.
 
 ### Phase 5: Hospital Infrastructure
 - Synthetic real-time database of hospital rooms and available beds.

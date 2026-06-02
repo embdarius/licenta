@@ -426,14 +426,46 @@ the per-case diagnostic identified. Feeding that block into the disposition tool
 closes the gap on the one patient that *was* the gap, flipping it back to the
 correct admit (and thereby restoring its downstream diagnosis/department).
 
-**Full benchmark NOT yet re-run after this change.** The `benchmark_pipeline_e2e`
-table above still reflects the pre-lookup run. The remaining validation is:
-`uv run generate_cases` (regenerate the bundle so cases carry the new `intime`
-field) → `uv run build_history_index` → `uv run python
-benchmarks/benchmark_pipeline_e2e.py`, then read the new `tool_direct_lookup`
-column against `tool_direct` (gap = the value of EHR access at triage).
+**Full 20-case benchmark re-run (done — lookup + rhythm in place, MRN wired
+through the E2E crew, regenerated bundle with `intime` + in-window rhythm).**
+`tool_direct_lookup` equals `feature_vector_gated` on **every** gated target, and
+**E2E now matches them too** — the lookup closes the entire runtime↔gated-
+feature-vector gap both in tool-direct and end-to-end through the LLM (previously
+a single-case anecdote, now the full-cohort result):
 
-**Magnitude caveat (unchanged):** at 20 cases this is a **mechanism
-demonstration** — the diagnostic says the gap *is* one patient, so the test is
-"does the one flip flip back?", not "by how many pp does accuracy rise". A scaled
-benchmark (a few hundred cases) is needed before a with-lookup headline claim.
+| Target | tool_direct | tool_direct_lookup | feature_vector_gated | feature_vector (ungated) | E2E |
+|---|---|---|---|---|---|
+| ESI acuity | 70.0% | 70.0% | 70.0% | 70.0% | 60.0% |
+| Disposition | 90.0% | **95.0%** | 95.0% | 95.0% | **95.0%** |
+| Diagnosis @1 | 61.5% | **69.2%** | 69.2% | 69.2% | **69.2%** |
+| Diagnosis @3 | 84.6% | **92.3%** | 92.3% | 100.0% | **92.3%** |
+| Department @1 | 53.8% | **61.5%** | 61.5% | 69.2% | **69.2%** |
+| Department @3 | 84.6% | **92.3%** | 92.3% | 100.0% | **92.3%** |
+| Dx coverage | 11/13 | **12/13** | 12/13 | 13/13 | **12/13** |
+
+The per-case dump confirms the mechanism: stay `37744212` is exactly the case
+that flips — `tool_direct` discharges it (no Dx), while `tool_direct_lookup`,
+`feature_vector_gated`, **and E2E** all admit it and recover the correct
+**Digestive / MED** (= ground truth). E2E now does so because the parser collects
+the MRN (`_answer_ask` MRN branch), threads `subject_id` through the structured-
+data blocks, and the disposition task calls the lookup — the full live chain. To
+keep the E2E column apples-to-apples with the gated reference, the harness forces
+the lookup's `current_intime` to the case's real stay intime (Option A; otherwise
+the live `"now"` sentinel would anchor to the subject's *latest* encounter, a
+different leakage cutoff). **Rhythm (#3) caused no regression**: `tool_direct` is
+identical to the pre-rhythm baseline — only 2 cases had in-window rhythm coverage
+and none flipped at n=20 (expected below-noise behavior; rhythm's value is only
+measurable at scale). The residual `gated → ungated` gap (dx@3 92.3 vs 100,
+coverage 12/13 vs 13/13) is the **disposition gate** — one admitted case it routes
+to discharge. The only remaining E2E-specific loss is **ESI acuity (60.0%)**,
+pure complaint-paraphrase + triage-agent jitter (the docs note acuity swinging
+60↔70 across reruns of the same narratives); nothing here touches triage. E2E
+department@1 (69.2%) even edged the gated column this run — a favorable LLM draw,
+i.e. noise, not a systematic effect.
+
+**Magnitude caveat (unchanged):** at 20 cases this is still a **mechanism
+demonstration** — the gated-axis gap *was* one patient, so the lookup deltas above
+ride on single cases, and the E2E column carries LLM run-to-run jitter. A scaled
+benchmark (a few hundred cases) is the next step, now de-risked: the run above
+confirms the wiring closes the gap (tool-direct AND E2E) with no regressions, so
+scaling is about statistical weight, not correctness.

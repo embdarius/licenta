@@ -279,6 +279,22 @@ def _answer_ask(question: str, case: dict) -> str:
     def num(x):
         return "skip" if x is None else str(x)
 
+    # MRN / patient-identity question (the parser asks this FIRST). Must precede
+    # the generic "hospital before" / "medical" branches below, which would
+    # otherwise swallow it. Returns the case's real subject_id so the live
+    # MRN -> structured-data -> patient_history_lookup_tool chain is exercised
+    # end-to-end (the leakage-cutoff intime is forced to the case's stay intime
+    # by a separate E2E patch, so this column reproduces tool_direct_lookup).
+    if any(k in q for k in (
+        "mrn", "medical record", "record number", "patient id",
+        "patient identifier", "patient number", "treated here before",
+        "treated at this hospital before", "been here before",
+        "been treated here", "in our system", "in the system", "registered",
+        "seen you before", "seen here before", "first time here",
+    )):
+        sid = int(case.get("subject_id", -1) or -1)
+        return f"Yes, my MRN is {sid}" if sid > 0 else "No, this is my first time here"
+
     if any(k in q for k in ("pain", "hurt", "out of 10", "/10")):
         return "skip" if t["pain_score"] < 0 else str(t["pain_score"])
     if any(k in q for k in ("how old", "age", "year")):
@@ -339,6 +355,7 @@ def _install_patches():
         "base": DoctorPredictionToolV3Base._run,
         "dispo": DoctorDispositionTool._run,
         "v3": DoctorPredictionToolV3._run,
+        "lookup": PatientHistoryLookupTool._run,
     }
 
     def patched_ask(self, question):
@@ -346,6 +363,25 @@ def _install_patches():
 
     def patched_nurse(self, patient_context):
         return _nurse_json(CURRENT_CASE)
+
+    def patched_lookup(self, subject_id, current_intime="now", chief_complaints=""):
+        # Option A — force the case's REAL stay intime (the historical leakage
+        # cutoff) instead of the live "now" the disposition prompt passes, so the
+        # E2E lookup reproduces the tool_direct_lookup / feature_vector_gated
+        # scenario rather than live "now" semantics (which for a returning
+        # patient anchors to their LATEST encounter — a different cutoff).
+        # subject_id + complaints still come from the agent: the parser must have
+        # collected the MRN for this to fire, so the full chain is exercised.
+        forced_intime = str(CURRENT_CASE.get("intime") or current_intime)
+        result = orig["lookup"](
+            self, subject_id=subject_id, current_intime=forced_intime,
+            chief_complaints=chief_complaints,
+        )
+        try:
+            CAPTURE.setdefault("lookup", []).append(json.loads(result))
+        except Exception:
+            pass
+        return result
 
     def _tee(name, orig_fn):
         def wrapper(self, *args, **kwargs):
@@ -359,6 +395,7 @@ def _install_patches():
 
     AskPatientTool._run = patched_ask
     NurseDataCollectionTool._run = patched_nurse
+    PatientHistoryLookupTool._run = patched_lookup
     TriagePredictionTool._run = _tee("triage", orig["triage"])
     DoctorPredictionToolV3Base._run = _tee("base", orig["base"])
     DoctorDispositionTool._run = _tee("dispo", orig["dispo"])
@@ -367,6 +404,7 @@ def _install_patches():
     def restore():
         AskPatientTool._run = orig["ask"]
         NurseDataCollectionTool._run = orig["nurse"]
+        PatientHistoryLookupTool._run = orig["lookup"]
         TriagePredictionTool._run = orig["triage"]
         DoctorPredictionToolV3Base._run = orig["base"]
         DoctorDispositionTool._run = orig["dispo"]
