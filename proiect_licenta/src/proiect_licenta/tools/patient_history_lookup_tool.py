@@ -124,14 +124,15 @@ class PatientHistoryLookupInput(BaseModel):
         ),
     )
     current_intime: str = Field(
-        ...,
+        default="now",
         description=(
-            "The CURRENT ED arrival timestamp (ISO 8601, e.g. "
-            "'2150-03-14 18:22:00'). Only encounters strictly BEFORE this time "
-            "are used — this is the leakage guard. For a LIVE patient arriving "
-            "right now, pass the literal string 'now' and the tool uses the "
-            "current date/time (so all of a known patient's past encounters "
-            "count as prior)."
+            "When the patient is arriving for care RIGHT NOW (the live runtime), "
+            "pass 'now' (the default) — the tool then counts all of a known "
+            "patient's recorded encounters as prior history. Only pass an "
+            "explicit ISO-8601 timestamp (e.g. '2150-03-14 18:22:00') when you "
+            "are reconstructing a HISTORICAL visit and need that exact moment as "
+            "the leakage cutoff (the offline benchmark does this); only encounters "
+            "strictly before it are used."
         ),
     )
     chief_complaints: str = Field(
@@ -174,17 +175,22 @@ class PatientHistoryLookupTool(BaseTool):
         index = get_history_index()
         sid = int(subject_id) if subject_id is not None else -1
 
-        # Resolve the arrival time. The 'now'/'current'/'today' sentinel is for a
-        # LIVE patient: MIMIC timestamps are de-identified into the future, so the
+        # Resolve the arrival time. For a LIVE patient ('now', the default — also
+        # any empty / skip-equivalent value, since the LLM may omit or fumble the
+        # literal string) we anchor to the subject's most recent recorded
+        # encounter: MIMIC timestamps are de-identified into the future, so the
         # real wall-clock now would precede every encounter and yield "no prior
-        # history". Instead we anchor to the subject's most recent recorded
-        # encounter (treat it as today's visit) so the < filter returns everything
-        # strictly before it. An explicit ISO timestamp (the benchmark path) is
-        # used as-is. A missing / unparseable value means the leakage filter
-        # can't be applied -> refuse the lookup rather than leak or silently
-        # override self-report with an empty block.
+        # history". Anchoring to their latest visit (treated as today's) makes the
+        # < filter return everything strictly before it. An explicit, parseable
+        # ISO timestamp (the offline benchmark path) is used as-is. Only a
+        # non-empty value that ALSO fails to parse as a date is treated as
+        # invalid -> refuse rather than guess.
         raw_intime = str(current_intime).strip()
-        if raw_intime.lower() in ("now", "current", "today"):
+        now_sentinel = raw_intime.lower() in (
+            "now", "current", "today", "", "unknown", "none", "skip",
+            "n/a", "na", "-", "null",
+        )
+        if now_sentinel:
             resolved_intime = (
                 _latest_encounter_time(index, sid)
                 if (index is not None and sid > 0) else None
@@ -194,18 +200,24 @@ class PatientHistoryLookupTool(BaseTool):
         intime_valid = resolved_intime is not None and not pd.isna(resolved_intime)
 
         # No index built, no/unknown subject, or no valid intime -> ask-the-patient.
-        if index is None or sid <= 0 or not intime_valid \
-                or not _subject_known(index, sid):
+        # Order the diagnostics so the note names the ACTUAL reason (an unknown
+        # subject must be reported as such, not as an intime problem).
+        if index is None or sid <= 0 or not _subject_known(index, sid) \
+                or not intime_valid:
             if index is None:
                 note = ("Patient-history index not built (run `uv run "
                         "build_history_index`); ask-the-patient fallback used.")
-            elif not intime_valid:
-                note = ("No valid arrival time supplied — cannot apply the "
-                        "leakage filter; ask-the-patient fallback used.")
+            elif sid <= 0:
+                note = ("No MRN provided — treating as a first-time patient "
+                        "(ask-the-patient fallback).")
+            elif not _subject_known(index, sid):
+                note = (f"No record found for ID {sid}. Confirm this is the "
+                        f"patient's subject_id (MRN) — NOT a visit/stay number — "
+                        f"and that they exist in the built index. Ask-the-patient "
+                        f"fallback used.")
             else:
-                note = ("No prior record found for this MRN — the pipeline will "
-                        "ask the patient about their history instead "
-                        "(first-time-patient fallback).")
+                note = ("Could not parse the supplied arrival time; pass 'now' "
+                        "for a live visit. Ask-the-patient fallback used.")
             return json.dumps({
                 "known_patient": False,
                 "subject_id": sid,

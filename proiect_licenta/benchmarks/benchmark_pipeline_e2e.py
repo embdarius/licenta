@@ -122,10 +122,17 @@ def _lookup_pmh_json(case) -> str:
     intime and return the `pmh_block` as a JSON string (or "" if the patient is
     unknown / the index isn't built). This is what an EHR lookup for a returning
     patient would supply at runtime."""
+    # The benchmark reconstructs a HISTORICAL visit, so it must pass that stay's
+    # exact intime as the leakage cutoff — never the 'now' sentinel (which would
+    # anchor to the subject's latest encounter and could include this stay).
+    # If the case bundle predates the `intime` field, skip the lookup entirely.
+    intime = str(case.get("intime", "")).strip()
+    if not intime:
+        return ""
     tools = _direct_tools()
     res = json.loads(tools["lookup"]._run(
         subject_id=int(case.get("subject_id", -1)),
-        current_intime=str(case.get("intime", "")),
+        current_intime=intime,
         chief_complaints=case["triage_inputs"]["chief_complaints"],
     ))
     if res.get("known_patient") and res.get("pmh_block"):
