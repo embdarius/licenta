@@ -595,21 +595,32 @@ The **Case Generation Agent** (`src/proiect_licenta/case_generation.py`,
 Remaining for the phase: scale beyond the 20-case validation set; optionally
 use generated cases as augmentation for model training.
 
-**Patient-history lookup for returning patients (documented future direction).**
+**Patient-history lookup for returning patients (EHR integration) — IMPLEMENTED.**
 A per-case diagnostic on the 0.40 run showed the *entire* residual
 tool-direct↔feature-vector-gated gap is one returning patient whose
 prior-encounter numerics (`days_since_last_admission`, `same_complaint_as_prior`)
 the runtime can't reconstruct from a bedside interview — it can only *ask* for
-history, not *fetch* it. A `PatientHistoryLookupTool` keyed on `subject_id` /
-simulated MRN (not fuzzy name matching) would run the existing
-`pmh_features.aggregate_pmh` with the strict `< intime` leakage filter to
-populate PMH from real prior encounters for known patients, while first-time
-patients keep the current ask-the-patient zero-fill path. Report both
-no-lookup and with-lookup benchmark columns (the gap = the value of EHR access
-at triage). **Leakage discipline is the critical risk** — the lookup must filter
-to encounters strictly before the current `intime`. Magnitude unconfirmed at 20
-cases; mechanism is certain. Full sketch + cautions in
-[`agents/case-generation-agent.md`](agents/case-generation-agent.md#future-directions).
+history, not *fetch* it. Shipped as a `PatientHistoryLookupTool` keyed on
+`subject_id` / simulated MRN (not fuzzy name matching): `pmh_features.py` was
+split into `build_pmh_index` (heavy, offline) + `assemble_pmh_for_stay` (cheap,
+leakage-filtered per query); `scripts/build_history_index.py` (`uv run
+build_history_index`) persists the index; the tool returns the real PMH block
+for known patients and `known_patient=false` (ask-the-patient fallback) for
+first-time/unknown ones. The disposition + v3 doctor tools gained a
+`pmh_lookup_json` override arg (mirrors `vital_trajectory_json`); the benchmark
+gained a `tool_direct_lookup` column next to `tool_direct` (the gap = the value
+of EHR access at triage). **Leakage discipline** is enforced + asserted in
+`assemble_pmh_for_stay` (`< intime` only). Per-stay logic is unit-tested, and a
+single-case real-data check confirms the mechanism: built over the cohort, the
+tool returns stay `37744212`'s real `days_since_last_admission = 2.71` /
+`same_complaint_as_prior = 1.0`, and feeding that into the disposition tool flips
+it **0.266 (DISCHARGE) → 0.474 (ADMIT)** — matching the feature-vector value for
+that case. **The full `benchmark_pipeline_e2e` has NOT been re-run after this
+change** (its table still reflects the pre-lookup run); the user-run validation
+is regenerate cases (for the new `intime` field) → build index → re-run, then
+read `tool_direct_lookup` vs `tool_direct`. Magnitude unconfirmed at 20 cases;
+mechanism is certain. Full writeup in
+[`agents/case-generation-agent.md`](agents/case-generation-agent.md#patient-history-lookup-for-returning-patients-ehr-integration--implemented).
 
 ### Phase 5: Hospital Infrastructure
 - Synthetic real-time database of hospital rooms and available beds.

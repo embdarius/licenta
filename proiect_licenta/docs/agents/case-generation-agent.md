@@ -330,42 +330,82 @@ parser's follow-up questions); the chief-complaint text is the lossy channel
    caveat in [doctor-agent.md](doctor-agent.md#whats-next) (the 25–35% ED figure
    is from trauma/acuity triage, not admit/discharge).
 
-## Future directions
-
-### Patient-history lookup for returning patients (EHR integration)
+## Patient-history lookup for returning patients (EHR integration) — IMPLEMENTED
 
 **Motivation:** the per-case diagnostic above shows the *entire* residual
 tool-direct↔feature-vector-gated gap on this run is **one returning patient**
 whose prior-encounter numerics (`days_since_last_admission`,
 `same_complaint_as_prior`, …) the runtime cannot reconstruct from a bedside
-interview. Today the runtime handles history in *one* way: the NLP parser/nurse
+interview. The runtime handles history in *one* way today: the NLP parser/nurse
 **asks** the patient (`prior_history`, `n_prior_admissions`) — which recovers the
-coarse PMH flags but not the fine recent-visit numerics. The complementary half
-is to **fetch** prior data for patients already in the system.
+coarse PMH flags but not the fine recent-visit numerics. This is the
+complementary half: **fetch** prior data for patients already in the system.
 
-**Sketch:** a `PatientHistoryLookupTool` keyed on a **`subject_id` / simulated
-MRN** (deliberately *not* fuzzy name/age matching — record linkage is its own
-error-prone subsystem and not worth the thesis risk). For a "known" patient it
-runs the existing `pmh_features.aggregate_pmh` with the **strict
-`prior_*time < current_intime` leakage filter** already used at training, and
-populates the doctor tools' PMH block from real prior encounters; first-time /
-unknown patients fall through to the current ask-the-patient path (the all-zero
-`no_history=1` pattern the model saw on ~39% of training rows). So the two
-sub-populations split exactly the way the model already expects.
+**What shipped:**
 
-**Cautions (documented so the future implementer doesn't trip):**
-- **Leakage is the critical risk.** The lookup must filter to encounters strictly
-  *before* the current `intime`; pulling the current/later visit's discharge
-  summary would leak the outcome and invalidate the numbers. The infra
-  (`aggregate_pmh`) already enforces this at training — the tool must replicate
-  the same filter.
-- **It changes what the benchmark measures** (for the better): tool-direct today
-  models "live ED with no chart access"; with lookup it models "live ED *with*
-  EHR integration." Keep **both** as benchmark columns — the gap between them
-  quantifies *the value of EHR access at triage*, a result in its own right.
-- **Magnitude is unconfirmed at 20 cases.** The mechanism is certain (it targets
-  the exact divergent features), but "it fixes the one flip" is a single data
-  point; the scaled-up benchmark (a few hundred cases) should confirm a
-  with-lookup column meaningfully beats no-lookup before it's a headline claim.
+- **`pmh_features.py` refactor** — `aggregate_pmh` was split into
+  `build_pmh_index(subjects, …)` (the heavy half: parses admissions / edstays /
+  ICD / the 3.3 GB discharge.csv into four per-subject structures) and
+  `assemble_pmh_for_stay(subject_id, intime, complaint_norm, index)` (the cheap
+  per-stay loop body, with the `< intime` leakage filter + an explicit assertion).
+  `aggregate_pmh` now calls both, so training and inference can't drift.
+- **Offline index builder** — `scripts/build_history_index.py` (`uv run
+  build_history_index`, `--from-cases` default / `--all-subjects`) persists the
+  index to `HISTORY_INDEX_PKL` (`artifacts/history/pmh_index.joblib`, gitignored).
+- **`PatientHistoryLookupTool`** (`src/proiect_licenta/tools/patient_history_lookup_tool.py`) —
+  keyed on a **`subject_id` / simulated MRN** (deliberately *not* fuzzy name/age
+  matching — record linkage is its own error-prone subsystem). Loads the index
+  (per-process cache) and returns the real 19-column `pmh_block` for a known
+  patient, or `known_patient=false` for a first-time/unknown subject (or when the
+  index isn't built) so the pipeline keeps its ask-the-patient zero-fill path.
+- **Doctor-tool wiring** — `doctor_disposition_tool.py` and `doctor_tool_v3.py`
+  gained an optional `pmh_lookup_json` arg (mirroring `vital_trajectory_json`):
+  when present the real PMH block **overrides** the text-derived one; when empty
+  they fall back to self-report. `doctor_tool_v3_base.py` uses no PMH, so it's
+  unaffected. The doctor agent in the live crew carries the lookup tool, and
+  `tasks.yaml` instructs it to call the lookup (if an MRN is present) and forward
+  `pmh_lookup_json` into the disposition + reassessment tools.
+- **Benchmark column** — `benchmark_pipeline_e2e.py` adds a **`tool_direct_lookup`**
+  mode (tool-direct + the EHR lookup by the case's real `subject_id`+`intime`)
+  alongside the no-lookup `tool_direct`. The case bundle now carries `intime`
+  (the leakage cutoff). The gap between the two columns = **the value of EHR
+  access at triage**.
 
-Left as a documented future direction (not implemented).
+**Leakage discipline (the critical risk):** `assemble_pmh_for_stay` filters to
+encounters strictly *before* the current `intime` and asserts no surviving prior
+encounter is dated at/after it. The current encounter's own discharge summary can
+never leak because its admit/intime is not strictly before `intime`. The
+`build_pmh_index` notes-by-prior-hadm guard is preserved from `aggregate_pmh`.
+
+**Status / what's verified:** the refactor, builder, tool, doctor-tool override,
+crew/task wiring, and benchmark column are implemented; `assemble_pmh_for_stay`
+is unit-tested (returning patient → real `days_since`/`same_complaint`; future-
+only encounters → excluded; unknown subject → first-timer; ISO-string intime).
+
+**Single-case real-data check (done — the headline mechanism is confirmed).**
+Built the index over the 20-case cohort (`uv run build_history_index --from-cases`,
+~44 s discharge parse) and queried the tool for stay `37744212` (subject
+`17287581`) at its real arrival time: it returns `days_since_last_admission =
+2.71` and `same_complaint_as_prior = 1.0` — **exactly** the divergent features
+the per-case diagnostic identified. Feeding that block into the disposition tool:
+
+| | P(admit) | decision |
+|---|---|---|
+| tool-direct, **no** lookup | 0.266 | DISCHARGE |
+| tool-direct, **with** lookup | **0.474** | **ADMIT** |
+
+0.474 matches the feature-vector's value for this case to 3 dp — the lookup
+closes the gap on the one patient that *was* the gap, flipping it back to the
+correct admit (and thereby restoring its downstream diagnosis/department).
+
+**Full benchmark NOT yet re-run after this change.** The `benchmark_pipeline_e2e`
+table above still reflects the pre-lookup run. The remaining validation is:
+`uv run generate_cases` (regenerate the bundle so cases carry the new `intime`
+field) → `uv run build_history_index` → `uv run python
+benchmarks/benchmark_pipeline_e2e.py`, then read the new `tool_direct_lookup`
+column against `tool_direct` (gap = the value of EHR access at triage).
+
+**Magnitude caveat (unchanged):** at 20 cases this is a **mechanism
+demonstration** — the diagnostic says the gap *is* one patient, so the test is
+"does the one flip flip back?", not "by how many pp does accuracy rise". A scaled
+benchmark (a few hundred cases) is needed before a with-lookup headline claim.

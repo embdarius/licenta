@@ -137,6 +137,36 @@ VITAL_MEDIANS = {
 }
 
 
+def _parse_pmh_lookup(pmh_lookup_json: str):
+    """Parse the PatientHistoryLookupTool `pmh_block` into a full PMH_FEATURE_COLS
+    dict, or return None to fall back to the ask-the-patient text path.
+
+    Accepts either the raw `pmh_block` object or the tool's full output (with a
+    nested `pmh_block`). Returns None on empty/invalid input or a block missing
+    any required column — so a malformed lookup never silently corrupts the
+    feature vector; it just reverts to self-report.
+    """
+    if not pmh_lookup_json or not str(pmh_lookup_json).strip():
+        return None
+    try:
+        obj = json.loads(pmh_lookup_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(obj, dict) and "pmh_block" in obj:
+        obj = obj["pmh_block"]
+    if not isinstance(obj, dict) or not all(col in obj for col in PMH_FEATURE_COLS):
+        return None
+    block = {}
+    for col in PMH_FEATURE_COLS:
+        v = obj[col]
+        if col in ("days_since_last_admission", "days_since_last_ed",
+                   "same_complaint_as_prior"):
+            block[col] = float(v)
+        else:
+            block[col] = int(v)
+    return block
+
+
 def _classify_medications(medications_raw: str) -> dict:
     """Same medication classification used by the v3-nurse tool, duplicated
     here so this tool has no runtime dependency on the nurse tool module."""
@@ -272,6 +302,18 @@ class DoctorDispositionInput(BaseModel):
             "prediction. Empty string if only one reading is available."
         ),
     )
+    pmh_lookup_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON `pmh_block` returned by patient_history_lookup_tool "
+            "for a RETURNING patient (paste it verbatim). When provided, the "
+            "real prior-encounter record (PMH flags AND the days-since-last-"
+            "admission / same-complaint-as-prior numerics a patient can't report "
+            "at the bedside) OVERRIDES the self-reported prior_history / "
+            "n_prior_admissions fields. Empty string for first-time / unknown "
+            "patients — then the self-report fields are used."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +357,7 @@ class DoctorDispositionTool(BaseTool):
         prior_history: str = "",
         n_prior_admissions: int = -1,
         vital_trajectory_json: str = "",
+        pmh_lookup_json: str = "",
     ) -> str:
         models = get_disposition_models()
         tfidf = models["tfidf"]
@@ -379,38 +422,53 @@ class DoctorDispositionTool(BaseTool):
         hypertension = 1 if vital_values["sbp"] > 140 else 0
         hypotension = 1 if vital_values["sbp"] < 90 else 0
 
-        # ── 4. PMH parsing — same logic as v3-nurse tool ──
-        pmh_text = (prior_history or "").strip()
-        pmh_unknown = pmh_text == "" or pmh_text.lower() in (
-            "skip", "unknown", "no", "none", "n/a", "na", "-",
-            "i don't know", "i dont know", "idk",
-            "no significant", "no significant pmh", "no pmh",
-        )
-        if pmh_unknown:
-            pmh_flags_active: set = set()
-            pmh_no_history = 1
+        # ── 4. PMH — EHR lookup (preferred) OR ask-the-patient fallback ──
+        # If patient_history_lookup_tool found a returning patient, its real
+        # prior-encounter block (PMH flags + the days-since / same-complaint
+        # numerics the bedside interview can't recover) overrides the
+        # self-report. Otherwise parse the patient-reported prior_history text
+        # and zero-fill the unrecoverable numerics to the first-time sentinels.
+        lookup_block = _parse_pmh_lookup(pmh_lookup_json)
+        used_history_lookup = lookup_block is not None
+        if used_history_lookup:
+            pmh_data = {col: lookup_block[col] for col in PMH_FEATURE_COLS}
+            pmh_flags_active = {
+                c for c in PMH_CATEGORIES if pmh_data.get(f"pmh_{c}") == 1
+            }
+            pmh_no_history = int(pmh_data["no_history"])
+            n_prior_adm_val = int(pmh_data["n_prior_admissions"])
         else:
-            pmh_flags_active = pmh_flags_from_text(pmh_text)
-            pmh_no_history = 0
+            pmh_text = (prior_history or "").strip()
+            pmh_unknown = pmh_text == "" or pmh_text.lower() in (
+                "skip", "unknown", "no", "none", "n/a", "na", "-",
+                "i don't know", "i dont know", "idk",
+                "no significant", "no significant pmh", "no pmh",
+            )
+            if pmh_unknown:
+                pmh_flags_active: set = set()
+                pmh_no_history = 1
+            else:
+                pmh_flags_active = pmh_flags_from_text(pmh_text)
+                pmh_no_history = 0
 
-        if n_prior_admissions is None or n_prior_admissions < 0:
-            n_prior_adm_val = 0
-            n_prior_ed_val = 0
-            pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
-        else:
-            n_prior_adm_val = int(n_prior_admissions)
-            n_prior_ed_val = 0
-        if pmh_flags_active and pmh_no_history == 1:
-            pmh_no_history = 0
+            if n_prior_admissions is None or n_prior_admissions < 0:
+                n_prior_adm_val = 0
+                n_prior_ed_val = 0
+                pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
+            else:
+                n_prior_adm_val = int(n_prior_admissions)
+                n_prior_ed_val = 0
+            if pmh_flags_active and pmh_no_history == 1:
+                pmh_no_history = 0
 
-        pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
-                    for c in PMH_CATEGORIES}
-        pmh_data["n_prior_admissions"] = n_prior_adm_val
-        pmh_data["n_prior_ed_visits"] = n_prior_ed_val
-        pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
-        pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
-        pmh_data["same_complaint_as_prior"] = 0.0
-        pmh_data["no_history"] = pmh_no_history
+            pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
+                        for c in PMH_CATEGORIES}
+            pmh_data["n_prior_admissions"] = n_prior_adm_val
+            pmh_data["n_prior_ed_visits"] = n_prior_ed_val
+            pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
+            pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
+            pmh_data["same_complaint_as_prior"] = 0.0
+            pmh_data["no_history"] = pmh_no_history
 
         # ── 5. Single-row df for the cascade input (v3 build_features) ──
         df_cascade = pd.DataFrame({
@@ -600,6 +658,17 @@ class DoctorDispositionTool(BaseTool):
                     else None
                 ),
                 "no_history_fallback": bool(pmh_no_history),
+                # EHR lookup: when True, the PMH block came from the real prior
+                # record (patient_history_lookup_tool) rather than self-report —
+                # including the days-since / same-complaint numerics below.
+                "used_history_lookup": bool(used_history_lookup),
+                "history_lookup_numerics": ({
+                    "n_prior_admissions": int(pmh_data["n_prior_admissions"]),
+                    "n_prior_ed_visits": int(pmh_data["n_prior_ed_visits"]),
+                    "days_since_last_admission": float(pmh_data["days_since_last_admission"]),
+                    "days_since_last_ed": float(pmh_data["days_since_last_ed"]),
+                    "same_complaint_as_prior": float(pmh_data["same_complaint_as_prior"]),
+                } if used_history_lookup else None),
             },
             "model_version": "doctor_disposition_v3 (Option B, plan section 3)",
         }

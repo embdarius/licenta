@@ -69,6 +69,9 @@ from proiect_licenta.tools.doctor_disposition_tool import (
 from proiect_licenta.tools.doctor_tool_v3 import DoctorPredictionToolV3
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 from proiect_licenta.tools.nurse_tool import NurseDataCollectionTool
+from proiect_licenta.tools.patient_history_lookup_tool import (
+    PatientHistoryLookupTool, get_history_index,
+)
 
 
 # ===========================================================================
@@ -110,11 +113,33 @@ def _direct_tools():
         _DIRECT_TOOLS["base"] = DoctorPredictionToolV3Base()
         _DIRECT_TOOLS["dispo"] = DoctorDispositionTool()
         _DIRECT_TOOLS["v3"] = DoctorPredictionToolV3()
+        _DIRECT_TOOLS["lookup"] = PatientHistoryLookupTool()
     return _DIRECT_TOOLS
 
 
-def run_tool_direct(case) -> dict:
-    """Replicate the crew pipeline with direct tool calls on exact fields."""
+def _lookup_pmh_json(case) -> str:
+    """Call the PatientHistoryLookupTool with the case's REAL subject_id +
+    intime and return the `pmh_block` as a JSON string (or "" if the patient is
+    unknown / the index isn't built). This is what an EHR lookup for a returning
+    patient would supply at runtime."""
+    tools = _direct_tools()
+    res = json.loads(tools["lookup"]._run(
+        subject_id=int(case.get("subject_id", -1)),
+        current_intime=str(case.get("intime", "")),
+        chief_complaints=case["triage_inputs"]["chief_complaints"],
+    ))
+    if res.get("known_patient") and res.get("pmh_block"):
+        return json.dumps(res["pmh_block"])
+    return ""
+
+
+def run_tool_direct(case, pmh_lookup_json: str = "") -> dict:
+    """Replicate the crew pipeline with direct tool calls on exact fields.
+
+    `pmh_lookup_json` (empty by default) feeds the disposition + v3 tools the
+    real prior-encounter PMH block from an EHR lookup; with "" they use the
+    ask-the-patient self-report path. The two settings give the no-lookup and
+    with-lookup benchmark columns."""
     t = case["triage_inputs"]
     n = case["nurse_inputs"]
     tools = _direct_tools()
@@ -149,7 +174,7 @@ def run_tool_direct(case) -> dict:
         sbp=_vital_arg(nv["sbp"]), dbp=_vital_arg(nv["dbp"]),
         rhythm=n["rhythm"], medications_raw=(n["medications_raw"] or "unknown"),
         prior_history=n["prior_history"], n_prior_admissions=n["n_prior_admissions"],
-        vital_trajectory_json=traj_json,
+        vital_trajectory_json=traj_json, pmh_lookup_json=pmh_lookup_json,
     ))
     out["refined_admit"] = bool(dispo_j["disposition_prediction"]["is_admitted"])
 
@@ -164,11 +189,19 @@ def run_tool_direct(case) -> dict:
             sbp=_vital_arg(nv["sbp"]), dbp=_vital_arg(nv["dbp"]),
             medications_raw=(n["medications_raw"] or "unknown"), rhythm=n["rhythm"],
             prior_history=n["prior_history"], n_prior_admissions=n["n_prior_admissions"],
-            vital_trajectory_json=traj_json,
+            vital_trajectory_json=traj_json, pmh_lookup_json=pmh_lookup_json,
         ))
         out["diag_top3"] = _diag_top3(v3_j)
         out["dept_top3"] = _dept_top3(v3_j)
     return out
+
+
+def run_tool_direct_lookup(case) -> dict:
+    """tool-direct WITH the EHR history lookup: fetch the real prior-encounter
+    PMH block by subject_id and feed it to the disposition + v3 tools. The gap
+    vs the plain tool_direct column = the value of EHR access at triage for
+    returning patients."""
+    return run_tool_direct(case, pmh_lookup_json=_lookup_pmh_json(case))
 
 
 # ===========================================================================
@@ -460,7 +493,7 @@ def main():
     modes = []
     preds = {}
 
-    # Tool-direct
+    # Tool-direct (no lookup — the live ED with no chart access)
     print_section("MODE: tool-direct (exact tabular values, no LLM)")
     preds["tool_direct"] = {}
     modes.append("tool_direct")
@@ -470,6 +503,28 @@ def main():
             print(f"  stay {c['stay_id']}: ok")
         except Exception as e:
             print(f"  stay {c['stay_id']}: ERROR {type(e).__name__}: {e}")
+
+    # Tool-direct + EHR history lookup (returning patients get real prior data).
+    # The gap vs tool_direct = the value of EHR access at triage. Skipped with a
+    # note if the history index hasn't been built.
+    if get_history_index() is None:
+        print_section("MODE: tool-direct-lookup — SKIPPED (no history index)")
+        print("  Run `uv run build_history_index` first to enable this column.")
+    else:
+        print_section("MODE: tool-direct-lookup (EHR history lookup by subject_id)")
+        preds["tool_direct_lookup"] = {}
+        modes.append("tool_direct_lookup")
+        n_known = 0
+        for c in cases:
+            try:
+                pmh_json = _lookup_pmh_json(c)
+                if pmh_json:
+                    n_known += 1
+                preds["tool_direct_lookup"][c["stay_id"]] = run_tool_direct(c, pmh_json)
+                print(f"  stay {c['stay_id']}: ok{' [lookup hit]' if pmh_json else ''}")
+            except Exception as e:
+                print(f"  stay {c['stay_id']}: ERROR {type(e).__name__}: {e}")
+        print(f"  EHR lookup found prior history for {n_known}/{len(cases)} patients.")
 
     # Feature-vector
     if not args.skip_feature_vector:

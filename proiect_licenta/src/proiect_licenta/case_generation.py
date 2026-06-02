@@ -258,6 +258,10 @@ def extract_fields(
     return {
         "stay_id": int(row["stay_id"]),
         "subject_id": int(row["subject_id"]),
+        # Current ED arrival time — the leakage cutoff the PatientHistoryLookupTool
+        # filters prior encounters against (only visits strictly before this are
+        # used). Stored as ISO so the benchmark can feed it to the lookup tool.
+        "intime": str(row["intime"]),
         "ground_truth": {
             "acuity": int(row["acuity"]),
             "disposition": str(row["disposition"]),

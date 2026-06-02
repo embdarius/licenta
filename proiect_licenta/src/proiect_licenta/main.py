@@ -105,6 +105,18 @@ def train_doctor_disposition():
     train_pipeline()
 
 
+def build_history_index():
+    """Build the patient-history (EHR-simulation) index offline
+    (scripts/build_history_index.py). Persists the per-subject prior-encounter
+    structures PatientHistoryLookupTool queries at inference. Pass
+    --all-subjects to index the full population, otherwise the generated
+    cases.json cohort. Heavy: parses discharge.csv."""
+    import runpy
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[2] / "scripts" / "build_history_index.py"
+    runpy.run_path(str(script), run_name="__main__")
+
+
 def generate_cases():
     """Generate synthetic natural-language test cases from MIMIC-IV tabular rows
     (Phase 4 — Case Generation Agent). Samples a stratified admit/discharge set

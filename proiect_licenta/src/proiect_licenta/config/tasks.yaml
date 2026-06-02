@@ -284,11 +284,24 @@ doctor_disposition_task:
          materially improves the admit/discharge prediction. If the block is
          absent or empty, pass an empty string "".
 
-    3. Call the **doctor_disposition_tool** with ALL of the above. ALWAYS
-       call this tool — both for triage-admit and triage-discharge cases.
-       The model was trained on the full 425K stays (admit + discharge in
-       their real-world ratio), so it can both confirm an admit and flip
-       a triage-discharge to admit when warranted.
+    2b. EHR history lookup (returning patients only). If the structured data
+        carries a patient MRN / subject_id (a positive integer), FIRST call
+        the **patient_history_lookup_tool** with that subject_id, the patient's
+        arrival time (current_intime), and the chief_complaints. If it returns
+        `known_patient: true`, serialize its `pmh_block` object to a JSON STRING
+        and pass it to the disposition tool as `pmh_lookup_json` — this supplies
+        the REAL prior-encounter record (PMH flags + the days-since-last-visit /
+        same-complaint numerics a patient can't report at the bedside), which
+        OVERRIDES the self-reported prior_history / n_prior_admissions. If there
+        is no MRN, or it returns `known_patient: false`, pass an empty string ""
+        for `pmh_lookup_json` and rely on the patient's self-report.
+
+    3. Call the **doctor_disposition_tool** with ALL of the above (including
+       `pmh_lookup_json` from step 2b when available). ALWAYS call this tool —
+       both for triage-admit and triage-discharge cases. The model was trained
+       on the full 425K stays (admit + discharge in their real-world ratio),
+       so it can both confirm an admit and flip a triage-discharge to admit
+       when warranted.
 
     4. From the tool output, extract:
        - `disposition_prediction.is_admitted` (bool — the REFINED verdict)
@@ -379,6 +392,11 @@ doctor_reassessment_task:
            JSON has a non-empty `vital_trajectory` object, serialize it to a
            JSON string and pass it so the diagnosis/department models also use
            real vital trends; otherwise pass "".
+         - pmh_lookup_json: if you obtained a `pmh_block` from
+           patient_history_lookup_tool in the disposition step (returning
+           patient with an MRN), pass that same JSON string here so the
+           diagnosis/department models also use the real prior-encounter
+           record; otherwise pass "".
 
        Then provide an enhanced assessment that includes:
          - **Updated diagnosis WITH explicit top-3 + probabilities** from

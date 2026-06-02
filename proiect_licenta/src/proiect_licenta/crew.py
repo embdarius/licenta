@@ -19,6 +19,13 @@ from proiect_licenta.tools.doctor_tool_v3_base import DoctorPredictionToolV3Base
 from proiect_licenta.tools.doctor_tool_v3 import DoctorPredictionToolV3
 from proiect_licenta.tools.doctor_disposition_tool import DoctorDispositionTool
 
+# EHR-simulation lookup: fetches a returning patient's real prior-encounter
+# PMH block (keyed on MRN / subject_id), recovering the days-since-last-visit /
+# same-complaint numerics the bedside interview can't. Fed into the disposition
+# + reassessment tools via their pmh_lookup_json arg. No-op (known_patient=false)
+# for first-time / unknown patients or when the index hasn't been built.
+from proiect_licenta.tools.patient_history_lookup_tool import PatientHistoryLookupTool
+
 
 @CrewBase
 class ProiectLicenta():
@@ -55,6 +62,7 @@ class ProiectLicenta():
             config=self.agents_config['doctor_agent'],  # type: ignore[index]
             tools=[
                 DoctorPredictionToolV3Base(),
+                PatientHistoryLookupTool(),
                 DoctorDispositionTool(),
                 DoctorPredictionToolV3(),
             ],

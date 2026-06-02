@@ -166,8 +166,8 @@ def _parse_discharge_pmh(
     return note_pmh_by_hadm
 
 
-def aggregate_pmh(
-    stays_df: pd.DataFrame,
+def build_pmh_index(
+    subjects: set,
     edstays_full: pd.DataFrame,
     diagnoses_icd_csv_path,
     admissions_csv_path,
@@ -176,44 +176,25 @@ def aggregate_pmh(
     diagnosis_group_map: dict,
     catch_all_label: str | None = None,
     triage_csv_path=TRIAGE_CSV,
-) -> pd.DataFrame:
-    """Build PMH feature columns for every stay in ``stays_df``.
+) -> dict:
+    """Build the per-subject prior-encounter structures PMH features derive from.
 
-    Parameters
-    ----------
-    stays_df : DataFrame with columns ["stay_id", "subject_id", "intime",
-        "complaint_text_norm"]. `intime` must be datetime64.
-        `complaint_text_norm` is the normalize_complaint_text output for the
-        current stay (used for same_complaint_as_prior).
-    edstays_full : Full edstays DataFrame (every ED visit for every patient,
-        not just admitted). Used to count n_prior_ed_visits and to find the
-        most recent prior chief complaint.
-    diagnoses_icd_csv_path : Path to mimic-iv/hosp/diagnoses_icd.csv.
-    admissions_csv_path : Path to mimic-iv/hosp/admissions.csv (for admittime
-        which gates the prior-admission temporal filter).
-    discharge_csv_path : Path to mimic-iv-notes/.../discharge.csv (3.3 GB).
-        Read in chunks; only the subject_ids in `stays_df` are kept.
-    diagnosis_csv_path : Path to categorized_diagnosis.csv (for the
-        ICD→category lookup table).
-    diagnosis_group_map : Maps the ED `category` strings to the 13 PMH
-        diagnosis groups (same map used to build supervision labels in the
-        doctor pipeline).
-    catch_all_label : Optional. If provided, ICD codes that map to this label
-        are dropped from the PMH flag set (since the catch-all is a coding
-        artifact, not a real chronic condition). In v3 this is the
-        "Symptoms, Signs, Ill-Defined" group.
-    triage_csv_path : Path to triage.csv (defaults to project-level constant).
-        Used to look up the chief complaint of each prior ED visit for the
-        same-complaint Jaccard feature.
+    This is the heavy half of the PMH pipeline (it parses the 3.3 GB
+    discharge.csv); the per-stay assembly is cheap by comparison. The index is
+    built ONCE over a set of subject_ids and then queried per stay by
+    ``assemble_pmh_for_stay``, which applies the ``< intime`` leakage filter
+    using the *current* stay's intime. Persisting this index (joblib) and
+    querying it at inference is how ``PatientHistoryLookupTool`` simulates an
+    EHR lookup without re-parsing the source tables.
 
-    Returns
-    -------
-    DataFrame keyed on stay_id with the PMH_FEATURE_COLS columns.
+    Returns a dict with keys:
+        adm_by_subject    {subject_id: sorted [(admittime, hadm_id), ...]}
+        ed_by_subject     {subject_id: sorted [(intime, stay_id, complaint_norm), ...]}
+        icd_pmh_by_hadm   {hadm_id: set(diagnosis_groups)}  (ICD-derived)
+        note_pmh_by_hadm  {hadm_id: set(diagnosis_groups)}  (discharge-note-derived)
     """
-    print("  Building PMH features (this is the heaviest step)...")
-    needed_subjects = set(stays_df["subject_id"].astype(int).tolist())
-    print(f"    Target stays: {len(stays_df):,} across "
-          f"{len(needed_subjects):,} patients")
+    needed_subjects = set(int(s) for s in subjects)
+    print(f"  Building PMH index over {len(needed_subjects):,} patients...")
 
     # ── (1) Prior hospital admissions (subject_id, hadm_id, admittime) ──
     print("    Loading admissions.csv...")
@@ -291,7 +272,161 @@ def aggregate_pmh(
         note_pmh_by_hadm = _parse_discharge_pmh(discharge_csv_path, needed_subjects)
     print(f"    Discharge-note PMH parsed for {len(note_pmh_by_hadm):,} admissions")
 
-    # ── (5) Per-stay assembly ──
+    return {
+        "adm_by_subject": adm_by_subject,
+        "ed_by_subject": ed_by_subject,
+        "icd_pmh_by_hadm": icd_pmh_by_hadm,
+        "note_pmh_by_hadm": note_pmh_by_hadm,
+    }
+
+
+def assemble_pmh_for_stay(
+    subject_id: int,
+    intime,
+    complaint_norm: str,
+    index: dict,
+) -> dict:
+    """Derive the 19-column PMH feature record for ONE stay from a prebuilt
+    ``index`` (see ``build_pmh_index``), applying the strict
+    ``prior_*time < intime`` leakage filter.
+
+    ``intime`` may be a pandas Timestamp / datetime or an ISO string. Returns a
+    dict keyed by PMH_FEATURE_COLS (no stay_id). First-time patients (no prior
+    admission or ED visit before ``intime``) get the all-zero no_history=1
+    pattern — identical to the runtime ask-the-patient fallback, so known and
+    unknown patients split exactly the way the model was trained to expect.
+    """
+    intime = pd.to_datetime(intime)
+    sid = int(subject_id)
+
+    adm_by_subject = index["adm_by_subject"]
+    ed_by_subject = index["ed_by_subject"]
+    icd_pmh_by_hadm = index["icd_pmh_by_hadm"]
+    note_pmh_by_hadm = index["note_pmh_by_hadm"]
+
+    prior_adm = [(at, hid) for at, hid in adm_by_subject.get(sid, [])
+                 if at < intime]
+    prior_ed = [(it, _, cc) for it, _, cc in ed_by_subject.get(sid, [])
+                if it < intime]
+
+    # Leakage guard: nothing at/after the current intime may survive the filter.
+    # The list comprehensions already enforce this; the assertions make the
+    # invariant explicit so a future change to the filter can't silently leak.
+    assert all(at < intime for at, _ in prior_adm), "PMH leak: prior admission >= intime"
+    assert all(it < intime for it, _, _ in prior_ed), "PMH leak: prior ED visit >= intime"
+
+    n_prior_adm = len(prior_adm)
+    n_prior_ed = len(prior_ed)
+
+    if prior_adm:
+        days_last_adm = max(
+            0.0,
+            (intime - prior_adm[-1][0]).total_seconds() / 86400.0,
+        )
+        days_last_adm = float(min(days_last_adm, PMH_NO_PRIOR_DAYS))
+    else:
+        days_last_adm = float(PMH_NO_PRIOR_DAYS)
+
+    if prior_ed:
+        days_last_ed = max(
+            0.0,
+            (intime - prior_ed[-1][0]).total_seconds() / 86400.0,
+        )
+        days_last_ed = float(min(days_last_ed, PMH_NO_PRIOR_DAYS))
+    else:
+        days_last_ed = float(PMH_NO_PRIOR_DAYS)
+
+    if prior_ed and complaint_norm:
+        cur_tokens = _normalize_complaint_tokens(complaint_norm)
+        prev_tokens = _normalize_complaint_tokens(prior_ed[-1][2])
+        if cur_tokens and prev_tokens:
+            inter = len(cur_tokens & prev_tokens)
+            union = len(cur_tokens | prev_tokens)
+            same_complaint = inter / union if union else 0.0
+        else:
+            same_complaint = 0.0
+    else:
+        same_complaint = 0.0
+
+    flags: set = set()
+    for _, hid in prior_adm:
+        flags |= note_pmh_by_hadm.get(hid, set())
+        flags |= icd_pmh_by_hadm.get(hid, set())
+
+    rec = {}
+    for cat in PMH_CATEGORIES:
+        rec[f"pmh_{cat}"] = 1 if cat in flags else 0
+    rec["n_prior_admissions"] = n_prior_adm
+    rec["n_prior_ed_visits"] = n_prior_ed
+    rec["days_since_last_admission"] = days_last_adm
+    rec["days_since_last_ed"] = days_last_ed
+    rec["same_complaint_as_prior"] = round(same_complaint, 4)
+    rec["no_history"] = int(n_prior_adm == 0 and n_prior_ed == 0)
+    return rec
+
+
+def aggregate_pmh(
+    stays_df: pd.DataFrame,
+    edstays_full: pd.DataFrame,
+    diagnoses_icd_csv_path,
+    admissions_csv_path,
+    discharge_csv_path,
+    diagnosis_csv_path,
+    diagnosis_group_map: dict,
+    catch_all_label: str | None = None,
+    triage_csv_path=TRIAGE_CSV,
+) -> pd.DataFrame:
+    """Build PMH feature columns for every stay in ``stays_df``.
+
+    Parameters
+    ----------
+    stays_df : DataFrame with columns ["stay_id", "subject_id", "intime",
+        "complaint_text_norm"]. `intime` must be datetime64.
+        `complaint_text_norm` is the normalize_complaint_text output for the
+        current stay (used for same_complaint_as_prior).
+    edstays_full : Full edstays DataFrame (every ED visit for every patient,
+        not just admitted). Used to count n_prior_ed_visits and to find the
+        most recent prior chief complaint.
+    diagnoses_icd_csv_path : Path to mimic-iv/hosp/diagnoses_icd.csv.
+    admissions_csv_path : Path to mimic-iv/hosp/admissions.csv (for admittime
+        which gates the prior-admission temporal filter).
+    discharge_csv_path : Path to mimic-iv-notes/.../discharge.csv (3.3 GB).
+        Read in chunks; only the subject_ids in `stays_df` are kept.
+    diagnosis_csv_path : Path to categorized_diagnosis.csv (for the
+        ICD→category lookup table).
+    diagnosis_group_map : Maps the ED `category` strings to the 13 PMH
+        diagnosis groups (same map used to build supervision labels in the
+        doctor pipeline).
+    catch_all_label : Optional. If provided, ICD codes that map to this label
+        are dropped from the PMH flag set (since the catch-all is a coding
+        artifact, not a real chronic condition). In v3 this is the
+        "Symptoms, Signs, Ill-Defined" group.
+    triage_csv_path : Path to triage.csv (defaults to project-level constant).
+        Used to look up the chief complaint of each prior ED visit for the
+        same-complaint Jaccard feature.
+
+    Returns
+    -------
+    DataFrame keyed on stay_id with the PMH_FEATURE_COLS columns.
+    """
+    print("  Building PMH features (this is the heaviest step)...")
+    needed_subjects = set(stays_df["subject_id"].astype(int).tolist())
+    print(f"    Target stays: {len(stays_df):,} across "
+          f"{len(needed_subjects):,} patients")
+
+    index = build_pmh_index(
+        subjects=needed_subjects,
+        edstays_full=edstays_full,
+        diagnoses_icd_csv_path=diagnoses_icd_csv_path,
+        admissions_csv_path=admissions_csv_path,
+        discharge_csv_path=discharge_csv_path,
+        diagnosis_csv_path=diagnosis_csv_path,
+        diagnosis_group_map=diagnosis_group_map,
+        catch_all_label=catch_all_label,
+        triage_csv_path=triage_csv_path,
+    )
+
+    # ── Per-stay assembly (cheap; queries the prebuilt index) ──
     print("    Assembling per-stay PMH features...")
     out_records = []
     _iter = zip(
@@ -307,58 +442,8 @@ def aggregate_pmh(
         unit="stay",
         leave=False,
     ):
-        prior_adm = [(at, hid) for at, hid in adm_by_subject.get(sid, [])
-                     if at < intime]
-        prior_ed = [(it, _, cc) for it, _, cc in ed_by_subject.get(sid, [])
-                    if it < intime]
-
-        n_prior_adm = len(prior_adm)
-        n_prior_ed = len(prior_ed)
-
-        if prior_adm:
-            days_last_adm = max(
-                0.0,
-                (intime - prior_adm[-1][0]).total_seconds() / 86400.0,
-            )
-            days_last_adm = float(min(days_last_adm, PMH_NO_PRIOR_DAYS))
-        else:
-            days_last_adm = float(PMH_NO_PRIOR_DAYS)
-
-        if prior_ed:
-            days_last_ed = max(
-                0.0,
-                (intime - prior_ed[-1][0]).total_seconds() / 86400.0,
-            )
-            days_last_ed = float(min(days_last_ed, PMH_NO_PRIOR_DAYS))
-        else:
-            days_last_ed = float(PMH_NO_PRIOR_DAYS)
-
-        if prior_ed and complaint_norm:
-            cur_tokens = _normalize_complaint_tokens(complaint_norm)
-            prev_tokens = _normalize_complaint_tokens(prior_ed[-1][2])
-            if cur_tokens and prev_tokens:
-                inter = len(cur_tokens & prev_tokens)
-                union = len(cur_tokens | prev_tokens)
-                same_complaint = inter / union if union else 0.0
-            else:
-                same_complaint = 0.0
-        else:
-            same_complaint = 0.0
-
-        flags: set = set()
-        for _, hid in prior_adm:
-            flags |= note_pmh_by_hadm.get(hid, set())
-            flags |= icd_pmh_by_hadm.get(hid, set())
-
-        rec = {"stay_id": stay_id}
-        for cat in PMH_CATEGORIES:
-            rec[f"pmh_{cat}"] = 1 if cat in flags else 0
-        rec["n_prior_admissions"] = n_prior_adm
-        rec["n_prior_ed_visits"] = n_prior_ed
-        rec["days_since_last_admission"] = days_last_adm
-        rec["days_since_last_ed"] = days_last_ed
-        rec["same_complaint_as_prior"] = round(same_complaint, 4)
-        rec["no_history"] = int(n_prior_adm == 0 and n_prior_ed == 0)
+        rec = {"stay_id": stay_id,
+               **assemble_pmh_for_stay(sid, intime, complaint_norm, index)}
         out_records.append(rec)
 
     result = pd.DataFrame(out_records)

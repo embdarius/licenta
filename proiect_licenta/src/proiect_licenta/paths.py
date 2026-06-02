@@ -82,3 +82,13 @@ DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # nurse step. metadata.json gains a "disposition" sub-block.
 DOCTOR_V3_BASE_DIR = ARTIFACTS_DIR / "doctor" / "v3_base"
 DOCTOR_V3_DIR = ARTIFACTS_DIR / "doctor" / "v3"
+
+# ---- Patient-history (EHR-simulation) index -----------------------------
+# Prebuilt per-subject prior-encounter index (admissions / ED visits / ICD /
+# discharge-note PMH) produced offline by `uv run build_history_index`
+# (pmh_features.build_pmh_index). PatientHistoryLookupTool loads this at
+# inference and queries it per patient with the strict `< intime` leakage
+# filter, simulating an EHR record lookup for returning patients without
+# re-parsing the 3.3 GB discharge.csv. Gitignored (MIMIC DUA).
+HISTORY_INDEX_DIR = ARTIFACTS_DIR / "history"
+HISTORY_INDEX_PKL = HISTORY_INDEX_DIR / "pmh_index.joblib"
