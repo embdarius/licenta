@@ -595,6 +595,22 @@ The **Case Generation Agent** (`src/proiect_licenta/case_generation.py`,
 Remaining for the phase: scale beyond the 20-case validation set; optionally
 use generated cases as augmentation for model training.
 
+**Patient-history lookup for returning patients (documented future direction).**
+A per-case diagnostic on the 0.40 run showed the *entire* residual
+tool-direct↔feature-vector-gated gap is one returning patient whose
+prior-encounter numerics (`days_since_last_admission`, `same_complaint_as_prior`)
+the runtime can't reconstruct from a bedside interview — it can only *ask* for
+history, not *fetch* it. A `PatientHistoryLookupTool` keyed on `subject_id` /
+simulated MRN (not fuzzy name matching) would run the existing
+`pmh_features.aggregate_pmh` with the strict `< intime` leakage filter to
+populate PMH from real prior encounters for known patients, while first-time
+patients keep the current ask-the-patient zero-fill path. Report both
+no-lookup and with-lookup benchmark columns (the gap = the value of EHR access
+at triage). **Leakage discipline is the critical risk** — the lookup must filter
+to encounters strictly before the current `intime`. Magnitude unconfirmed at 20
+cases; mechanism is certain. Full sketch + cautions in
+[`agents/case-generation-agent.md`](agents/case-generation-agent.md#future-directions).
+
 ### Phase 5: Hospital Infrastructure
 - Synthetic real-time database of hospital rooms and available beds.
 - Admission routing based on department prediction and bed availability.

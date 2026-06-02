@@ -258,6 +258,59 @@ coverage, and within ~8pp on diagnosis@1.
    to discharge (11/13 covered vs 13/13). Closing it further requires a stronger
    disposition model (raising the gated ceiling), not the NL layer.
 
+### Why tool-direct ≠ feature-vector-gated even without the LLM
+
+tool-direct has **no LLM** — so why isn't it identical to feature-vector-gated,
+which runs the *same models at the same 0.40 threshold*? Because the two paths
+**build the feature vector differently**. feature-vector(-gated) calls the
+training pipeline's `build_features()` on the raw MIMIC row, so it has every
+column the models were trained on, straight from the tables. tool-direct
+**reconstructs** that ~2116-column vector inside the tool, from only the fields a
+live patient/nurse can actually report — and some columns cannot be reconstructed
+from a bedside interview. On a borderline case a small feature difference flips a
+gate decision (P(admit) crossing 0.40) or a top-1 argmax; at 13 cases one flip =
+7.7pp. The runtime divergences (all verified in the tools/loaders):
+
+1. **Prior-encounter numerics cannot be reconstructed.** The loader computes
+   `days_since_last_admission`, `days_since_last_ed`, `n_prior_ed_visits`, and
+   `same_complaint_as_prior` (Jaccard vs the patient's last visit) from prior
+   MIMIC encounters. A patient at the bedside can't report these, so the tool
+   zero-fills to the first-time-patient sentinel (`days_since = 9999`,
+   `same_complaint = 0`). **This is unrecoverable by asking — only by an EHR
+   lookup** (see Future directions).
+2. **PMH flags round-trip through text.** feature-vector reads `pmh_<group>`
+   flags directly from prior discharge-note parsing + ICD codes; tool-direct
+   reverse-maps those flags to phrases ("congestive heart failure") and re-parses
+   them through `pmh_vocab`. Asymmetric vocab coverage can drop/add a flag.
+3. **Rhythm: one reading vs many.** The loader aggregates rhythm across all
+   readings in the 4h window (`irregular=1` if *any* reading is non-sinus); the
+   runtime buckets only the first reported rhythm string.
+4. **Medications: different vocab coverage.** feature-vector flags come from the
+   real `medrecon` aggregation (drug name + pharmacy-class `etcdescription`);
+   tool-direct re-parses only patient-reported drug names through `med_vocab`.
+5. **Cascade computation.** The triage acuity/disposition cascade columns are
+   computed slightly differently between the two paths (a few columns of ~2116).
+6. **Rounding** of trajectory readings to 1 decimal in the tool path (trivial).
+
+**Evidence — the entire tool-direct↔gated gap on this run is one patient.** A
+per-case diff (`feature-vector` vs the tool's internal vector) found exactly
+**one** flip: stay `37744212`, a 63yo walk-in with abdominal pain. feature-vector
+admits her (P=0.474); tool-direct discharges her (P=0.266). The two vectors
+differ in **10 of ~2116 columns and 0 TF-IDF columns** — the complaint text
+round-trips perfectly. The dominant 4 are the prior-encounter numerics above:
+she was admitted **2.7 days ago for the same complaint** (`days_since_last_admission`
+2.71→9999, `same_complaint_as_prior` 1→0). feature-vector sees "frequent recent
+admit, same problem → admit"; tool-direct is structurally blind to it. The other
+6 differing columns are the cascade probabilities (#5).
+
+**Interpretation for the thesis:** tool-direct is arguably the *more honest*
+number and feature-vector-gated is a mildly optimistic upper bound — the gated
+path uses prior-encounter features a real ED does **not** have at triage for a
+walk-in. The ~1-case gap is the cost of *information the live system cannot
+observe*, a permanent property of deployment, not an engineering defect. (The
+one lever that *would* recover it — an EHR lookup for returning patients — is in
+Future directions.)
+
 **NL-fidelity (parser-extracted vs tabular truth):** cases with parser output
 20/20; age 18/20; gender 20/20; arrival transport 20/20; mean chief-complaint
 token Jaccard **0.657**. Demographics survive the round-trip (recoverable via the
@@ -276,3 +329,43 @@ parser's follow-up questions); the chief-complaint text is the lossy channel
    are judged substantially costlier than false admits — but see the over-triage
    caveat in [doctor-agent.md](doctor-agent.md#whats-next) (the 25–35% ED figure
    is from trauma/acuity triage, not admit/discharge).
+
+## Future directions
+
+### Patient-history lookup for returning patients (EHR integration)
+
+**Motivation:** the per-case diagnostic above shows the *entire* residual
+tool-direct↔feature-vector-gated gap on this run is **one returning patient**
+whose prior-encounter numerics (`days_since_last_admission`,
+`same_complaint_as_prior`, …) the runtime cannot reconstruct from a bedside
+interview. Today the runtime handles history in *one* way: the NLP parser/nurse
+**asks** the patient (`prior_history`, `n_prior_admissions`) — which recovers the
+coarse PMH flags but not the fine recent-visit numerics. The complementary half
+is to **fetch** prior data for patients already in the system.
+
+**Sketch:** a `PatientHistoryLookupTool` keyed on a **`subject_id` / simulated
+MRN** (deliberately *not* fuzzy name/age matching — record linkage is its own
+error-prone subsystem and not worth the thesis risk). For a "known" patient it
+runs the existing `pmh_features.aggregate_pmh` with the **strict
+`prior_*time < current_intime` leakage filter** already used at training, and
+populates the doctor tools' PMH block from real prior encounters; first-time /
+unknown patients fall through to the current ask-the-patient path (the all-zero
+`no_history=1` pattern the model saw on ~39% of training rows). So the two
+sub-populations split exactly the way the model already expects.
+
+**Cautions (documented so the future implementer doesn't trip):**
+- **Leakage is the critical risk.** The lookup must filter to encounters strictly
+  *before* the current `intime`; pulling the current/later visit's discharge
+  summary would leak the outcome and invalidate the numbers. The infra
+  (`aggregate_pmh`) already enforces this at training — the tool must replicate
+  the same filter.
+- **It changes what the benchmark measures** (for the better): tool-direct today
+  models "live ED with no chart access"; with lookup it models "live ED *with*
+  EHR integration." Keep **both** as benchmark columns — the gap between them
+  quantifies *the value of EHR access at triage*, a result in its own right.
+- **Magnitude is unconfirmed at 20 cases.** The mechanism is certain (it targets
+  the exact divergent features), but "it fixes the one flip" is a single data
+  point; the scaled-up benchmark (a few hundred cases) should confirm a
+  with-lookup column meaningfully beats no-lookup before it's a headline claim.
+
+Left as a documented future direction (not implemented).
