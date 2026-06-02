@@ -63,7 +63,9 @@ from proiect_licenta.tools import triage_tool, doctor_tool_v3_base, \
     doctor_disposition_tool, doctor_tool_v3, ask_patient_tool, nurse_tool
 from proiect_licenta.tools.triage_tool import TriagePredictionTool
 from proiect_licenta.tools.doctor_tool_v3_base import DoctorPredictionToolV3Base
-from proiect_licenta.tools.doctor_disposition_tool import DoctorDispositionTool
+from proiect_licenta.tools.doctor_disposition_tool import (
+    DoctorDispositionTool, DECISION_THRESHOLD,
+)
 from proiect_licenta.tools.doctor_tool_v3 import DoctorPredictionToolV3
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 from proiect_licenta.tools.nurse_tool import NurseDataCollectionTool
@@ -197,8 +199,11 @@ def run_feature_vector(case, cache_entry) -> dict:
     # already computed via the triage v3 acuity model.
     acu_probs = [float(Xd[f"triage_acuity_proba_{k}"].iloc[0]) for k in range(1, 6)]
     out["acuity"] = int(np.argmax(acu_probs)) + 1
+    # Gate at the SAME threshold the live pipeline uses (DECISION_THRESHOLD),
+    # so feature_vector_gated is apples-to-apples with the tool/E2E columns.
+    # (triage_admit is the raw triage-v3 screening verdict, kept at its own 0.5.)
     out["triage_admit"] = float(Xd["triage_disposition_proba_admit"].iloc[0]) >= 0.5
-    out["refined_admit"] = float(m["dispo"].predict_proba(Xd)[0, 1]) >= 0.5
+    out["refined_admit"] = float(m["dispo"].predict_proba(Xd)[0, 1]) >= DECISION_THRESHOLD
 
     if "nurse_v3_features" in cache_entry:
         Xn = cache_entry["nurse_v3_features"]

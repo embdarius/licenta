@@ -310,8 +310,12 @@ doctor_disposition_task:
        - **Clinical reasoning:** list the `reasoning` bullets from the
          tool plus any additional inference (PMH categories that fired,
          abnormal vital signs, non-sinus rhythm, polypharmacy, etc.).
-       - **Operating point note:** the model uses a 0.5 threshold by
-         default; mention this so the threshold choice is transparent.
+       - **Operating point note:** the model uses a 0.40 admit threshold
+         (tuned from 0.50 to reduce under-triage — missed admissions are the
+         costlier error in an ED); mention this so the threshold choice is
+         transparent. Read the actual value from the tool's
+         `disposition_prediction.decision_threshold` field rather than
+         hard-coding it.
 
     IMPORTANT: At the END of your response, you MUST include the updated
     structured data block so the reassessment task uses THIS task's
@@ -400,8 +404,8 @@ doctor_reassessment_task:
        Do NOT call the diagnosis/department tool. Instead:
        - Confirm the discharge recommendation from the disposition task.
        - If the disposition task overrode triage's admit to discharge,
-         explain the clinical rationale (calibrated P(discharge) was high
-         enough at the 0.5 threshold).
+         explain the clinical rationale (P(admit) fell below the tool's
+         decision threshold — see `disposition_prediction.decision_threshold`).
        - Suggest outpatient diagnoses to investigate based on the
          complaint pattern.
        - Provide follow-up recommendations (when to return, what to

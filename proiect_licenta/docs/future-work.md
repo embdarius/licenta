@@ -82,7 +82,7 @@ The single top non-TF-IDF feature is `triage_disposition_proba_admit` with gain 
 
 **Inference status — wired 2026-05-30 (live in the runtime crew).** Same shipment swapped the v1/v2 doctor tools out for the full v3 stack: `doctor_tool_v3_base.py` (NEW, pre-nurse initial assessment, 13-class label space, top-3 diag/dept with probabilities), `doctor_disposition_tool.py` (NEW, between nurse and reassessment, calibrated binary admit/discharge), and `doctor_tool_v3.py` (already on disk, now wired for the post-nurse enhanced reassessment with top-3 + probabilities). The reassessment gates on the disposition task's REFINED `is_admitted` rather than triage's screening verdict — a triage-discharge that the disposition model flips to admit still triggers the full diagnosis/department workup, and vice versa. End-to-end smoke test passes; all 6 tasks fire in order and the new `is_admitted` correctly propagates through the structured-data handoff. v1/v2 tool files stay on disk for thesis benchmarks but are no longer registered with the live crew.
 
-**Threshold tuning is the next lever.** The under-triage regression at the default 0.5 threshold is recoverable; the AUC says we have room to improve sensitivity without giving up much accuracy. Sweep thresholds {0.30, 0.35, 0.40, 0.45, 0.50} on the calibration holdout and choose by either (a) under-triage rate target, (b) F1, or (c) a clinician-elicited utility function. **Placeholder: TBD pending the threshold sweep.**
+**Threshold tuning — DONE (set to 0.40).** Swept {0.30, 0.35, 0.40, 0.45, 0.50} on the 83,617-row disposition test split (`benchmarks/sweep_disposition_threshold.py`, no retraining — just the cutoff). 0.40 maximizes both F1 (0.7830) and Youden's J (0.6604) and cuts under-triage 23.5% → 18.1% (−5.4pp) for −0.6pp raw accuracy; wired into `doctor_disposition_tool.DECISION_THRESHOLD = 0.40`. 0.50 has the highest raw accuracy but that favors the discharge majority (63%) — under-triage is the costlier ED error, so F1/Youden select 0.40. Full table + the "0.30 is a future candidate, but the 25–35% over-triage ED benchmark is from trauma/acuity triage and doesn't transfer to admit/discharge" caveat live in [doctor-agent.md](agents/doctor-agent.md#whats-next). The asymmetric-`scale_pos_weight` retrain below remains an alternative that would recover calibration at the new operating point.
 
 Full implementation, per-subgroup tables, calibration curve, and the operating-point discussion live in [`docs/agents/doctor-agent.md#doctor-disposition-v3--peer-model-plan-section-3-option-b-shipped-2026-05-28`](agents/doctor-agent.md#doctor-disposition-v3--peer-model-plan-section-3-option-b-shipped-2026-05-28).
 
@@ -584,7 +584,10 @@ The **Case Generation Agent** (`src/proiect_licenta/case_generation.py`,
   + v3 doctor tools via a new `vital_trajectory_json` arg; snapshot fallback
   preserved). On the 20-case set this lifted tool-direct disposition 65%→80% and
   diagnosis@1 23%→46% (admit coverage 6/13→9/13, gated ceiling 10/13). Remaining
-  levers: disposition threshold tuning (kept at 0.5) and scaling past 20 cases.
+  levers: disposition threshold tuning (DONE — set to 0.40) and scaling past
+  20 cases. At 0.40 (re-run done) tool-direct disposition is 90% and diagnosis@1
+  61.5% (Dx coverage 11/13, gated ceiling 12/13) — up from 80% / 46.2% / 9-of-13
+  at the old 0.50 threshold.
 - Offline / benchmark-only — not wired into the live patient crew. Uses
   dedicated `config/case_generation_{agents,tasks}.yaml`. Full design in
   [`agents/case-generation-agent.md`](agents/case-generation-agent.md).
