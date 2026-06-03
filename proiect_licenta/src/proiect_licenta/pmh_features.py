@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from proiect_licenta.paths import TRIAGE_CSV
+from proiect_licenta.paths import TRIAGE_CSV, MEDRECON_CSV
 from proiect_licenta.pmh_vocab import (
     PMH_CATEGORIES,
     flags_from_text as pmh_flags_from_text,
@@ -234,6 +234,8 @@ def build_pmh_index(
     diagnosis_group_map: dict,
     catch_all_label: str | None = None,
     triage_csv_path=TRIAGE_CSV,
+    medrecon_csv_path=MEDRECON_CSV,
+    include_meds: bool = True,
 ) -> dict:
     """Build the per-subject prior-encounter structures PMH features derive from.
 
@@ -245,11 +247,19 @@ def build_pmh_index(
     querying it at inference is how ``PatientHistoryLookupTool`` simulates an
     EHR lookup without re-parsing the source tables.
 
+    ``include_meds`` (default True) additionally aggregates ``medrecon.csv`` into
+    a per-stay medication block, enabling the lookup tool to return a returning
+    patient's prior med list (queried leakage-safe via ``assemble_meds_for_stay``).
+    The training pipelines build their own current-stay med features, so they
+    call this with ``include_meds=False`` to skip the extra read.
+
     Returns a dict with keys:
         adm_by_subject    {subject_id: sorted [(admittime, hadm_id), ...]}
         ed_by_subject     {subject_id: sorted [(intime, stay_id, complaint_norm), ...]}
         icd_pmh_by_hadm   {hadm_id: set(diagnosis_groups)}  (ICD-derived)
         note_pmh_by_hadm  {hadm_id: set(diagnosis_groups)}  (discharge-note-derived)
+        med_by_stay       {stay_id: {MED_FEATURE_COLS}}     (per-stay medrecon block;
+                          empty dict when include_meds=False)
     """
     needed_subjects = set(int(s) for s in subjects)
     print(f"  Building PMH index over {len(needed_subjects):,} patients...")
@@ -330,11 +340,39 @@ def build_pmh_index(
         note_pmh_by_hadm = _parse_discharge_pmh(discharge_csv_path, needed_subjects)
     print(f"    Discharge-note PMH parsed for {len(note_pmh_by_hadm):,} admissions")
 
+    # ── (5) Per-stay medication block from medrecon.csv (ED home-med list) ──
+    # Keyed on the ED stay_id (medrecon's grain). Aggregated with the SAME
+    # recipe training uses (`flags_from_row` OR'd across rows). The lookup tool
+    # then returns a RETURNING patient's most-recent PRIOR stay's block via
+    # `assemble_meds_for_stay` (leakage-safe, `< intime`). Skipped when
+    # include_meds=False (training builds its own current-stay med features).
+    med_by_stay: dict[int, dict] = {}
+    if include_meds:
+        # Local import avoids a package-level circular import: importing
+        # proiect_licenta.tools runs tools/__init__, which imports triage_tool,
+        # which imports this module. By call time the cycle is resolved.
+        from proiect_licenta.tools.med_vocab import med_block_from_rows
+        needed_stays = set(int(s) for s in ed_subset["stay_id"].dropna().tolist())
+        print(f"    Loading medrecon.csv ({medrecon_csv_path})...")
+        if not Path(medrecon_csv_path).exists():
+            print(f"    WARNING: {medrecon_csv_path} not found — skipping med index.")
+        else:
+            med = pd.read_csv(
+                medrecon_csv_path, usecols=["stay_id", "name", "etcdescription"],
+            )
+            med = med[med["stay_id"].isin(needed_stays)]
+            for sid, grp in med.groupby("stay_id"):
+                med_by_stay[int(sid)] = med_block_from_rows(
+                    grp["name"].tolist(), grp["etcdescription"].tolist(),
+                )
+            print(f"    medrecon.csv: med block built for {len(med_by_stay):,} stays")
+
     return {
         "adm_by_subject": adm_by_subject,
         "ed_by_subject": ed_by_subject,
         "icd_pmh_by_hadm": icd_pmh_by_hadm,
         "note_pmh_by_hadm": note_pmh_by_hadm,
+        "med_by_stay": med_by_stay,
     }
 
 
@@ -423,6 +461,39 @@ def assemble_pmh_for_stay(
     return rec
 
 
+def assemble_meds_for_stay(subject_id: int, intime, index: dict):
+    """Return the medication block for the patient's MOST RECENT PRIOR ED stay
+    (strictly before ``intime``), leakage-safe by the same ``< intime`` rule as
+    ``assemble_pmh_for_stay``. Returns ``None`` when the subject has no prior ED
+    stay carrying a medrecon record (→ the lookup reports no med record and the
+    runtime keeps its ask-the-patient path), or when the index was built without
+    medications (``include_meds=False`` / an older index).
+
+    Medications come from the patient's last documented home-med list (medrecon),
+    NOT the current encounter — a live patient's current med list is exactly what
+    the nurse is collecting, so the EHR can only supply the prior visit's list.
+    This is the honest deployment semantics (a strong proxy for stable chronic
+    meds), at the cost of not matching a visit where the patient's meds changed.
+    """
+    intime = pd.to_datetime(intime)
+    sid = int(subject_id)
+    med_by_stay = index.get("med_by_stay") or {}
+    if not med_by_stay:
+        return None
+    ed_by_subject = index.get("ed_by_subject", {})
+    # Prior ED stays strictly before intime, most-recent first.
+    prior_ed = sorted(
+        ((it, stid) for it, stid, _ in ed_by_subject.get(sid, []) if it < intime),
+        reverse=True,
+    )
+    assert all(it < intime for it, _ in prior_ed), "MED leak: prior ED visit >= intime"
+    for _, stid in prior_ed:
+        block = med_by_stay.get(int(stid))
+        if block is not None:
+            return dict(block)
+    return None
+
+
 def aggregate_pmh(
     stays_df: pd.DataFrame,
     edstays_full: pd.DataFrame,
@@ -482,6 +553,7 @@ def aggregate_pmh(
         diagnosis_group_map=diagnosis_group_map,
         catch_all_label=catch_all_label,
         triage_csv_path=triage_csv_path,
+        include_meds=False,  # training builds its own current-stay med features
     )
 
     # ── Per-stay assembly (cheap; queries the prebuilt index) ──

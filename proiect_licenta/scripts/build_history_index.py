@@ -118,6 +118,7 @@ def main():
     print(f"  ed_by_subject  : {len(index['ed_by_subject']):,} subjects with ED visits")
     print(f"  icd_pmh_by_hadm: {len(index['icd_pmh_by_hadm']):,} admissions with ICD PMH")
     print(f"  note_pmh_by_hadm:{len(index['note_pmh_by_hadm']):,} admissions with note PMH")
+    print(f"  med_by_stay    : {len(index.get('med_by_stay', {})):,} stays with a medrecon block")
     print("=" * 70)
 
 

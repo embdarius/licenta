@@ -48,8 +48,9 @@ from proiect_licenta.tools.triage_tool import normalize_complaint_text
 # Medication classification — shared vocabulary with the training pipeline
 # ---------------------------------------------------------------------------
 from proiect_licenta.tools.med_vocab import (
-    DRUG_NAME_MAP, MED_CLASS_KEYWORDS, MED_CATEGORIES,
+    DRUG_NAME_MAP, MED_CLASS_KEYWORDS, MED_CATEGORIES, MED_FEATURE_COLS,
     flags_from_name, flags_from_text,
+    parse_med_lookup, med_self_report_discrepancy,
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +275,16 @@ class DoctorV3Input(BaseModel):
             "n_prior_admissions. Empty string for first-time / unknown patients."
         ),
     )
+    med_lookup_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON `med_block` from patient_history_lookup_tool for a "
+            "RETURNING patient (paste verbatim). When provided, the patient's "
+            "reconciled home-med list from their most recent prior visit overrides "
+            "the self-reported medications_raw. Empty string for first-time / "
+            "unknown patients or when no prior med record exists."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +324,7 @@ class DoctorPredictionToolV3(BaseTool):
         n_prior_admissions: int = -1,
         vital_trajectory_json: str = "",
         pmh_lookup_json: str = "",
+        med_lookup_json: str = "",
     ) -> str:
         """Run v3 doctor prediction with full nurse data."""
 
@@ -477,21 +489,22 @@ class DoctorPredictionToolV3(BaseTool):
             "map": [map_val],
         })
 
-        # ── 9. Medication features ──
-        med_info = classify_medications(medications_raw)
-        meds_df = pd.DataFrame({
-            "n_medications": [med_info["n_medications"]],
-            "meds_unknown": [med_info["meds_unknown"]],
-            "has_cardiac_meds": [med_info["has_cardiac_meds"]],
-            "has_diabetes_meds": [med_info["has_diabetes_meds"]],
-            "has_psych_meds": [med_info["has_psych_meds"]],
-            "has_respiratory_meds": [med_info["has_respiratory_meds"]],
-            "has_opioid_meds": [med_info["has_opioid_meds"]],
-            "has_anticoagulant_meds": [med_info["has_anticoagulant_meds"]],
-            "has_gi_meds": [med_info["has_gi_meds"]],
-            "has_thyroid_meds": [med_info["has_thyroid_meds"]],
-            "has_anticonvulsant_meds": [med_info["has_anticonvulsant_meds"]],
-        })
+        # ── 9. Medication features — EHR lookup (preferred) OR self-report ──
+        # If patient_history_lookup_tool returned a med_block (returning patient
+        # with a prior reconciled home-med list), it OVERRIDES the self-reported
+        # medications; otherwise parse the patient-reported med text. Mirrors the
+        # pmh_lookup_json override below.
+        med_lookup_block = parse_med_lookup(med_lookup_json)
+        used_med_lookup = med_lookup_block is not None
+        if used_med_lookup:
+            med_info = med_lookup_block
+        else:
+            med_info = classify_medications(medications_raw)
+        self_report_meds_not_in_record = (
+            med_self_report_discrepancy(medications_raw, med_lookup_block)
+            if used_med_lookup else []
+        )
+        meds_df = pd.DataFrame({col: [med_info[col]] for col in MED_FEATURE_COLS})
 
         # ── 10. Longitudinal vitals ──
         # If the nurse supplied a multi-reading trajectory, build REAL
@@ -689,6 +702,10 @@ class DoctorPredictionToolV3(BaseTool):
                 "medications_count": med_info["n_medications"],
                 "medication_categories_detected": med_flags_active if med_flags_active else ["None"],
                 "medications_unknown": bool(med_info["meds_unknown"]),
+                # EHR med lookup: when True, med flags came from the patient's
+                # prior reconciled home-med list rather than self-report.
+                "used_med_lookup": bool(used_med_lookup),
+                "self_report_meds_not_in_record": self_report_meds_not_in_record,
                 "prior_history_raw": prior_history if prior_history else None,
                 "pmh_categories_detected": sorted(pmh_flags_active) if pmh_flags_active else ["None"],
                 "n_prior_admissions_reported": (

@@ -35,6 +35,14 @@ The doctor tools consume the returned ``pmh_block`` via their
 when present it overrides the text-derived PMH block, when absent they fall
 back to ask-the-patient. Fully backward-compatible.
 
+The tool ALSO returns a ``med_block`` — the patient's reconciled home-med list
+(``MED_FEATURE_COLS``) from their most recent PRIOR ED stay (leakage-safe,
+``< intime``; meds are sourced from prior visits because a live patient's
+current list is exactly what the nurse is collecting). The doctor tools consume
+it via the parallel ``med_lookup_json`` argument; triage has no medication
+features so it ignores meds. ``med_block`` is ``None`` for first-time/unknown
+patients or when no prior stay carried a medrecon record.
+
 Leakage discipline
 ------------------
 The persisted index contains ALL of a subject's encounters; the
@@ -56,7 +64,7 @@ from pydantic import BaseModel, Field
 from proiect_licenta.paths import HISTORY_INDEX_PKL
 from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.pmh_features import (
-    PMH_FEATURE_COLS, assemble_pmh_for_stay,
+    PMH_FEATURE_COLS, assemble_pmh_for_stay, assemble_meds_for_stay,
 )
 
 
@@ -156,13 +164,16 @@ class PatientHistoryLookupTool(BaseTool):
         "medical history flags AND the prior-encounter numerics (days since last "
         "admission / ED visit, number of prior ED visits, whether the current "
         "complaint matches the last visit) that a patient cannot reliably report "
-        "at the bedside. Call this right after intake if the patient provides an "
-        "MRN; copy the returned `pmh_block` JSON into the doctor disposition and "
-        "v3 reassessment tools' `pmh_lookup_json` argument so they use the real "
-        "record instead of the patient's self-report. For a first-time / unknown "
-        "patient (subject_id -1) it returns known_patient=false and the pipeline "
-        "falls back to asking the patient. All lookups are leakage-safe: only "
-        "encounters strictly before the current arrival time are used."
+        "at the bedside. It ALSO returns a `med_block` — the patient's reconciled "
+        "home-medication list from their most recent PRIOR visit. Call this right "
+        "after intake if the patient provides an MRN; copy the returned `pmh_block` "
+        "into the doctor disposition and v3 reassessment tools' `pmh_lookup_json` "
+        "argument, and the `med_block` (when non-null) into their `med_lookup_json` "
+        "argument, so they use the real record instead of the patient's self-report. "
+        "For a first-time / unknown patient (subject_id -1) it returns "
+        "known_patient=false (and null blocks) and the pipeline falls back to asking "
+        "the patient. All lookups are leakage-safe: only encounters strictly before "
+        "the current arrival time are used."
     )
     args_schema: Type[BaseModel] = PatientHistoryLookupInput
 
@@ -222,6 +233,7 @@ class PatientHistoryLookupTool(BaseTool):
                 "known_patient": False,
                 "subject_id": sid,
                 "pmh_block": None,
+                "med_block": None,
                 "note": note,
             }, indent=2)
 
@@ -231,6 +243,19 @@ class PatientHistoryLookupTool(BaseTool):
             intime=resolved_intime,
             complaint_norm=complaint_norm,
             index=index,
+        )
+
+        # Medications: the patient's most recent PRIOR stay's home-med list
+        # (leakage-safe, < intime). None when no prior stay carried a medrecon
+        # record or the index predates the med build → ask-the-patient fallback.
+        med_block = assemble_meds_for_stay(
+            subject_id=sid, intime=resolved_intime, index=index,
+        )
+        med_categories = (
+            sorted(c.replace("has_", "", 1).replace("_meds", "").replace("_", " ")
+                   for c in med_block
+                   if c.startswith("has_") and med_block.get(c) == 1)
+            if med_block else []
         )
 
         has_prior = pmh_block["no_history"] == 0
@@ -247,6 +272,10 @@ class PatientHistoryLookupTool(BaseTool):
             # The 19-column block, ready to paste into the doctor tools'
             # pmh_lookup_json argument verbatim.
             "pmh_block": pmh_block,
+            # The 11-column medication block from the patient's most recent
+            # PRIOR stay's reconciled home-med list (None if none on record).
+            # Paste into the doctor tools' `med_lookup_json` argument.
+            "med_block": med_block,
             "summary": {
                 "n_prior_admissions": pmh_block["n_prior_admissions"],
                 "n_prior_ed_visits": pmh_block["n_prior_ed_visits"],
@@ -254,11 +283,15 @@ class PatientHistoryLookupTool(BaseTool):
                 "days_since_last_ed": pmh_block["days_since_last_ed"],
                 "same_complaint_as_prior": pmh_block["same_complaint_as_prior"],
                 "pmh_categories": fired,
+                "med_record_found": med_block is not None,
+                "n_medications": (med_block["n_medications"] if med_block else 0),
+                "medication_categories": med_categories,
             },
             "note": (
                 "Real prior-encounter record found (leakage-safe: only visits "
                 "before the current arrival). Copy `pmh_block` into the "
-                "disposition + v3 tools' `pmh_lookup_json` argument."
+                "disposition + v3 tools' `pmh_lookup_json` argument, and "
+                "`med_block` (if non-null) into their `med_lookup_json` argument."
                 if has_prior else
                 "Subject is in the system but has no encounters before the "
                 "current arrival — treated as first-time (no_history=1)."

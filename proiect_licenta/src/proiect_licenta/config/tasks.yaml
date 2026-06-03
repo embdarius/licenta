@@ -337,9 +337,13 @@ doctor_disposition_task:
         this supplies the REAL prior-encounter record (PMH flags + the
         days-since-last-visit / same-complaint numerics a patient can't report
         at the bedside), which OVERRIDES the self-reported prior_history /
-        n_prior_admissions. If subject_id is -1 (or absent), or the tool returns
-        `known_patient: false`, pass an empty string "" for `pmh_lookup_json`
-        and rely on the patient's self-report.
+        n_prior_admissions. ALSO, if the lookup's `med_block` is non-null,
+        serialize it to a JSON STRING and pass it as `med_lookup_json` — the
+        patient's reconciled home-med list from their most recent prior visit,
+        which OVERRIDES the self-reported medications. If subject_id is -1 (or
+        absent), or the tool returns `known_patient: false`, pass an empty
+        string "" for BOTH `pmh_lookup_json` and `med_lookup_json` and rely on
+        the patient's self-report.
 
     3. Call the **doctor_disposition_tool** with ALL of the above (including
        `pmh_lookup_json` from step 2b when available). ALWAYS call this tool —
@@ -447,6 +451,10 @@ doctor_reassessment_task:
            patient with an MRN), pass that same JSON string here so the
            diagnosis/department models also use the real prior-encounter
            record; otherwise pass "".
+         - med_lookup_json: likewise, if the lookup returned a non-null
+           `med_block`, pass that same JSON string here so the diagnosis/
+           department models use the patient's real prior reconciled home-med
+           list instead of self-report; otherwise pass "".
 
        Then provide an enhanced assessment that includes:
          - **Updated diagnosis WITH explicit top-3 + probabilities** from

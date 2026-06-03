@@ -544,6 +544,10 @@ MED_CLASS_KEYWORDS = {
 
 MED_CATEGORIES = list(MED_CLASS_KEYWORDS.keys())
 
+# Canonical medication-feature column order shared by training (medrecon
+# aggregation), the EHR-lookup med block, and the doctor tools' override path.
+MED_FEATURE_COLS = ["n_medications", "meds_unknown"] + MED_CATEGORIES
+
 
 # ---------------------------------------------------------------------------
 # Matching helpers
@@ -620,3 +624,76 @@ def flags_from_text(text) -> set:
 def flags_from_row(name, etcdescription) -> set:
     """Training-time: union of name-map flags and class-keyword flags."""
     return flags_from_name(name) | flags_from_text(etcdescription)
+
+
+# ---------------------------------------------------------------------------
+# EHR-lookup helpers (returning-patient medication block)
+# ---------------------------------------------------------------------------
+import json as _json
+
+
+def med_block_from_rows(names, descriptions) -> dict:
+    """Aggregate one stay's medrecon rows into the canonical MED_FEATURE_COLS
+    block, using the exact training recipe (`flags_from_row` OR'd across rows,
+    `n_medications` = row count, `meds_unknown` = 0 since the stay has data).
+
+    `names` / `descriptions` are parallel iterables of medrecon `name` /
+    `etcdescription` values for a single stay. Returns a dict over
+    MED_FEATURE_COLS. (A stay with no medrecon rows simply isn't indexed, so
+    this is only ever called with >= 1 row.)
+    """
+    names = list(names)
+    flags: set = set()
+    for n, d in zip(names, descriptions):
+        flags |= flags_from_row(n, d)
+    block = {cat: int(cat in flags) for cat in MED_CATEGORIES}
+    block["n_medications"] = len(names)
+    block["meds_unknown"] = 0
+    return {col: block[col] for col in MED_FEATURE_COLS}
+
+
+def parse_med_lookup(med_lookup_json):
+    """Parse a ``PatientHistoryLookupTool`` ``med_block`` into a full
+    MED_FEATURE_COLS dict, or return ``None`` to fall back to the
+    ask-the-patient path.
+
+    Accepts either the raw ``med_block`` object or the tool's full output (with
+    a nested ``med_block``). Returns ``None`` on empty/invalid input or a block
+    missing any required column — so a malformed lookup never corrupts the
+    feature vector; it just reverts to self-report. Mirrors
+    ``pmh_features.parse_pmh_lookup``.
+    """
+    if not med_lookup_json or not str(med_lookup_json).strip():
+        return None
+    try:
+        obj = _json.loads(med_lookup_json)
+    except (_json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(obj, dict) and "med_block" in obj:
+        obj = obj["med_block"]
+    if not isinstance(obj, dict) or not all(col in obj for col in MED_FEATURE_COLS):
+        return None
+    return {col: int(obj[col]) for col in MED_FEATURE_COLS}
+
+
+def med_self_report_discrepancy(medications_raw, med_block) -> list:
+    """Read-only reconciliation: medication categories the patient self-reported
+    that the real prior-record med block does NOT contain.
+
+    When an EHR lookup overrides the patient's free-text meds (record wins, by
+    design), this surfaces categories the patient mentioned that the documented
+    list lacks — e.g. a newly started drug, or one filled elsewhere. Purely
+    informational: it does NOT alter the feature vector. Returns a sorted list
+    of category names, empty when they agree / no free-text / falsy block.
+    """
+    if not medications_raw or not str(medications_raw).strip() or not med_block:
+        return []
+    text = str(medications_raw).lower()
+    if text in ("unknown", "none", "no", "skip", "n/a", "na", "-", "",
+                "i don't know", "i dont know", "idk"):
+        return []
+    self_reported = flags_from_name(text) | flags_from_text(text)
+    if not self_reported:
+        return []
+    in_record = {c for c in MED_CATEGORIES if med_block.get(c) == 1}
+    return sorted(self_reported - in_record)

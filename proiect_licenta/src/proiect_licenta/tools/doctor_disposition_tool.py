@@ -79,7 +79,8 @@ from proiect_licenta.paths import (
 )
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
 from proiect_licenta.tools.med_vocab import (
-    MED_CATEGORIES, flags_from_name, flags_from_text,
+    MED_CATEGORIES, MED_FEATURE_COLS, flags_from_name, flags_from_text,
+    parse_med_lookup, med_self_report_discrepancy,
 )
 from proiect_licenta.training.train_nurse_v3 import (
     _normalize_rhythm,
@@ -288,6 +289,17 @@ class DoctorDispositionInput(BaseModel):
             "patients — then the self-report fields are used."
         ),
     )
+    med_lookup_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON `med_block` returned by patient_history_lookup_tool "
+            "for a RETURNING patient (paste it verbatim). When provided, the "
+            "patient's reconciled home-med list from their most recent prior visit "
+            "OVERRIDES the self-reported medications_raw. Empty string for "
+            "first-time / unknown patients or when no prior med record exists — "
+            "then the self-reported medications are parsed instead."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +344,7 @@ class DoctorDispositionTool(BaseTool):
         n_prior_admissions: int = -1,
         vital_trajectory_json: str = "",
         pmh_lookup_json: str = "",
+        med_lookup_json: str = "",
     ) -> str:
         models = get_disposition_models()
         tfidf = models["tfidf"]
@@ -493,10 +506,22 @@ class DoctorDispositionTool(BaseTool):
             triage_features[f"triage_acuity_proba_{k + 1}"] = float(acuity_proba[k])
         triage_features["triage_disposition_proba_admit"] = triage_dispo_proba_admit
 
-        # ── 7. Medications ──
-        med_info = _classify_medications(medications_raw)
-        med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORIES)
-        meds_df = pd.DataFrame({col: [med_info[col]] for col in med_cols})
+        # ── 7. Medications — EHR lookup (preferred) OR ask-the-patient ──
+        # If patient_history_lookup_tool returned a med_block (returning patient
+        # with a prior reconciled home-med list), it OVERRIDES the self-reported
+        # medications; otherwise parse the patient-reported med text. Mirrors the
+        # pmh_lookup_json override above.
+        med_lookup_block = parse_med_lookup(med_lookup_json)
+        used_med_lookup = med_lookup_block is not None
+        if used_med_lookup:
+            med_info = med_lookup_block
+        else:
+            med_info = _classify_medications(medications_raw)
+        self_report_meds_not_in_record = (
+            med_self_report_discrepancy(medications_raw, med_lookup_block)
+            if used_med_lookup else []
+        )
+        meds_df = pd.DataFrame({col: [med_info[col]] for col in MED_FEATURE_COLS})
 
         # ── 8. Longitudinal vital block ──
         # If the nurse supplied a multi-reading trajectory, build REAL
@@ -638,6 +663,10 @@ class DoctorDispositionTool(BaseTool):
                 "med_categories_flagged": [
                     cat for cat in MED_CATEGORIES if med_info.get(cat, 0) == 1
                 ],
+                # EHR med lookup: when True, the med flags came from the patient's
+                # prior reconciled home-med list rather than self-report.
+                "used_med_lookup": bool(used_med_lookup),
+                "self_report_meds_not_in_record": self_report_meds_not_in_record,
                 "prior_history_raw": prior_history if prior_history else None,
                 "pmh_categories_detected": sorted(pmh_flags_active) if pmh_flags_active else [],
                 "n_prior_admissions_reported": (

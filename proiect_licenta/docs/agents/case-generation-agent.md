@@ -298,7 +298,15 @@ gate decision (P(admit) crossing 0.40) or a top-1 argmax; at 13 cases one flip =
    features.
 4. **Medications: different vocab coverage.** feature-vector flags come from the
    real `medrecon` aggregation (drug name + pharmacy-class `etcdescription`);
-   tool-direct re-parses only patient-reported drug names through `med_vocab`.
+   the self-report path re-parses only patient-reported drug names through
+   `med_vocab`. **Closeable for returning patients (added 2026-06-03):** the
+   MRN EHR lookup now also returns a `med_block` — the patient's reconciled
+   home-med list from their most recent PRIOR stay (leakage-safe, `< intime`) —
+   which the disposition + v3 tools accept via `med_lookup_json` and use to
+   OVERRIDE self-report. (Prior-visit, not current-visit, medrecon: a live
+   patient's current list is what the nurse is collecting, so the EHR can only
+   supply the last documented one — an honest proxy that won't perfectly match
+   the current-visit `medrecon` the feature-vector column uses if meds changed.)
 5. **Cascade computation.** The triage acuity/disposition cascade columns are
    computed slightly differently between the two paths (a few columns of ~2116).
 6. **Rounding** of trajectory readings to 1 decimal in the tool path (trivial).
@@ -369,6 +377,15 @@ complementary half: **fetch** prior data for patients already in the system.
   (per-process cache) and returns the real 19-column `pmh_block` for a known
   patient, or `known_patient=false` for a first-time/unknown subject (or when the
   index isn't built) so the pipeline keeps its ask-the-patient zero-fill path.
+- **Medication lookup (added 2026-06-03)** — the same tool now ALSO returns a
+  `med_block` (the 11-col `MED_FEATURE_COLS`) from the patient's most recent
+  PRIOR stay's reconciled `medrecon` home-med list, via
+  `pmh_features.build_pmh_index` (new `med_by_stay`) + `assemble_meds_for_stay`
+  (leakage-safe, `< intime`, reuses the PMH discipline). `med_vocab.py` hosts
+  the shared `MED_FEATURE_COLS`, `med_block_from_rows`, `parse_med_lookup`, and
+  `med_self_report_discrepancy`. The disposition + v3 tools gained a parallel
+  `med_lookup_json` override (triage has no med features, so it's untouched).
+  Prior-visit semantics (not current-visit) keep it honest about live deployment.
 - **Doctor-tool wiring** — `doctor_disposition_tool.py` and `doctor_tool_v3.py`
   gained an optional `pmh_lookup_json` arg (mirroring `vital_trajectory_json`):
   when present the real PMH block **overrides** the text-derived one; when empty
@@ -402,6 +419,13 @@ complementary half: **fetch** prior data for patients already in the system.
     **ESI acuity** row is identical across lookup/no-lookup columns because
     triage didn't yet receive the block); a re-run is pending to populate the
     triage-side numbers.
+  - **Medication lookup also wired (2026-06-03):** `_lookup_blocks` now returns
+    `(pmh_json, med_json)` and `run_tool_direct` forwards `med_lookup_json` to
+    the disposition + v3 tools, so `tool_direct_lookup` exercises the prior-visit
+    med override too (E2E gets it via the crew + the disposition/reassessment
+    tasks forwarding `med_block`). The table below also predates this, so the
+    medication-driven diagnosis/department deltas aren't yet reflected — included
+    in the same pending re-run.
 - **Live intake path (wired)** — the NLP parser (`parse_symptoms_task`) now asks,
   *first*, whether the patient has been treated here before and for their MRN,
   emitting `subject_id` (an integer, `-1` if new/unknown) in its JSON. That

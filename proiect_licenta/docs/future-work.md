@@ -619,7 +619,15 @@ triage acuity/disposition models, not just the doctor stage. `parse_pmh_lookup`
 the block to the triage call, so `tool_direct_lookup` exercises the triage-side
 lookup (the E2E real-crew column already did via the crew); the published table
 predates this wiring (acuity flat across lookup columns) — a re-run is pending.
-**Leakage discipline** is enforced + asserted in
+**Medications extended (2026-06-03):** the same lookup now also returns a
+`med_block` — the patient's reconciled `medrecon` home-med list from their most
+recent PRIOR stay (`build_pmh_index` `med_by_stay` + `assemble_meds_for_stay`,
+leakage-safe `< intime`; `med_vocab.py` hosts `MED_FEATURE_COLS` /
+`med_block_from_rows` / `parse_med_lookup` / `med_self_report_discrepancy`). The
+disposition + v3 tools gained a parallel `med_lookup_json` override (triage has
+no med features). Prior-visit (not current-visit) semantics keep it honest about
+live deployment — a strong proxy for stable chronic meds. Benchmark + tasks
+wired; re-run pending. **Leakage discipline** is enforced + asserted in
 `assemble_pmh_for_stay` (`< intime` only). Per-stay logic is unit-tested, and a
 single-case real-data check confirms the mechanism: built over the cohort, the
 tool returns stay `37744212`'s real `days_since_last_admission = 2.71` /
