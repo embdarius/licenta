@@ -338,8 +338,14 @@ parser's follow-up questions); the chief-complaint text is the lossy channel
 
 ### Remaining levers
 
-1. **Scale beyond 20 cases.** Needed to make the 13-case diagnosis/department
-   numbers statistically meaningful and to average out the LLM jitter on E2E.
+1. **Scale beyond 20 cases — PLANNED (near-future), not yet done.** Needed to
+   make the 13-case diagnosis/department numbers statistically meaningful, to
+   average out the LLM jitter on E2E, and — now the most pressing reason — to
+   give the **triage-PMH and prior-visit-medication lookups enough
+   returning-patient volume to register** (the 2026-06-03 fast re-run showed
+   both are net-neutral at n=20: acuity flipped nothing and only 5/20 had a
+   prior medrecon). Unblock = regenerate a larger stratified case set + rebuild
+   the index (`--all-subjects` or a bigger cohort), then re-run.
 2. **A stronger / recalibrated disposition model** would raise the
    feature-vector-gated ceiling itself (12/13 admit recall at 0.40) — the one
    lever that lifts the gated diagnosis ceiling for *every* downstream column.
@@ -415,17 +421,22 @@ complementary half: **fetch** prior data for patients already in the system.
     (real-crew) column** needs no benchmark change — it runs the actual crew,
     which calls the lookup at triage, and the harness's class-level
     `PatientHistoryLookupTool` patch (forcing the case's historical `intime`)
-    already covers that call. **The table below predates this wiring** (its
-    **ESI acuity** row is identical across lookup/no-lookup columns because
-    triage didn't yet receive the block); a re-run is pending to populate the
-    triage-side numbers.
+    already covers that call.
   - **Medication lookup also wired (2026-06-03):** `_lookup_blocks` now returns
     `(pmh_json, med_json)` and `run_tool_direct` forwards `med_lookup_json` to
     the disposition + v3 tools, so `tool_direct_lookup` exercises the prior-visit
     med override too (E2E gets it via the crew + the disposition/reassessment
-    tasks forwarding `med_block`). The table below also predates this, so the
-    medication-driven diagnosis/department deltas aren't yet reflected — included
-    in the same pending re-run.
+    tasks forwarding `med_block`).
+  - **Fast re-run after the 2026-06-03 wiring (done; `--skip-e2e`):** the four
+    tabular columns are **unchanged** from the table below — the triage-side PMH
+    and medication wiring are **net-neutral at n=20** (no regression, no
+    measurable gain beyond the PMH→disposition flip already captured).
+    Specifically: **ESI acuity stayed 70.0 → 70.0** (the triage PMH lookup
+    flipped zero acuity predictions), and **only 5/20 patients even had a prior
+    medrecon** to look up (the rest are first-in-window visits where
+    `assemble_meds_for_stay` correctly returns `None`), so the med override could
+    not register a scored change. The effect of both is simply below the n=20
+    noise floor — see "Remaining levers" (scaling the cohort is the unblock).
 - **Live intake path (wired)** — the NLP parser (`parse_symptoms_task`) now asks,
   *first*, whether the patient has been treated here before and for their MRN,
   emitting `subject_id` (an integer, `-1` if new/unknown) in its JSON. That
@@ -477,6 +488,19 @@ the per-case diagnostic identified. Feeding that block into the disposition tool
 0.474 matches the feature-vector's value for this case to 3 dp — the lookup
 closes the gap on the one patient that *was* the gap, flipping it back to the
 correct admit (and thereby restoring its downstream diagnosis/department).
+
+**Update (2026-06-03) — post triage-PMH + medication wiring, fast re-run
+(`--skip-e2e`).** After registering the lookup on the triage agent (PMH) and
+adding the prior-visit medication lookup, the four tabular columns below are
+**unchanged**: both additions are **net-neutral at n=20** — no regression, no
+measurable gain beyond the PMH→disposition flip already shown. Why: **ESI acuity
+held at 70.0** (the triage PMH lookup flipped no acuity prediction), and **only
+5/20 patients had a prior medrecon** to fetch (the rest are first-in-window
+visits → `assemble_meds_for_stay` returns `None`), so the med override had almost
+no cases to act on and changed no scored outcome. Both effects sit below the
+n=20 noise floor; measuring them needs a larger returning-patient cohort
+(**scaling — planned, near-future; see "Remaining levers"**). The E2E column was
+not re-run in this pass.
 
 **Full 20-case benchmark re-run (done — lookup + rhythm in place, MRN wired
 through the E2E crew, regenerated bundle with `intime` + in-window rhythm).**
