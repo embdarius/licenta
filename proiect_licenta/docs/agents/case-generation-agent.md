@@ -274,10 +274,13 @@ gate decision (P(admit) crossing 0.40) or a top-1 argmax; at 13 cases one flip =
 1. **Prior-encounter numerics cannot be reconstructed.** The loader computes
    `days_since_last_admission`, `days_since_last_ed`, `n_prior_ed_visits`, and
    `same_complaint_as_prior` (Jaccard vs the patient's last visit) from prior
-   MIMIC encounters. A patient at the bedside can't report these, so the tool
-   zero-fills to the first-time-patient sentinel (`days_since = 9999`,
-   `same_complaint = 0`). **This is unrecoverable by asking — only by an EHR
-   lookup** (see Future directions).
+   MIMIC encounters. A patient at the bedside can't report these, so the
+   **self-report path** zero-fills to the first-time-patient sentinel
+   (`days_since = 9999`, `same_complaint = 0`). **This is unrecoverable by
+   asking — only by an EHR lookup**, now wired into the disposition,
+   reassessment, **and (as of 2026-06-03) the triage** tools for returning
+   patients with an MRN (see the
+   [EHR-integration section](#patient-history-lookup-for-returning-patients-ehr-integration--implemented) below).
 2. **PMH flags round-trip through text.** feature-vector reads `pmh_<group>`
    flags directly from prior discharge-note parsing + ICD codes; tool-direct
    reverse-maps those flags to phrases ("congestive heart failure") and re-parses
@@ -373,18 +376,43 @@ complementary half: **fetch** prior data for patients already in the system.
   unaffected. The doctor agent in the live crew carries the lookup tool, and
   `tasks.yaml` instructs it to call the lookup (if an MRN is present) and forward
   `pmh_lookup_json` into the disposition + reassessment tools.
+- **Triage-tool wiring (added 2026-06-03)** — `triage_tool.py` gained the same
+  optional `pmh_lookup_json` arg + override, and `PatientHistoryLookupTool` is
+  now registered on the **triage agent**. `triage_assessment_task` step "1b"
+  calls the lookup when the patient gives an MRN and passes the `pmh_block` to
+  the triage tool — so a returning patient's real prior-encounter numerics reach
+  the triage acuity/disposition models too, not just the doctor stage. The
+  shared `parse_pmh_lookup` + new `pmh_self_report_discrepancy` helpers were
+  hoisted into `pmh_features.py` (single source of truth); triage and both
+  doctor tools import them and all three emit a read-only `self_report_not_in_record`
+  reconciliation list (record still wins the feature vector).
 - **Benchmark column** — `benchmark_pipeline_e2e.py` adds a **`tool_direct_lookup`**
   mode (tool-direct + the EHR lookup by the case's real `subject_id`+`intime`)
   alongside the no-lookup `tool_direct`. The case bundle now carries `intime`
   (the leakage cutoff). The gap between the two columns = **the value of EHR
   access at triage**.
+  - **Triage now wired into the lookup columns (2026-06-03):** `run_tool_direct`
+    forwards `pmh_lookup_json` to the triage `_run` call as well (not just the
+    disposition + v3 tools), so `tool_direct_lookup` now exercises triage's
+    lookup; `tool_direct` passes `""` and stays on self-report. The **E2E
+    (real-crew) column** needs no benchmark change — it runs the actual crew,
+    which calls the lookup at triage, and the harness's class-level
+    `PatientHistoryLookupTool` patch (forcing the case's historical `intime`)
+    already covers that call. **The table below predates this wiring** (its
+    **ESI acuity** row is identical across lookup/no-lookup columns because
+    triage didn't yet receive the block); a re-run is pending to populate the
+    triage-side numbers.
 - **Live intake path (wired)** — the NLP parser (`parse_symptoms_task`) now asks,
   *first*, whether the patient has been treated here before and for their MRN,
   emitting `subject_id` (an integer, `-1` if new/unknown) in its JSON. That
   `subject_id` is threaded through every `---STRUCTURED_DATA---` block
-  (triage → initial doctor → disposition), and `doctor_disposition_task` calls
-  `patient_history_lookup_tool` with it (and `current_intime="now"`) before the
-  disposition tool, forwarding the resulting `pmh_block` as `pmh_lookup_json`.
+  (triage → initial doctor → disposition). **`triage_assessment_task` (step 1b,
+  added 2026-06-03)** and `doctor_disposition_task` each call
+  `patient_history_lookup_tool` with it (and `current_intime="now"`) before
+  their prediction tool, forwarding the resulting `pmh_block` as
+  `pmh_lookup_json`. (Each stage re-calls the deterministic, process-cached
+  lookup rather than threading the block through the LLM text — chosen for
+  robustness over a fire-once-and-propagate variant.)
   So entering a known `subject_id` at intake (e.g. `17287581`) flips the case to
   a returning patient with real prior history; `-1` keeps the ask-the-patient
   path. **MIMIC date caveat:** MIMIC timestamps are de-identified into the future,

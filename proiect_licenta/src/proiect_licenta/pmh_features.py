@@ -28,6 +28,7 @@ only, so the current encounter's discharge summary can never leak in.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -73,6 +74,63 @@ PMH_FEATURE_COLS = (
         "no_history",
     ]
 )
+
+
+def parse_pmh_lookup(pmh_lookup_json: str):
+    """Parse a ``PatientHistoryLookupTool`` ``pmh_block`` into a full
+    ``PMH_FEATURE_COLS`` dict, or return ``None`` to fall back to the
+    ask-the-patient text path.
+
+    Accepts either the raw ``pmh_block`` object or the tool's full output (with a
+    nested ``pmh_block``). Returns ``None`` on empty/invalid input or a block
+    missing any required column — so a malformed lookup never silently corrupts
+    the feature vector; it just reverts to self-report.
+
+    Single source of truth shared by the triage tool and the doctor disposition
+    / v3 reassessment tools, all of which override self-reported PMH with the
+    real prior-encounter record when a returning patient is found.
+    """
+    if not pmh_lookup_json or not str(pmh_lookup_json).strip():
+        return None
+    try:
+        obj = json.loads(pmh_lookup_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(obj, dict) and "pmh_block" in obj:
+        obj = obj["pmh_block"]
+    if not isinstance(obj, dict) or not all(col in obj for col in PMH_FEATURE_COLS):
+        return None
+    block = {}
+    for col in PMH_FEATURE_COLS:
+        v = obj[col]
+        if col in ("days_since_last_admission", "days_since_last_ed",
+                   "same_complaint_as_prior"):
+            block[col] = float(v)
+        else:
+            block[col] = int(v)
+    return block
+
+
+def pmh_self_report_discrepancy(prior_history: str, lookup_block: dict) -> list:
+    """Read-only reconciliation: PMH categories the patient self-reported that
+    the real prior-encounter record did NOT contain.
+
+    When an EHR lookup overrides the patient's free-text PMH (the record wins,
+    by design), this surfaces what the patient mentioned that isn't in the chart
+    — e.g. a condition managed outside this hospital system, or a new diagnosis
+    not yet coded. Purely informational: it does NOT alter the feature vector.
+
+    Returns a sorted list of PMH category names present in the self-report but
+    absent from ``lookup_block``'s fired flags. Empty when they agree, when no
+    free-text was given, or when ``lookup_block`` is falsy.
+    """
+    if not prior_history or not str(prior_history).strip() or not lookup_block:
+        return []
+    self_reported = pmh_flags_from_text(str(prior_history))
+    if not self_reported:
+        return []
+    in_record = {c for c in PMH_CATEGORIES if lookup_block.get(f"pmh_{c}") == 1}
+    return sorted(self_reported - in_record)
 
 
 def _build_icd_to_group(

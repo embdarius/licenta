@@ -145,7 +145,7 @@ Chief complaints + demographics (+ EMS vitals for ambulance/helicopter) + PMH (a
          +---------------------------------------------------------------------------+
 ```
 
-- **Triage path (v3)** uses 2070 features: 23 v1 structured + 28 vital-sign features + 19 PMH + 2000 TF-IDF. Vitals are real for ambulance/helicopter patients and walk-in-masked for walk-ins (the `_missing` flag tells the model). PMH is sourced from prior MIMIC encounters at training and from patient self-report (with zero-fill fallback) at inference.
+- **Triage path (v3)** uses 2070 features: 23 v1 structured + 28 vital-sign features + 19 PMH + 2000 TF-IDF. Vitals are real for ambulance/helicopter patients and walk-in-masked for walk-ins (the `_missing` flag tells the model). PMH is sourced from prior MIMIC encounters at training and, at inference, from either the real prior-encounter record via the MRN/`subject_id` EHR lookup (`PatientHistoryLookupTool`, for returning patients — added 2026-06-03) or patient self-report with zero-fill fallback (first-time/unknown patients).
 - **v1 doctor path** uses 2025 features (triage 2023 base + predicted_acuity + predicted_disposition).
 - **v2 doctor path** uses 2056 features (doctor v1 2025 + 20 vital-sign features + 11 medication features).
 - **Doctor v3 nurse path** uses ~2116 features (v2 base + longitudinal vitals + rhythm + PMH + Tier A softmax cascade).

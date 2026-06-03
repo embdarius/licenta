@@ -156,6 +156,11 @@ def run_tool_direct(case, pmh_lookup_json: str = "") -> dict:
     # EMS vitals only for ambulance/helicopter (matches live triage).
     ems = t["ems_vitals"] or {v: None for v in VITAL_COLS}
 
+    # Triage also receives the EHR lookup block (when present) so its
+    # acuity/disposition models use a returning patient's real prior-encounter
+    # numerics instead of zero-filling — matching the live crew, where the
+    # triage agent calls patient_history_lookup_tool itself (tasks.yaml step 1b).
+    # With "" (the plain tool_direct column) it falls back to self-report.
     triage_j = json.loads(tools["triage"]._run(
         chief_complaints=t["chief_complaints"], pain_score=t["pain_score"],
         age=t["age"], gender=t["gender"], arrival_transport=t["arrival_transport"],
@@ -163,6 +168,7 @@ def run_tool_direct(case, pmh_lookup_json: str = "") -> dict:
         resprate=_vital_arg(ems["resprate"]), o2sat=_vital_arg(ems["o2sat"]),
         sbp=_vital_arg(ems["sbp"]), dbp=_vital_arg(ems["dbp"]),
         prior_history=t["prior_history"], n_prior_admissions=t["n_prior_admissions"],
+        pmh_lookup_json=pmh_lookup_json,
     ))
     out["acuity"] = int(triage_j["acuity_prediction"]["predicted_esi_level"])
     out["triage_admit"] = _to_admit(triage_j["disposition_prediction"]["prediction"])

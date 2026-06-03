@@ -93,6 +93,23 @@ triage_assessment_task:
     Using the structured patient data from the previous task, perform triage:
 
     1. Parse the JSON from the previous task to get all fields
+
+    1b. EHR history lookup (returning patients only). Read `subject_id` from the
+       parsed JSON. If it is a POSITIVE integer (the patient gave an MRN), FIRST
+       call the **patient_history_lookup_tool** with:
+         - subject_id: that integer
+         - current_intime: the literal string "now" (a live patient is arriving
+           now, so all of their past encounters count as prior)
+         - chief_complaints: the current complaints
+       If it returns `known_patient: true`, serialize its `pmh_block` object to a
+       JSON STRING and pass it to the triage_prediction_tool as `pmh_lookup_json`
+       in the next step. This supplies the REAL prior-encounter record (PMH flags
+       PLUS the days-since-last-visit / same-complaint numerics a patient can't
+       report at the bedside), which OVERRIDES the self-reported `prior_history` /
+       `n_prior_admissions`. If `subject_id` is -1 (or absent), or the tool
+       returns `known_patient: false`, pass an empty string "" for
+       `pmh_lookup_json` and rely on the patient's self-report (unchanged path).
+
     2. Call the triage_prediction_tool with ALL available fields:
        - chief_complaints (comma-separated string)
        - pain_score (integer)
@@ -108,6 +125,9 @@ triage_assessment_task:
          the JSON has it as null, empty, or absent) and `n_prior_admissions`
          (integer — pass -1 if absent or null). The tool zero-fills to the
          first-time-patient pattern when these are skip-equivalents.
+       - `pmh_lookup_json`: the serialized `pmh_block` string from step 1b when
+         the EHR lookup returned `known_patient: true`; otherwise pass "". When
+         provided, it OVERRIDES the self-reported PMH with the real record.
     3. Based on the tool's output, provide a complete triage assessment:
        - The predicted ESI acuity level (1-5) and what it means
        - The confidence of the prediction
@@ -129,6 +149,14 @@ triage_assessment_task:
        - If `prior_history_used.pmh_categories_fired` is non-empty in the tool
          output, briefly note which prior-condition categories were recognized
          (e.g., "Patient's prior CHF and diabetes informed the prediction").
+       - If `prior_history_used.used_history_lookup` is true, note that the
+         patient's REAL prior-encounter record (via their MRN), including the
+         days-since-last-visit numerics a patient can't recall, informed the
+         prediction rather than self-report. If
+         `prior_history_used.self_report_not_in_record` is non-empty, surface a
+         brief reconciliation line (e.g., "Patient also reported COPD, not found
+         in the prior record — possible outside-system or new diagnosis"),
+         making clear it did NOT change the prediction.
        - Recommended next steps based on the acuity level
 
     Format your response clearly with sections for ACUITY ASSESSMENT, DISPOSITION,
@@ -339,7 +367,11 @@ doctor_disposition_task:
          Otherwise note "confirms triage disposition" or similar.
        - **Clinical reasoning:** list the `reasoning` bullets from the
          tool plus any additional inference (PMH categories that fired,
-         abnormal vital signs, non-sinus rhythm, polypharmacy, etc.).
+         abnormal vital signs, non-sinus rhythm, polypharmacy, etc.). If
+         `nurse_data_used.self_report_not_in_record` is non-empty, add a brief
+         reconciliation line noting the patient reported condition(s) not found
+         in their prior record (possible outside-system or new diagnosis) — the
+         real record still drove the prediction.
        - **Operating point note:** the model uses a 0.40 admit threshold
          (tuned from 0.50 to reduce under-triage — missed admissions are the
          costlier error in an ED); mention this so the threshold choice is
@@ -433,7 +465,10 @@ doctor_reassessment_task:
            full diagnosis/department workup was triggered (or skipped) as
            a result.
          - How the vital signs, medications, rhythm, and PMH influenced
-           the prediction. Pull from the tool's `nurse_data_used` block.
+           the prediction. Pull from the tool's `nurse_data_used` block. If
+           `nurse_data_used.self_report_not_in_record` is non-empty, note the
+           self-reported condition(s) missing from the prior record (the record
+           still drove the prediction).
          - Final clinical reasoning and recommendations.
 
     4. IF THE REFINED is_admitted IS FALSE (regardless of what triage said):

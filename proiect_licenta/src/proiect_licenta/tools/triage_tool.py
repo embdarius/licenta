@@ -51,7 +51,11 @@ from proiect_licenta.preprocessing import (  # noqa: F401
 # Same imports and same vocabulary the doctor v3 tool uses, so inference-side
 # parsing matches training-side feature construction.
 # ---------------------------------------------------------------------------
-from proiect_licenta.pmh_features import PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS
+from proiect_licenta.pmh_features import (
+    PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS,
+    parse_pmh_lookup as _parse_pmh_lookup,
+    pmh_self_report_discrepancy,
+)
 from proiect_licenta.pmh_vocab import (
     PMH_CATEGORIES,
     flags_from_text as pmh_flags_from_text,
@@ -257,6 +261,19 @@ class TriageInput(BaseModel):
                     "reports. Use -1 if not collected / unknown. 0 is a valid value "
                     "meaning 'never been admitted before'."
     )
+    pmh_lookup_json: str = Field(
+        default="",
+        description="Optional JSON `pmh_block` from the patient_history_lookup_tool "
+                    "(EHR lookup for a RETURNING patient with an MRN). When provided "
+                    "for a known patient, it supplies the REAL prior-encounter record "
+                    "— PMH flags PLUS the days-since-last-visit / same-complaint "
+                    "numerics a patient can't report at the bedside — and OVERRIDES "
+                    "the self-reported prior_history / n_prior_admissions. Copy the "
+                    "lookup tool's `pmh_block` (or its full output) here verbatim. "
+                    "Leave empty for first-time/unknown patients (subject_id -1) or "
+                    "when the lookup returned known_patient=false; the tool then "
+                    "falls back to the patient's self-report."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +315,7 @@ class TriagePredictionTool(BaseTool):
         dbp: float = -1.0,
         prior_history: str = "",
         n_prior_admissions: int = -1,
+        pmh_lookup_json: str = "",
     ) -> str:
         """Run triage prediction with optional vital signs and PMH inputs."""
         (acuity_model, disposition_model, tfidf, severity_map,
@@ -405,44 +423,68 @@ class TriagePredictionTool(BaseTool):
         hypoxic_elderly = hypoxic * elderly
         hypotensive_elderly = hypotensive * elderly
 
-        # 10b. PMH features (v3) — mirror doctor_tool_v3.py logic so triage and
-        # doctor share the same inference-time PMH parsing. Empty / skip input
-        # → all flags 0 + no_history=1, matching the first-time-patient pattern
-        # the model saw on ~39% of training rows.
-        pmh_text = (prior_history or "").strip()
-        pmh_unknown = pmh_text == "" or pmh_text.lower() in _PMH_SKIP_TOKENS
-        if pmh_unknown:
-            pmh_flags_active: set = set()
-            pmh_no_history = 1
+        # 10b. PMH features (v3) — EHR lookup (preferred) OR ask-the-patient
+        # fallback, mirroring doctor_tool_v3.py / doctor_disposition_tool.py so
+        # triage and doctor share the same inference-time PMH logic. If the
+        # patient gave an MRN and patient_history_lookup_tool found a returning
+        # patient, its real prior-encounter block — including the
+        # days_since_last_* / same_complaint_as_prior numerics a patient can't
+        # report at the bedside — OVERRIDES the self-report. Otherwise we parse
+        # the free-text history and zero-fill the unrecoverable numerics to the
+        # first-time-patient sentinels (the no_history=1 pattern the model saw
+        # on ~39% of training rows).
+        lookup_block = _parse_pmh_lookup(pmh_lookup_json)
+        used_history_lookup = lookup_block is not None
+        if used_history_lookup:
+            pmh_data = {col: lookup_block[col] for col in PMH_FEATURE_COLS}
+            pmh_flags_active = {
+                c for c in PMH_CATEGORIES if pmh_data.get(f"pmh_{c}") == 1
+            }
+            pmh_no_history = int(pmh_data["no_history"])
+            n_prior_adm_val = int(pmh_data["n_prior_admissions"])
         else:
-            pmh_flags_active = pmh_flags_from_text(pmh_text)
-            pmh_no_history = 0
+            pmh_text = (prior_history or "").strip()
+            pmh_unknown = pmh_text == "" or pmh_text.lower() in _PMH_SKIP_TOKENS
+            if pmh_unknown:
+                pmh_flags_active: set = set()
+                pmh_no_history = 1
+            else:
+                pmh_flags_active = pmh_flags_from_text(pmh_text)
+                pmh_no_history = 0
 
-        # n_prior_admissions: if not collected (-1) → 0 + no_history=1.
-        # days_since_last_* are not collectable from the patient at the bedside,
-        # so we always zero-fill (PMH_NO_PRIOR_DAYS sentinel) — the model saw
-        # the same pattern on first-time-patient training rows.
-        if n_prior_admissions is None or n_prior_admissions < 0:
-            n_prior_adm_val = 0
-            n_prior_ed_val = 0
-            pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
-        else:
-            n_prior_adm_val = int(n_prior_admissions)
-            n_prior_ed_val = 0  # not collected separately at inference
+            # n_prior_admissions: if not collected (-1) → 0 + no_history=1.
+            # days_since_last_* are not collectable from the patient at the
+            # bedside, so we always zero-fill (PMH_NO_PRIOR_DAYS sentinel) — the
+            # model saw the same pattern on first-time-patient training rows.
+            if n_prior_admissions is None or n_prior_admissions < 0:
+                n_prior_adm_val = 0
+                n_prior_ed_val = 0
+                pmh_no_history = 1 if not pmh_flags_active else pmh_no_history
+            else:
+                n_prior_adm_val = int(n_prior_admissions)
+                n_prior_ed_val = 0  # not collected separately at inference
 
-        # If the patient reported conditions but skipped the count, still treat
-        # them as having history.
-        if pmh_flags_active and pmh_no_history == 1:
-            pmh_no_history = 0
+            # If the patient reported conditions but skipped the count, still
+            # treat them as having history.
+            if pmh_flags_active and pmh_no_history == 1:
+                pmh_no_history = 0
 
-        pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
-                    for c in PMH_CATEGORIES}
-        pmh_data["n_prior_admissions"] = n_prior_adm_val
-        pmh_data["n_prior_ed_visits"] = n_prior_ed_val
-        pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
-        pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
-        pmh_data["same_complaint_as_prior"] = 0.0
-        pmh_data["no_history"] = pmh_no_history
+            pmh_data = {f"pmh_{c}": (1 if c in pmh_flags_active else 0)
+                        for c in PMH_CATEGORIES}
+            pmh_data["n_prior_admissions"] = n_prior_adm_val
+            pmh_data["n_prior_ed_visits"] = n_prior_ed_val
+            pmh_data["days_since_last_admission"] = float(PMH_NO_PRIOR_DAYS)
+            pmh_data["days_since_last_ed"] = float(PMH_NO_PRIOR_DAYS)
+            pmh_data["same_complaint_as_prior"] = 0.0
+            pmh_data["no_history"] = pmh_no_history
+
+        # Read-only reconciliation: conditions the patient self-reported that
+        # the real record didn't have (the record still drives the feature
+        # vector). Empty unless the EHR lookup overrode a non-empty self-report.
+        self_report_not_in_record = (
+            pmh_self_report_discrepancy(prior_history, lookup_block)
+            if used_history_lookup else []
+        )
 
         # 11. Assemble feature vector (must match training order!)
         structured = pd.DataFrame({
@@ -560,6 +602,21 @@ class TriagePredictionTool(BaseTool):
             "no_history_flag": pmh_no_history,
             "pmh_categories_fired": sorted(pmh_flags_active),
             "pmh_category_count": len(pmh_flags_active),
+            # EHR lookup: True when the PMH block came from the real prior
+            # record (patient_history_lookup_tool) rather than self-report —
+            # including the days-since / same-complaint numerics below.
+            "used_history_lookup": bool(used_history_lookup),
+            "history_lookup_numerics": ({
+                "n_prior_admissions": int(pmh_data["n_prior_admissions"]),
+                "n_prior_ed_visits": int(pmh_data["n_prior_ed_visits"]),
+                "days_since_last_admission": float(pmh_data["days_since_last_admission"]),
+                "days_since_last_ed": float(pmh_data["days_since_last_ed"]),
+                "same_complaint_as_prior": float(pmh_data["same_complaint_as_prior"]),
+            } if used_history_lookup else None),
+            # Read-only: self-reported conditions absent from the prior record
+            # (the record still drives the prediction). Empty unless the lookup
+            # overrode a non-empty self-report.
+            "self_report_not_in_record": self_report_not_in_record,
         }
 
         result = {

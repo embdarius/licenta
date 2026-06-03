@@ -13,7 +13,7 @@ See the [v3 section](#triage-v3) below for the iteration-by-iteration breakdown.
 
 ## Role
 
-- **Type:** CrewAI agent with a custom tool (`TriagePredictionTool`) wrapping two XGBoost models.
+- **Type:** CrewAI agent with two tools — `TriagePredictionTool` (wrapping two XGBoost models) and `PatientHistoryLookupTool` (EHR-simulation PMH lookup for returning patients, keyed on MRN / `subject_id`).
 - **Purpose:** Predict ESI acuity level (1-5) and admission/discharge disposition.
 - **Config:** `src/proiect_licenta/config/agents.yaml` (`triage_agent`) and `tasks.yaml` (`triage_assessment_task`).
 - **Output contract:** Emits a structured data block downstream tasks can parse.
@@ -146,9 +146,10 @@ Implemented in `src/proiect_licenta/tools/triage_tool.py`. The tool lazy-loads b
 **PMH handling at inference (v3, added 2026-05-29):**
 - The NLP Parser asks every patient (walk-in and ambulance/helicopter) about chronic conditions and approximate prior admission count as part of intake.
 - `prior_history` (free-text string) is parsed at inference via the same `pmh_vocab` the training pipeline uses — so "CHF, diabetes, prior stroke" fires the `pmh_Circulatory`, `pmh_Endocrine, Nutritional, Metabolic`, and `pmh_Nervous System and Sense Organs` flags without any additional patient questions.
-- `n_prior_admissions` (integer) is used directly. `days_since_last_admission` / `days_since_last_ed` are zero-filled (not collectible at the bedside) — the model saw the same pattern on ~39% of training rows (first-time MIMIC patients), so the runtime is consistent with training-time distribution.
+- `n_prior_admissions` (integer) is used directly. On the **self-report path** `days_since_last_admission` / `days_since_last_ed` / `same_complaint_as_prior` / `n_prior_ed_visits` are zero-filled (not collectible at the bedside) — the model saw the same pattern on ~39% of training rows (first-time MIMIC patients), so the runtime is consistent with training-time distribution.
 - If the patient skips both PMH prompts (`prior_history=""`, `n_prior_admissions=-1`), the tool zero-fills with `no_history=1` — the exact "first-time patient" pattern the v3 model learned to handle gracefully.
-- The result JSON includes a `prior_history_used` block summarizing which PMH category flags fired and whether the patient was treated as first-time, so the downstream Doctor Agent can surface that reasoning in its clinical note.
+- **MRN / EHR lookup path (added 2026-06-03).** When a *returning* patient provides an MRN, the triage agent first calls `PatientHistoryLookupTool` and passes the resulting real prior-encounter `pmh_block` to the triage tool as `pmh_lookup_json`. When present it **overrides** the self-report and supplies the four numerics a patient can't recall (`days_since_last_admission`, `days_since_last_ed`, `n_prior_ed_visits`, `same_complaint_as_prior`) with their true values — the exact columns the feature-vector benchmark always had but runtime triage previously zero-filled. See [the v3 MRN-lookup subsection](#mrn-based-ehr-lookup-at-triage--wired-2026-06-03). First-time / unknown patients (`subject_id = -1`, or `known_patient: false`) keep the self-report path unchanged.
+- The result JSON includes a `prior_history_used` block summarizing which PMH category flags fired, whether the patient was treated as first-time, and — when the EHR lookup was used — `used_history_lookup: true`, the real `history_lookup_numerics`, and a read-only `self_report_not_in_record` reconciliation list (conditions the patient reported that the record didn't contain; the record still drives the prediction). The downstream Doctor Agent can surface that reasoning in its clinical note.
 
 ---
 
@@ -311,9 +312,23 @@ The cost — a 0.46pp headline accuracy drop, a 2.58pp over-triage increase, and
 **v3 (iter 2) is now the runtime model.** `triage_tool.py` loads `artifacts/triage/v3/` and builds the 2070-feature vector including the 19-column PMH block on every call. Two coordinated changes landed together:
 
 1. **NLP Parser collects PMH at intake.** `config/tasks.yaml`'s `parse_symptoms_task` now instructs the parser to ask every patient (walk-in and ambulance/helicopter alike) about (a) chronic conditions / prior medical history as free text and (b) approximate prior admission count. Both can be skipped; skip-equivalents (`""`, "no", "skip", "none", "I don't know", "no significant pmh") all map to the first-time-patient pattern.
-2. **`triage_tool.py` parses and applies PMH inline.** Same `pmh_flags_from_text` + `PMH_CATEGORIES` + `PMH_NO_PRIOR_DAYS` machinery the doctor v3 tool uses, so the two heads share inference-side PMH parsing. `days_since_last_admission` / `days_since_last_ed` / `same_complaint_as_prior` are zero-filled (uncollectable at bedside, model trained on the same pattern via the 39% first-time-patient rows).
+2. **`triage_tool.py` parses and applies PMH inline.** Same `pmh_flags_from_text` + `PMH_CATEGORIES` + `PMH_NO_PRIOR_DAYS` machinery the doctor v3 tool uses, so the two heads share inference-side PMH parsing. On the self-report path `days_since_last_admission` / `days_since_last_ed` / `same_complaint_as_prior` are zero-filled (uncollectable at bedside, model trained on the same pattern via the 39% first-time-patient rows). The [MRN-lookup path](#mrn-based-ehr-lookup-at-triage--wired-2026-06-03) below recovers those numerics for returning patients.
 
 The result JSON's new `prior_history_used` block surfaces which PMH categories fired so the Doctor Agent can include "Patient's prior CHF and diabetes informed the prediction" in its clinical reasoning.
+
+### MRN-based EHR lookup at triage — wired (2026-06-03)
+
+Triage v3 consumes a 19-feature PMH block, but until this change runtime triage only ever saw **self-reported** PMH and zero-filled the four numerics a patient can't recall (`days_since_last_admission`, `days_since_last_ed`, `n_prior_ed_visits`, `same_complaint_as_prior`) — even for a returning patient who gave an MRN — because triage runs *before* what used to be the only EHR-lookup call (the doctor disposition task). The triage feature-vector benchmark, by contrast, always fed the real block. This wired the same MRN→record lookup the doctor disposition/reassessment tasks already use into triage, closing that gap for returning patients.
+
+**What changed:**
+- **`PatientHistoryLookupTool` registered on the triage agent** (`crew.py`). The agent calls it directly — the lookup is deterministic given `subject_id` + `"now"` and its index is process-cached, so each stage that needs PMH calls it independently rather than threading a 19-key JSON blob verbatim through the `STRUCTURED_DATA` text hops (the chosen design over a "fire-once-and-propagate" variant, for robustness).
+- **`triage_tool.py` gained an optional `pmh_lookup_json` arg** (mirroring the doctor tools). When a valid block is present it **overrides** the text-derived PMH `pmh_data` for all 19 columns; when empty/invalid it falls back to self-report. The parse + override use the shared `parse_pmh_lookup` helper.
+- **`tasks.yaml`'s `triage_assessment_task` gained step "1b"**: if `subject_id` is a positive integer, call `patient_history_lookup_tool` with `current_intime="now"` first, then pass the returned `pmh_block` as `pmh_lookup_json` to the triage tool. `subject_id = -1` / `known_patient: false` → empty string → unchanged self-report path.
+- **Read-only reconciliation.** The record always wins the feature vector (matching training). A new `self_report_not_in_record` field surfaces conditions the patient mentioned that the record lacks (possible outside-system / new diagnosis) without altering the prediction.
+
+**Shared-helper relocation.** `parse_pmh_lookup` (previously duplicated in `doctor_disposition_tool.py` and `doctor_tool_v3.py`) and the new `pmh_self_report_discrepancy` now live in [`pmh_features.py`](../../src/proiect_licenta/pmh_features.py) as the single source of truth; triage and both doctor tools import from there. All three tools now emit `self_report_not_in_record`.
+
+**Note on the doctor side:** the initial doctor (`doctor_tool_v3_base`) has **no** PMH features, so it is *not* a PMH consumer and was intentionally left untouched. The disposition + reassessment tools already called the lookup and are unchanged.
 
 **Operator note: iter-2 v3 weights required on disk.** The runtime expects `artifacts/triage/v3/` to contain the **iter-2** kept artifacts (2070 features). If your Drive currently has iter-3 weights (2114 features, includes the reverted red-flag columns), re-train via the Colab notebook against the post-revert HEAD to restore iter-2 weights. The smoke tests in `tools/triage_tool.py` exercise feature-vector shape (asserts 2070 cols) so a weight mismatch will fail loudly at first call rather than silently corrupting predictions.
 

@@ -101,6 +101,8 @@ from proiect_licenta.pmh_vocab import (
 )
 from proiect_licenta.pmh_features import (
     PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS,
+    parse_pmh_lookup as _parse_pmh_lookup,
+    pmh_self_report_discrepancy,
 )
 
 
@@ -137,36 +139,6 @@ VITAL_MEDIANS = {
     "temperature": 98.1, "heartrate": 84, "resprate": 18,
     "o2sat": 98, "sbp": 134, "dbp": 78,
 }
-
-
-def _parse_pmh_lookup(pmh_lookup_json: str):
-    """Parse the PatientHistoryLookupTool `pmh_block` into a full PMH_FEATURE_COLS
-    dict, or return None to fall back to the ask-the-patient text path.
-
-    Accepts either the raw `pmh_block` object or the tool's full output (with a
-    nested `pmh_block`). Returns None on empty/invalid input or a block missing
-    any required column — so a malformed lookup never silently corrupts the
-    feature vector; it just reverts to self-report.
-    """
-    if not pmh_lookup_json or not str(pmh_lookup_json).strip():
-        return None
-    try:
-        obj = json.loads(pmh_lookup_json)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(obj, dict) and "pmh_block" in obj:
-        obj = obj["pmh_block"]
-    if not isinstance(obj, dict) or not all(col in obj for col in PMH_FEATURE_COLS):
-        return None
-    block = {}
-    for col in PMH_FEATURE_COLS:
-        v = obj[col]
-        if col in ("days_since_last_admission", "days_since_last_ed",
-                   "same_complaint_as_prior"):
-            block[col] = float(v)
-        else:
-            block[col] = int(v)
-    return block
 
 
 def _classify_medications(medications_raw: str) -> dict:
@@ -472,6 +444,15 @@ class DoctorDispositionTool(BaseTool):
             pmh_data["same_complaint_as_prior"] = 0.0
             pmh_data["no_history"] = pmh_no_history
 
+        # Read-only reconciliation: conditions the patient mentioned that the
+        # real record didn't have (the record still wins for the feature vector;
+        # this is only surfaced to the clinician). Empty unless the EHR lookup
+        # was used AND the patient also gave free-text history.
+        self_report_not_in_record = (
+            pmh_self_report_discrepancy(prior_history, lookup_block)
+            if used_history_lookup else []
+        )
+
         # ── 5. Single-row df for the cascade input (v3 build_features) ──
         df_cascade = pd.DataFrame({
             "chiefcomplaint": [chief_complaints],
@@ -676,6 +657,11 @@ class DoctorDispositionTool(BaseTool):
                     "days_since_last_ed": float(pmh_data["days_since_last_ed"]),
                     "same_complaint_as_prior": float(pmh_data["same_complaint_as_prior"]),
                 } if used_history_lookup else None),
+                # Read-only: self-reported conditions absent from the prior
+                # record (the record still drives the prediction). Possible
+                # outside-system or newly-identified history worth a clinician's
+                # attention. Empty unless the lookup overrode a non-empty report.
+                "self_report_not_in_record": self_report_not_in_record,
             },
             "model_version": "doctor_disposition_v3 (Option B, plan section 3)",
         }

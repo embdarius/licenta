@@ -609,7 +609,17 @@ for known patients and `known_patient=false` (ask-the-patient fallback) for
 first-time/unknown ones. The disposition + v3 doctor tools gained a
 `pmh_lookup_json` override arg (mirrors `vital_trajectory_json`); the benchmark
 gained a `tool_direct_lookup` column next to `tool_direct` (the gap = the value
-of EHR access at triage). **Leakage discipline** is enforced + asserted in
+of EHR access at triage). **Extended to triage (2026-06-03):** `triage_tool.py`
+gained the same `pmh_lookup_json` override, `PatientHistoryLookupTool` is
+registered on the triage agent, and `triage_assessment_task` step 1b calls the
+lookup for returning patients — so real prior-encounter numerics reach the
+triage acuity/disposition models, not just the doctor stage. `parse_pmh_lookup`
++ the new `pmh_self_report_discrepancy` were hoisted into `pmh_features.py`
+(single source of truth). The benchmark's `tool_direct` path now also forwards
+the block to the triage call, so `tool_direct_lookup` exercises the triage-side
+lookup (the E2E real-crew column already did via the crew); the published table
+predates this wiring (acuity flat across lookup columns) — a re-run is pending.
+**Leakage discipline** is enforced + asserted in
 `assemble_pmh_for_stay` (`< intime` only). Per-stay logic is unit-tested, and a
 single-case real-data check confirms the mechanism: built over the cohort, the
 tool returns stay `37744212`'s real `days_since_last_admission = 2.71` /

@@ -47,10 +47,17 @@ class ProiectLicenta():
 
     @agent
     def triage_agent(self) -> Agent:
-        """Triage Agent — predicts ESI acuity + admission using triage v3."""
+        """Triage Agent — predicts ESI acuity + admission using triage v3.
+
+        Also carries PatientHistoryLookupTool so a returning patient's real
+        prior-encounter PMH block (keyed on MRN / subject_id) reaches the triage
+        model — recovering the days-since-last-visit / same-complaint numerics
+        the bedside interview can't, the same way the doctor disposition +
+        reassessment tasks already do.
+        """
         return Agent(
             config=self.agents_config['triage_agent'],  # type: ignore[index]
-            tools=[TriagePredictionTool()],
+            tools=[TriagePredictionTool(), PatientHistoryLookupTool()],
             verbose=True,
         )
 

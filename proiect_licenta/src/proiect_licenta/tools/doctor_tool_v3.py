@@ -78,39 +78,18 @@ from proiect_licenta.tools.vital_trajectory_io import (
 from proiect_licenta.pmh_vocab import (
     PMH_CATEGORIES, flags_from_text as pmh_flags_from_text,
 )
+# Shared PMH lookup parsing + self-report reconciliation (single source of
+# truth in pmh_features; the triage and disposition tools use the same ones).
+from proiect_licenta.pmh_features import (
+    parse_pmh_lookup as _parse_pmh_lookup,
+    pmh_self_report_discrepancy,
+)
 
 # Vital sign medians (from training data, used when patient doesn't know)
 VITAL_MEDIANS = {
     "temperature": 98.1, "heartrate": 84, "resprate": 18,
     "o2sat": 98, "sbp": 134, "dbp": 78,
 }
-
-
-def _parse_pmh_lookup(pmh_lookup_json: str):
-    """Parse a PatientHistoryLookupTool `pmh_block` into a full PMH_FEATURE_COLS
-    dict, or return None to fall back to the ask-the-patient text path. Accepts
-    either the raw `pmh_block` or the tool's full output (nested `pmh_block`).
-    Returns None on empty/invalid input or any missing column, so a malformed
-    lookup reverts to self-report rather than corrupting the feature vector."""
-    if not pmh_lookup_json or not str(pmh_lookup_json).strip():
-        return None
-    try:
-        obj = json.loads(pmh_lookup_json)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(obj, dict) and "pmh_block" in obj:
-        obj = obj["pmh_block"]
-    if not isinstance(obj, dict) or not all(col in obj for col in PMH_FEATURE_COLS):
-        return None
-    block = {}
-    for col in PMH_FEATURE_COLS:
-        v = obj[col]
-        if col in ("days_since_last_admission", "days_since_last_ed",
-                   "same_complaint_as_prior"):
-            block[col] = float(v)
-        else:
-            block[col] = int(v)
-    return block
 
 
 def classify_medications(medications_raw: str) -> dict:
@@ -605,6 +584,14 @@ class DoctorPredictionToolV3(BaseTool):
             pmh_data["same_complaint_as_prior"] = 0.0
             pmh_data["no_history"] = pmh_no_history
 
+        # Read-only reconciliation: conditions the patient mentioned that the
+        # real record didn't have (the record still wins for the feature
+        # vector). Empty unless the EHR lookup overrode a non-empty self-report.
+        self_report_not_in_record = (
+            pmh_self_report_discrepancy(prior_history, lookup_block)
+            if used_history_lookup else []
+        )
+
         pmh_df = pd.DataFrame(
             {col: [pmh_data[col]] for col in PMH_FEATURE_COLS}
         )
@@ -719,6 +706,10 @@ class DoctorPredictionToolV3(BaseTool):
                     "days_since_last_ed": float(pmh_data["days_since_last_ed"]),
                     "same_complaint_as_prior": float(pmh_data["same_complaint_as_prior"]),
                 } if used_history_lookup else None),
+                # Read-only: self-reported conditions absent from the prior
+                # record (the record still drives the prediction). Empty unless
+                # the lookup overrode a non-empty self-report.
+                "self_report_not_in_record": self_report_not_in_record,
             },
             "diagnosis_prediction": {
                 "predicted_category": diag_label,

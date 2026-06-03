@@ -51,7 +51,10 @@ triage_agent:
     arrival_transport, and optionally vital signs (temperature, heartrate, resprate,
     o2sat, sbp, dbp). For ambulance/helicopter patients, vital signs from EMS are
     available — pass them to the tool. For walk-in patients, omit vitals (use -1).
-    Pass all available information from the previous task to the tool.
+    Pass all available information from the previous task to the tool. When a
+    returning patient provides an MRN (subject_id), you first look up their real
+    prior medical history with the patient_history_lookup_tool and feed that
+    record into the prediction instead of relying on the patient's recall.
 
 doctor_agent:
   role: >
