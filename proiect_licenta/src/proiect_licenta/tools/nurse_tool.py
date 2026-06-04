@@ -49,6 +49,60 @@ def _parse_bp(text: str) -> tuple[float | None, float | None]:
     return None, None
 
 
+def _parse_timestamp(text: str) -> float | None:
+    """Parse an optional reading timestamp into a sortable float key, else None.
+
+    Accepts a 24h clock time ('14:30' -> minutes since midnight) or a relative
+    number of minutes ('15', '+15', '15 min', '15 minutes'). Blank / 'now' /
+    skip-words -> None (the reading then falls back to collection order). Mixing
+    clock-time and relative formats within one session is the user's
+    responsibility; if any reading lacks a timestamp the caller uses entry order
+    for the whole session anyway, so a single consistent format is all that
+    matters."""
+    text = text.strip().lower()
+    if text in SKIP_WORDS or text in ("now", "current"):
+        return None
+    m = re.match(r'^(\d{1,2}):(\d{2})$', text)
+    if m:
+        return float(int(m.group(1)) * 60 + int(m.group(2)))
+    m = re.search(r'-?\d+(?:\.\d+)?', text)
+    return float(m.group()) if m else None
+
+
+_VITAL_FIELDS = ("temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp")
+
+
+def _collect_reading_round(idx: int) -> dict:
+    """Interactively collect ONE chronological set of vital readings + cardiac
+    rhythm + an optional timestamp. Returns a dict with the 6 vitals, `rhythm`,
+    and `ts` (float sort-key or None). `idx` is 1-based, for display only."""
+    tag = "first set" if idx == 1 else f"set #{idx}"
+    print(f"\n  --- Reading {tag} ---")
+    print("  [Nurse]: Temperature? (Fahrenheit, e.g., 98.6)")
+    temp = _parse_numeric(input("  [You]:   "))
+    print("\n  [Nurse]: Heart rate? (bpm, e.g., 80)")
+    hr = _parse_numeric(input("  [You]:   "))
+    print("\n  [Nurse]: Respiratory rate? (breaths/min, e.g., 16)")
+    rr = _parse_numeric(input("  [You]:   "))
+    print("\n  [Nurse]: Oxygen saturation? (%, e.g., 98)")
+    o2 = _parse_numeric(input("  [You]:   "))
+    print("\n  [Nurse]: Blood pressure? (e.g., 120/80)")
+    sbp, dbp = _parse_bp(input("  [You]:   "))
+    print("\n  [Nurse]: Cardiac rhythm? (e.g., 'sinus', 'atrial fibrillation',")
+    print("           'paced'; skip if no monitor or unknown)")
+    rhythm = input("  [You]:   ").strip()
+    if rhythm.lower() in SKIP_WORDS:
+        rhythm = None
+    print("\n  [Nurse]: Time of this reading? (clock time like 14:30, OR minutes")
+    print("           since arrival like 15; press Enter / 'skip' to use the")
+    print("           order you enter readings in)")
+    ts = _parse_timestamp(input("  [You]:   "))
+    return {
+        "temperature": temp, "heartrate": hr, "resprate": rr,
+        "o2sat": o2, "sbp": sbp, "dbp": dbp, "rhythm": rhythm, "ts": ts,
+    }
+
+
 class NurseCollectionInput(BaseModel):
     """Input schema for the Nurse Data Collection Tool."""
     patient_context: str = Field(
@@ -66,10 +120,12 @@ class NurseDataCollectionTool(BaseTool):
         "temperature, heart rate, respiratory rate, oxygen saturation, blood "
         "pressure, cardiac rhythm (e.g. 'sinus' or 'atrial fibrillation'), "
         "current medications, chronic conditions / PMH (e.g. 'CHF, diabetes'), "
-        "and approximate number of prior hospital admissions. The patient can "
-        "skip any question they don't know. Returns structured JSON consumed "
-        "by the Doctor prediction tools (v2 and v3). "
-        "Call this tool with a brief patient context string."
+        "and approximate number of prior hospital admissions. It collects ONE "
+        "OR MORE chronological reading sets (each with an optional timestamp) so "
+        "the doctor models can use real vital trends; the full series rides in "
+        "the returned `vital_trajectory` block. The patient can skip any "
+        "question. Returns structured JSON consumed by the Doctor prediction "
+        "tools (v2 and v3). Call this tool with a brief patient context string."
     )
     args_schema: Type[BaseModel] = NurseCollectionInput
 
@@ -80,76 +136,53 @@ class NurseDataCollectionTool(BaseTool):
         print(f"{'='*55}")
         print("  (Type 'skip' or press Enter if you don't know)\n")
 
-        # Temperature
-        print("  [Nurse]: What is your temperature? (Fahrenheit, e.g., 98.6)")
-        temp = _parse_numeric(input("  [You]:   "))
+        # Collect ONE OR MORE chronological reading sets. The first set is the
+        # primary/arrival snapshot; each additional set lets the doctor models
+        # build real vital TRENDS (min/max/last/delta + abnormal-reading counts)
+        # instead of a single snapshot, which materially improves the admit/
+        # discharge prediction and brings the runtime closer to the feature-
+        # vector benchmark (which aggregates every reading in the 4h window).
+        rounds = [_collect_reading_round(1)]
+        _MAX_ROUNDS = 24  # safety cap against a runaway interactive loop
+        while len(rounds) < _MAX_ROUNDS:
+            print("\n  [Nurse]: Add another set of readings taken later in the visit?")
+            print("           ('y' to add one to capture the vital trend;")
+            print("            anything else to finish)")
+            if input("  [You]:   ").strip().lower() not in (
+                "y", "yes", "another", "more", "add",
+            ):
+                break
+            rounds.append(_collect_reading_round(len(rounds) + 1))
 
-        # Heart rate
-        print("\n  [Nurse]: What is your heart rate? (beats per minute, e.g., 80)")
-        hr = _parse_numeric(input("  [You]:   "))
+        # Order the rounds chronologically. If EVERY round carries a timestamp,
+        # sort by it (so readings can be entered out of order); otherwise keep
+        # entry order as the chronological proxy — the no-timestamp fallback.
+        # All-or-nothing avoids interleaving timestamped + untimestamped sets.
+        if len(rounds) > 1 and all(r["ts"] is not None for r in rounds):
+            ordered = sorted(rounds, key=lambda r: r["ts"])
+        else:
+            ordered = rounds
 
-        # Respiratory rate
-        print("\n  [Nurse]: How many breaths per minute? (e.g., 16)")
-        rr = _parse_numeric(input("  [You]:   "))
+        # The first ENTERED set is the primary/arrival snapshot — it populates
+        # `vital_signs` (the v2 tool + the doctor tools' single-snapshot cascade
+        # and longitudinal fallback). The trajectory below carries the full
+        # ordered series, from which the doctor tools build min/max/last/delta.
+        primary = rounds[0]
+        temp = primary["temperature"]; hr = primary["heartrate"]
+        rr = primary["resprate"]; o2 = primary["o2sat"]
+        sbp = primary["sbp"]; dbp = primary["dbp"]
+        rhythm_raw = primary["rhythm"]
 
-        # O2 saturation
-        print("\n  [Nurse]: What is your oxygen saturation? (percentage, e.g., 98)")
-        o2 = _parse_numeric(input("  [You]:   "))
-
-        # Blood pressure
-        print("\n  [Nurse]: What is your blood pressure? (e.g., 120/80)")
-        sbp, dbp = _parse_bp(input("  [You]:   "))
-
-        # Optional SECOND set of readings — lets the doctor models use real
-        # vital TRENDS (min/max/last/delta) instead of a single snapshot, which
-        # materially improves the admit/discharge prediction. Entirely
-        # skippable; the first reading above is always kept.
-        print("\n  [Nurse]: I'd like a second set of readings if available to")
-        print("           track any trend (e.g. after a few minutes). You can")
-        print("           skip any of these.")
-        print("  [Nurse]: Second temperature? (Fahrenheit)")
-        temp2 = _parse_numeric(input("  [You]:   "))
-        print("\n  [Nurse]: Second heart rate? (bpm)")
-        hr2 = _parse_numeric(input("  [You]:   "))
-        print("\n  [Nurse]: Second respiratory rate? (breaths/min)")
-        rr2 = _parse_numeric(input("  [You]:   "))
-        print("\n  [Nurse]: Second oxygen saturation? (%)")
-        o22 = _parse_numeric(input("  [You]:   "))
-        print("\n  [Nurse]: Second blood pressure? (e.g. 120/80)")
-        sbp2, dbp2 = _parse_bp(input("  [You]:   "))
-        print("\n  [Nurse]: Second cardiac rhythm reading? (skip if none)")
-        rhythm2_raw = input("  [You]:   ").strip()
-        if rhythm2_raw.lower() in SKIP_WORDS:
-            rhythm2_raw = None
-
-        # Build the chronological trajectory per vital from the first + second
-        # readings (dropping any the patient skipped). Order is preserved so
-        # `last` and `delta` are time-correct downstream.
-        _traj_pairs = {
-            "temperature": (temp, temp2), "heartrate": (hr, hr2),
-            "resprate": (rr, rr2), "o2sat": (o2, o22),
-            "sbp": (sbp, sbp2), "dbp": (dbp, dbp2),
-        }
+        # Build the chronological trajectory per vital (dropping skipped values),
+        # plus the rhythm reading sequence, from the ordered rounds. Same wire
+        # format as before ({vital: [floats], "rhythm": [strs]}), so the doctor
+        # tools / aggregator are unchanged.
         vital_trajectory = {}
-        for _vname, _readings in _traj_pairs.items():
-            _seq = [float(x) for x in _readings if x is not None]
+        for _vname in _VITAL_FIELDS:
+            _seq = [float(r[_vname]) for r in ordered if r[_vname] is not None]
             if _seq:
                 vital_trajectory[_vname] = _seq
-
-        # Cardiac rhythm
-        print("\n  [Nurse]: Cardiac rhythm — what does the heart monitor show?")
-        print("           (e.g., 'sinus', 'normal sinus rhythm', 'atrial fibrillation',")
-        print("            'afib', 'paced'; skip if no monitor or unknown)")
-        rhythm_raw = input("  [You]:   ").strip()
-        if rhythm_raw.lower() in SKIP_WORDS:
-            rhythm_raw = None
-
-        # Carry BOTH rhythm readings (first + optional second) inside the
-        # vital_trajectory blob under a "rhythm" key, so the doctor tools can
-        # aggregate them the way training does (mode bucket + any-non-sinus
-        # rhythm_irregular) instead of seeing only one reading. The top-level
-        # `rhythm` string below stays the first reading for the v2 tool + display.
-        _rhythm_readings = [r for r in (rhythm_raw, rhythm2_raw) if r]
+        _rhythm_readings = [r["rhythm"] for r in ordered if r["rhythm"]]
         if _rhythm_readings:
             vital_trajectory["rhythm"] = _rhythm_readings
 
@@ -207,9 +240,16 @@ class NurseDataCollectionTool(BaseTool):
         }
 
         available = sum(1 for v in result["vital_signs"].values() if v is not None)
-        print(f"\n  [Nurse]: Thank you! Collected {available}/6 vital signs.")
+        _n_sets = len(rounds)
+        _sorted_note = " (timestamp-ordered)" if (
+            _n_sets > 1 and all(r["ts"] is not None for r in rounds)
+        ) else ""
+        print(f"\n  [Nurse]: Thank you! Collected {available}/6 vital signs "
+              f"across {_n_sets} reading set(s){_sorted_note}.")
         if rhythm_raw:
-            print(f"           Cardiac rhythm: {rhythm_raw}")
+            print(f"           Cardiac rhythm: {rhythm_raw}"
+                  + (f" (+{len(_rhythm_readings) - 1} more)"
+                     if len(_rhythm_readings) > 1 else ""))
         if meds_raw:
             print(f"           Medications recorded: {meds_raw}")
         else:

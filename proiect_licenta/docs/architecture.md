@@ -95,7 +95,7 @@ feature-vector, feature-vector-gated, and E2E — which between them separate th
 disposition-gate cost, the runtime feature-degradation cost, and the LLM cost.
 This is the only LLM-generation component and it never sits in the
 patient-facing pipeline. It also drove a live-pipeline improvement — the
-**multi-reading-vitals fix** (the nurse tool can collect a second reading so the
+**multi-reading-vitals fix** (the nurse tool can collect one or more additional readings, optionally timestamped, so the
 disposition + v3 doctor tools build real longitudinal-vital features via
 `build_longitudinal_block` instead of a single-snapshot fallback). Full design
 in [`agents/case-generation-agent.md`](agents/case-generation-agent.md).

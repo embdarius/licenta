@@ -221,8 +221,9 @@ Dx coverage (cases where the gated pipeline produced a diagnosis): tool-direct
 longitudinal-vitals features from a **single snapshot** (`min=max=last=snapshot`,
 `delta=0`, `has_longitudinal_vitals=0`), because the live nurse only took one
 reading. Measured effect on the 13 admitted cases: mean disposition P(admit)
-**0.624 → 0.486** in the snapshot path. The fix: the nurse tool optionally
-collects a **second set of readings**; a shared `build_longitudinal_block`
+**0.624 → 0.486** in the snapshot path. The fix: the nurse tool collects **one or
+more additional reading sets** (an "add another set?" loop, each optionally
+timestamped and sorted chronologically; 2026-06-03); a shared `build_longitudinal_block`
 (`src/proiect_licenta/vital_trajectory.py`, the same aggregation as
 `train_nurse_v3`) builds **real** min/max/last/delta + abnormal-reading counts
 when ≥1 trajectory is present (`has_longitudinal_vitals=1`). The doctor
@@ -288,7 +289,7 @@ gate decision (P(admit) crossing 0.40) or a top-1 argmax; at 13 cases one flip =
 3. **Rhythm: one reading vs many — CLOSED.** The loader aggregates rhythm across
    all readings in the 4h window (one-hot = mode bucket, `irregular=1` if *any*
    reading is non-sinus). The runtime previously bucketed only the first reported
-   string. Now the nurse collects a second rhythm reading, the readings ride
+   string. Now the nurse collects a rhythm reading per chronological reading set, the readings ride
    inside the `vital_trajectory` blob under a `"rhythm"` key (parsed by
    `parse_rhythm_readings`), and `build_longitudinal_block` aggregates them with
    the *exact* training logic (mode + any-non-sinus). A single reading is the

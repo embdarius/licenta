@@ -280,8 +280,9 @@ nurse_data_collection_task:
 
     Include the FULL JSON output from the tool in your response so the doctor
     can parse it for the enhanced assessment. The JSON contains `rhythm`,
-    `prior_history`, `n_prior_admissions`, and `vital_trajectory` (multiple
-    readings per vital, if a second set was collected) in addition to
+    `prior_history`, `n_prior_admissions`, and `vital_trajectory` (the full
+    chronological series — one or more reading sets, ordered by timestamp when
+    provided) in addition to
     `vital_signs` and `medications_raw`; the v2 doctor tool ignores the
     extras, the v3 doctor + disposition tools consume them. Preserve the
     `vital_trajectory` object verbatim so the doctor can forward it.

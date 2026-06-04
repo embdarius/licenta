@@ -658,10 +658,11 @@ confirmed, no regressions). Full writeup in
 
 **Rhythm divergence (#3) — CLOSED.** The runtime previously bucketed a single
 rhythm string while training aggregated all readings in the 4h window (mode
-one-hot + any-non-sinus `irregular`). Now the nurse collects a second rhythm
-reading, the readings travel inside the `vital_trajectory` blob (`"rhythm"` key,
-`parse_rhythm_readings`), and `build_longitudinal_block` aggregates them with the
-exact training logic; a single reading is the degenerate case (unchanged). The
+one-hot + any-non-sinus `irregular`). Now the nurse collects one or more rhythm
+readings (one per chronological reading set; 2026-06-03), the readings travel
+inside the `vital_trajectory` blob (`"rhythm"` key, `parse_rhythm_readings`), and
+`build_longitudinal_block` aggregates them with the exact training logic; a
+single reading is the degenerate case (unchanged). The
 benchmark's `pull_rhythm_readings` feeds the full in-window sequence so
 `tool-direct` matches the feature-vector rhythm features. Unit-tested and
 exercised in the 20-case re-run — **no regression** (only 2 cases had in-window

@@ -30,16 +30,31 @@ Blood pressure accepts the familiar `"120/80"` format and is split into SBP / DB
 Implemented in `src/proiect_licenta/tools/nurse_tool.py` (`NurseDataCollectionTool`).
 
 1. The tool receives `patient_context` summarizing the triage + initial assessment.
-2. It prompts the patient via stdin for each vital sign, one at a time.
-3. Then it prompts for the medication list.
+2. It collects **one or more chronological reading sets** (each: the 6 vitals + cardiac rhythm + an optional timestamp), looping with an "add another set?" prompt — see *Multi-reading collection* below.
+3. Then it prompts for the medication list, past medical history (chronic conditions), and approximate prior-admission count (v3 additions).
 4. It returns a JSON payload with:
-   - `vital_signs` dict (raw values plus any that were reported)
-   - `medications_raw` list (free-text entries, classified downstream by `DoctorPredictionToolV2`)
+   - `vital_signs` dict — the **first (arrival) reading set**, the single-snapshot fallback the doctor tools use for the triage cascade.
+   - `vital_trajectory` dict — the full chronological series `{vital: [floats], "rhythm": [strs]}`; the v3 + disposition tools build real `min/max/last/delta` + abnormal-reading counts + the rhythm mode/`irregular` flags from it. (The v2 tool ignores it.)
+   - `rhythm` — the first reading's cardiac rhythm string (v2 + display).
+   - `medications_raw` — free-text list, classified downstream.
+   - `prior_history` + `n_prior_admissions` — self-reported PMH (v3; overridden by the MRN/EHR lookup when available).
 
 Helper utilities:
 - `_parse_numeric` — tolerant float parser (strips units, handles commas).
 - `_parse_bp` — splits `"120/80"` style input.
+- `_parse_timestamp` — parses an optional reading time (clock time `14:30` → minutes since midnight, or relative minutes `15`/`+15`); blank/`now`/skip → `None`.
+- `_collect_reading_round` — collects one chronological reading set (6 vitals + rhythm + optional timestamp).
 - `SKIP_WORDS` — set of tokens treated as "I don't know" / skip (empty string, `skip`, `unknown`, `idk`, `i don't know`, etc.).
+
+### Multi-reading collection (2026-06-03)
+
+A real ED charts vitals repeatedly over a stay, and the v3/disposition models were trained on **all** `vitalsign.csv` readings within the first 4h — so a single snapshot under-represents the patient. The tool therefore collects a variable-length series:
+
+- The **first set** is the primary/arrival reading (populates `vital_signs`).
+- An **"add another set?"** loop appends further sets (capped at 24) — each with an **optional per-reading timestamp**.
+- **Ordering:** if *every* set carries a timestamp, the series is **sorted by it** (so out-of-order entry is fine); if *any* set lacks one, the tool keeps **entry order** as the chronological proxy (the no-timestamp fallback — all-or-nothing, to avoid interleaving). No reading is ever dropped — the training 4h window exists to prevent *leakage*, which doesn't apply at live prediction time, so windowing is unnecessary at runtime.
+- The wire format is unchanged (`vital_trajectory` value-lists), so the aggregator (`vital_trajectory.build_longitudinal_block`) and the doctor tools required **no** changes — timestamps are consumed at collection time and only the ordered values are emitted.
+- This is **live-runtime only**; the offline benchmark already supplies the full in-window series via the case generator's `pull_vital_trajectory`.
 
 ---
 
