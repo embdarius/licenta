@@ -40,6 +40,15 @@ RESOLVER_META_FILENAME = "metadata.json"
 
 GRANULARITIES = ("rollup", "full")
 
+# Physiology features for the vitals-conditioned similarity term (Stage-2 v2).
+# 6 continuous vitals + 7 binary abnormal flags, all z-scored together so a
+# Euclidean "nearest physiological prototype" comparison is scale-consistent.
+# Column names match _clean_vitals (train_nurse) and doctor_tool_v3.
+PHYSIO_CONT = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
+PHYSIO_FLAGS = ["fever", "tachycardia", "bradycardia", "tachypnea",
+                "hypoxia", "hypertension", "hypotension"]
+PHYSIO_COLS = PHYSIO_CONT + PHYSIO_FLAGS
+
 
 # ---------------------------------------------------------------------------
 # ICD code rollup
@@ -84,7 +93,7 @@ def vectorize_query(text, tfidf) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Index construction
 # ---------------------------------------------------------------------------
-def build_index(vectors_l2, codes, titles, categories) -> dict:
+def build_index(vectors_l2, codes, titles, categories, physio=None) -> dict:
     """Build a per-category candidate index from train-split rows.
 
     Parameters
@@ -94,15 +103,19 @@ def build_index(vectors_l2, codes, titles, categories) -> dict:
                  desired granularity by the caller).
     titles     : length-n sequence of human-readable ICD titles.
     categories : length-n sequence of diagnosis-group labels.
+    physio     : optional (n, P) standardized physiology matrix (z-scored vitals
+                 + flags, see `physio_matrix`). When given, a per-code vitals
+                 centroid is stored for the vitals-conditioned similarity term.
 
     Returns
     -------
     dict: category_label -> {
-        "codes":      list[str]        (m candidates),
-        "titles":     list[str]        (representative title per code),
-        "prevalence": float32 (m,)     (count / category_total),
-        "centroids":  float32 (m, V)   (L2-normalized prototype per code),
-        "n_total":    int,
+        "codes":          list[str]        (m candidates),
+        "titles":         list[str]        (representative title per code),
+        "prevalence":     float32 (m,)     (count / category_total),
+        "centroids":      float32 (m, V)   (L2-normalized text prototype per code),
+        "vital_centroids":float32 (m, P) or None  (mean standardized physiology),
+        "n_total":        int,
     }
     """
     n = vectors_l2.shape[0]
@@ -116,7 +129,7 @@ def build_index(vectors_l2, codes, titles, categories) -> dict:
     index: dict = {}
     for cat, sub in meta.groupby("cat", sort=True):
         total = len(sub)
-        code_list, title_list, prev_list, centroids = [], [], [], []
+        code_list, title_list, prev_list, centroids, vital_centroids = [], [], [], [], []
         for code, cg in sub.groupby("code", sort=True):
             rows = cg["row"].to_numpy()
             centroid = np.asarray(vectors_l2[rows].mean(axis=0)).ravel()
@@ -130,15 +143,113 @@ def build_index(vectors_l2, codes, titles, categories) -> dict:
             title_list.append(str(mode.iloc[0]) if len(mode) else "")
             prev_list.append(len(cg) / total)
             centroids.append(centroid.astype(np.float32))
+            if physio is not None:
+                vital_centroids.append(physio[rows].mean(axis=0).astype(np.float32))
 
         index[cat] = {
             "codes": code_list,
             "titles": title_list,
             "prevalence": np.asarray(prev_list, dtype=np.float32),
             "centroids": np.vstack(centroids).astype(np.float32),
+            "vital_centroids": (
+                np.vstack(vital_centroids).astype(np.float32)
+                if physio is not None else None
+            ),
             "n_total": int(total),
         }
     return index
+
+
+# ---------------------------------------------------------------------------
+# Physiology (vitals) standardization + similarity (Stage-2 v2)
+# ---------------------------------------------------------------------------
+def build_standardizer(df) -> dict:
+    """Fit a z-score standardizer over PHYSIO_COLS from training rows.
+
+    Continuous vitals and binary flags are standardized together so the
+    Euclidean "nearest physiological prototype" comparison treats every
+    dimension on the same scale. Returns {cols, mean, std} (std floored away
+    from 0 to avoid divide-by-zero on a constant column).
+    """
+    X = df[PHYSIO_COLS].astype(float)
+    mean = X.mean().to_numpy().astype(np.float32)
+    std = X.std(ddof=0).to_numpy().astype(np.float32)
+    std = np.where(std < 1e-8, np.float32(1.0), std)
+    return {"cols": list(PHYSIO_COLS), "mean": mean, "std": std}
+
+
+def physio_matrix(df, standardizer) -> np.ndarray:
+    """Standardize a DataFrame's PHYSIO_COLS into an (n, P) z-scored matrix."""
+    X = df[standardizer["cols"]].astype(float).to_numpy()
+    return ((X - standardizer["mean"]) / standardizer["std"]).astype(np.float32)
+
+
+def physio_vector(values: dict, standardizer) -> np.ndarray:
+    """Standardize a single patient's physiology dict into a (P,) vector.
+
+    Missing entries fall back to the training mean (→ z-score 0, "average"),
+    matching how the doctor model imputes unknown vitals.
+    """
+    cols, mean, std = standardizer["cols"], standardizer["mean"], standardizer["std"]
+    x = np.empty(len(cols), dtype=np.float32)
+    for i, c in enumerate(cols):
+        v = values.get(c, None)
+        x[i] = float(v) if v is not None else float(mean[i])
+    return ((x - mean) / std).astype(np.float32)
+
+
+def _neg_euclidean(queries, centroids) -> np.ndarray:
+    """Negative Euclidean distance — higher = closer. Supports (P,) or (N,P)."""
+    q = np.asarray(queries, dtype=np.float32)
+    c = np.asarray(centroids, dtype=np.float32)
+    if q.ndim == 1:
+        return -np.sqrt(np.maximum(((c - q) ** 2).sum(axis=1), 0.0))
+    q2 = (q * q).sum(axis=1)[:, None]
+    c2 = (c * c).sum(axis=1)[None, :]
+    d2 = np.maximum(q2 + c2 - 2.0 * (q @ c.T), 0.0)
+    return -np.sqrt(d2)
+
+
+def blend3(text_cos, vitals_sim, prevalence, weights) -> np.ndarray:
+    """Three-term blend: w_text·text + w_vit·vitals + w_prev·prevalence.
+
+    Each term is min-max normalized within the candidate set first. Supports a
+    single query (1-D `text_cos`/`vitals_sim`) or a batch (2-D, shape (N, m)).
+    `weights` is a dict with keys text/vit/prev. `vitals_sim` may be None when
+    w_vit == 0 (text-only / prevalence-only baselines).
+    """
+    wt, wv, wp = weights["text"], weights.get("vit", 0.0), weights["prev"]
+    prev_n = _minmax(prevalence)
+    text_cos = np.asarray(text_cos, dtype=np.float32)
+    if text_cos.ndim == 1:
+        t = _minmax(text_cos)
+        v = _minmax(vitals_sim) if (wv and vitals_sim is not None) else 0.0
+        return wt * t + wv * v + wp * prev_n
+    t = _minmax_rows(text_cos)
+    v = _minmax_rows(vitals_sim) if (wv and vitals_sim is not None) else 0.0
+    return wt * t + wv * (v if np.isscalar(v) else v) + wp * prev_n[None, :]
+
+
+def rank_within_category_v2(text_q_l2, physio_q, cat_entry, weights, k):
+    """Single-query ranking with the optional vitals term.
+
+    `physio_q` is a (P,) standardized patient physiology vector (or None).
+    Returns (code, title, score, text_cos, prevalence) tuples, best first.
+    """
+    centroids = cat_entry["centroids"]
+    text_cos = centroids @ np.asarray(text_q_l2, dtype=np.float32).ravel()
+    vc = cat_entry.get("vital_centroids")
+    if physio_q is not None and vc is not None and weights.get("vit", 0.0) > 0:
+        vitals_sim = _neg_euclidean(physio_q, vc)
+    else:
+        vitals_sim = None
+    score = blend3(text_cos, vitals_sim, cat_entry["prevalence"], weights)
+    order = np.argsort(score)[::-1][:k]
+    return [
+        (cat_entry["codes"][i], cat_entry["titles"][i], float(score[i]),
+         float(text_cos[i]), float(cat_entry["prevalence"][i]))
+        for i in order
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -254,14 +365,62 @@ def resolve_exact_diagnoses(
     return {"per_category": per_category, "flat_top": flat[:k_flat]}
 
 
+def resolve_exact_diagnoses_v2(
+    category_probs,
+    query_l2: np.ndarray,
+    physio_q,
+    granularity_index: dict,
+    weights: dict,
+    k_per_cat: int = 5,
+    k_flat: int = 10,
+) -> dict:
+    """Like `resolve_exact_diagnoses` but with the vitals-conditioned term.
+
+    `physio_q` is a (P,) standardized patient physiology vector (or None to
+    fall back to text+prevalence). `weights` is the 3-term blend {text,vit,prev}.
+    """
+    per_category, flat = [], []
+    for cat, p in category_probs:
+        entry = granularity_index.get(cat)
+        if entry is None:
+            continue
+        ranked = rank_within_category_v2(query_l2, physio_q, entry, weights, k_per_cat)
+        per_category.append({
+            "category": cat,
+            "p_category": float(p),
+            "codes": [
+                {"code": code, "title": title, "score": score,
+                 "text_cos": tc, "prevalence": prev}
+                for (code, title, score, tc, prev) in ranked
+            ],
+        })
+        for (code, title, score, tc, prev) in ranked:
+            flat.append({
+                "category": cat, "code": code, "title": title,
+                "combined": float(p) * score, "score": score,
+            })
+    flat.sort(key=lambda d: d["combined"], reverse=True)
+    return {"per_category": per_category, "flat_top": flat[:k_flat]}
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 def make_resolver(granularities: dict, alpha: float, vocab_size: int,
-                  tfidf_path: str, n_train: int, extra: dict | None = None) -> dict:
-    """Assemble the on-disk resolver object."""
+                  tfidf_path: str, n_train: int, weights: dict | None = None,
+                  standardizer: dict | None = None,
+                  extra: dict | None = None) -> dict:
+    """Assemble the on-disk resolver object.
+
+    `alpha` is the legacy 2-term text-vs-prevalence weight (kept so the
+    backward-compatible `rank_within_category` path keeps working). `weights`
+    is the tuned 3-term blend {text, vit, prev} and `standardizer` is the
+    physiology z-score fit — both needed for the vitals-conditioned v2 path.
+    """
     resolver = {
         "alpha": float(alpha),
+        "weights": weights,            # {"text":, "vit":, "prev":} or None
+        "standardizer": standardizer,  # {"cols":, "mean":, "std":} or None
         "granularities": granularities,   # {"rollup": {...}, "full": {...}}
         "vocab_size": int(vocab_size),
         "tfidf_path": str(tfidf_path),

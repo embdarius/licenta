@@ -97,8 +97,21 @@ def _attach_icd_version(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _oracle_recall(Q_test, df_test, true_cat_idx, gindex, diagnosis_labels,
-                   code_col, alpha):
+def _score_rows(Q_rows, physio_rows, entry, weights):
+    """3-term blended scores for a row subset against one category's candidates.
+
+    Falls back to text+prevalence when w_vit == 0 or the entry has no vitals
+    centroids (older resolver). Returns (n_rows, m)."""
+    text_cos = np.asarray(Q_rows @ entry["centroids"].T, dtype=np.float32)
+    vit = None
+    if weights.get("vit", 0.0) > 0 and physio_rows is not None \
+            and entry.get("vital_centroids") is not None:
+        vit = icdr._neg_euclidean(physio_rows, entry["vital_centroids"])
+    return icdr.blend3(text_cos, vit, entry["prevalence"], weights)
+
+
+def _oracle_recall(Q_test, physio_test, df_test, true_cat_idx, gindex,
+                   diagnosis_labels, code_col, weights):
     """Within the TRUE category, recall@5 / recall@10 of the true code."""
     n = len(df_test)
     hit5 = hit10 = scored = 0
@@ -110,8 +123,8 @@ def _oracle_recall(Q_test, df_test, true_cat_idx, gindex, diagnosis_labels,
         rows = np.where(true_cat_idx == c_idx)[0]
         if len(rows) == 0:
             continue
-        cos = np.asarray(Q_test[rows] @ entry["centroids"].T, dtype=np.float32)
-        score = icdr.blend_scores(cos, entry["prevalence"], alpha)
+        physio_rows = physio_test[rows] if physio_test is not None else None
+        score = _score_rows(Q_test[rows], physio_rows, entry, weights)
         order = np.argsort(-score, axis=1)
         codes_arr = np.asarray(entry["codes"])
         top5 = codes_arr[order[:, :K_PER_CAT]]
@@ -126,8 +139,8 @@ def _oracle_recall(Q_test, df_test, true_cat_idx, gindex, diagnosis_labels,
     return hit5 / scored, hit10 / scored, scored
 
 
-def _end_to_end_recall(Q_test, df_test, proba, top5_cat_idx, gindex,
-                       diagnosis_labels, code_col, alpha, true_cat_idx):
+def _end_to_end_recall(Q_test, physio_test, df_test, proba, top5_cat_idx, gindex,
+                       diagnosis_labels, code_col, weights, true_cat_idx):
     """End-to-end recall: union(top-5 cats x top-5 codes) and flat top-10.
 
     Also returns the conditional recall (rows whose true category is in the
@@ -145,8 +158,8 @@ def _end_to_end_recall(Q_test, df_test, proba, top5_cat_idx, gindex,
         rows = np.where((top5_cat_idx == c_idx).any(axis=1))[0]
         if len(rows) == 0:
             continue
-        cos = np.asarray(Q_test[rows] @ entry["centroids"].T, dtype=np.float32)
-        score = icdr.blend_scores(cos, entry["prevalence"], alpha)
+        physio_rows = physio_test[rows] if physio_test is not None else None
+        score = _score_rows(Q_test[rows], physio_rows, entry, weights)
         order = np.argsort(-score, axis=1)[:, :K_PER_CAT]
         codes_arr = np.asarray(entry["codes"])
         p_rows = proba[rows, c_idx]
@@ -227,15 +240,31 @@ def main():
     true_cat_idx = df_test["diagnosis_group"].map(diag_map).to_numpy()
     print(f"  Test set: {len(df_test):,} stays (shared by v3_base and v3 with-nurse)")
 
-    # 2. Shared resolver + query vectors.
+    # 2. Shared resolver + query vectors + standardized physiology.
     resolver = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
-    alpha_blend = resolver["alpha"]
     tfidf = joblib.load(TRIAGE_V1_DIR / "tfidf_vectorizer.joblib")
     Q_test = icdr.vectorize_queries(df_test["complaint_text_norm"].tolist(), tfidf)
-    variants = {"prevalence": 0.0, "cosine": 1.0, "blend": alpha_blend}
-    print(f"  Resolver alpha (tuned) = {alpha_blend:.2f} | n_train={resolver['n_train']:,}")
-    print("  (Stage-2 index is shared — its candidates + centroids do NOT depend on the")
-    print("   diagnosis model; only Stage-1's predicted categories differ between models.)")
+    standardizer = resolver.get("standardizer")
+    physio_test = (icdr.physio_matrix(df_test, standardizer)
+                   if standardizer is not None else None)
+
+    # Variants as 3-term weight dicts {text, vit, prev}. "blend" = tuned text+
+    # prevalence (no vitals); "blend+vitals" = tuned 3-term (the headline).
+    w_full = resolver["weights"]
+    w_novit = resolver.get("weights_novit") or {
+        "text": resolver["alpha"], "vit": 0.0, "prev": 1.0 - resolver["alpha"]}
+    variants = {
+        "prevalence":   {"text": 0.0, "vit": 0.0, "prev": 1.0},
+        "cosine":       {"text": 1.0, "vit": 0.0, "prev": 0.0},
+        "blend":        w_novit,
+        "blend+vitals": w_full,
+    }
+    HEADLINE = "blend+vitals"
+    print(f"  n_train={resolver['n_train']:,} | tuned weights (text/vit/prev): "
+          f"blend={w_novit['text']:.1f}/{w_novit['vit']:.1f}/{w_novit['prev']:.1f}  "
+          f"blend+vitals={w_full['text']:.1f}/{w_full['vit']:.1f}/{w_full['prev']:.1f}")
+    print("  (Stage-2 index is shared — candidates/centroids do NOT depend on the diagnosis")
+    print("   model; vitals are the patient's snapshot triage vitals, z-scored.)")
 
     # 3. Stage-2 ORACLE ceiling — model-INDEPENDENT (uses the TRUE category, so it
     #    is identical for v3_base and v3-nurse; reported once).
@@ -245,11 +274,12 @@ def main():
         code_col = "rollup_code" if g == "rollup" else "icd_code"
         label = "3-char rollup (PRIMARY)" if g == "rollup" else "full code (secondary)"
 
-        def _orow(name, alpha, _g=gindex, _c=code_col):
+        def _orow(name, w, _g=gindex, _c=code_col):
             if name == "__header__":
                 return [("Oracle@5", 11), ("Oracle@10", 11)]
             o5, o10, _ = _oracle_recall(
-                Q_test, df_test, true_cat_idx, _g, diagnosis_labels, _c, alpha)
+                Q_test, physio_test, df_test, true_cat_idx, _g,
+                diagnosis_labels, _c, w)
             return (o5, o10)
         _print_recall_table(label, variants, _orow)
 
@@ -275,19 +305,19 @@ def main():
             code_col = "rollup_code" if g == "rollup" else "icd_code"
             label = "3-char rollup (PRIMARY)" if g == "rollup" else "full code (secondary)"
 
-            def _erow(name, alpha, _g=gindex, _c=code_col, _p=proba, _t=top5, _gn=g):
+            def _erow(name, w, _g=gindex, _c=code_col, _p=proba, _t=top5, _gn=g):
                 if name == "__header__":
                     return [("E2E union", 11), ("E2E flat10", 12), ("Cond@union", 12)]
                 u, f, c, _ = _end_to_end_recall(
-                    Q_test, df_test, _p, _t, _g, diagnosis_labels, _c, alpha,
-                    true_cat_idx)
-                if name == "blend":
+                    Q_test, physio_test, df_test, _p, _t, _g, diagnosis_labels,
+                    _c, w, true_cat_idx)
+                if name == HEADLINE:
                     e2e_blend[(model_name, _gn)] = (u, f, c)
                 return (u, f, c)
             _print_recall_table(label, variants, _erow)
 
-    # 5. Before/after-nurse summary (blend).
-    print_section(f"BEFORE/AFTER NURSE — exact-ICD end-to-end lift (blend, alpha={alpha_blend:.2f})")
+    # 5. Before/after-nurse summary (headline = blend+vitals).
+    print_section(f"BEFORE/AFTER NURSE — exact-ICD end-to-end lift ({HEADLINE})")
     base_name, nurse_name = models[0][0], models[1][0]
     for g in icdr.GRANULARITIES:
         label = "3-char rollup" if g == "rollup" else "full code"
@@ -299,9 +329,9 @@ def main():
                                ("Cond@union", cb, cn)]:
             print(f"               {mlabel:<14s} {vb:>9.4f} {vn:>9.4f} {vn - vb:>+9.4f}")
 
-    # 6. Spot-check (v3 with-nurse, blend, rollup).
+    # 6. Spot-check (v3 with-nurse, blend+vitals, rollup).
     proba, top5_cat_idx = nurse_proba, nurse_top5
-    print_section("SPOT-CHECK (v3 with-nurse, blend, rollup) — first 3 test stays")
+    print_section("SPOT-CHECK (v3 with-nurse, blend+vitals, rollup) — first 3 test stays")
     gindex = resolver["granularities"]["rollup"]
     for r in range(min(3, len(df_test))):
         complaint = df_test["chiefcomplaint"].iloc[r]
@@ -312,10 +342,13 @@ def main():
             (diagnosis_labels[c], float(proba[r, c])) for c in top5_cat_idx[r]
         ]
         q = np.asarray(Q_test[r].todense()).ravel()
-        res = icdr.resolve_exact_diagnoses(
-            cat_probs, q, gindex, alpha_blend, k_per_cat=K_PER_CAT, k_flat=K_FLAT,
+        physio_q = physio_test[r] if physio_test is not None else None
+        res = icdr.resolve_exact_diagnoses_v2(
+            cat_probs, q, physio_q, gindex, w_full,
+            k_per_cat=K_PER_CAT, k_flat=K_FLAT,
         )
-        print(f"\n  Complaint: {complaint}")
+        active_flags = [c for c in icdr.PHYSIO_FLAGS if float(df_test[c].iloc[r]) == 1]
+        print(f"\n  Complaint: {complaint}  | flags: {active_flags or ['none']}")
         print(f"  TRUE: [{true_cat}] {true_roll}  {true_title[:50]}")
         print(f"  Flat top-{K_FLAT}:")
         for d in res["flat_top"]:

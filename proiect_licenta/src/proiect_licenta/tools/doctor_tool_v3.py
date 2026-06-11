@@ -173,12 +173,17 @@ def get_doctor_v3_models():
 # Stage-2 exact-ICD resolution (within-category code ranking)
 # ---------------------------------------------------------------------------
 def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
-                             complaint_text, tfidf, k_per_cat=5, k_flat=10):
+                             complaint_text, tfidf, physio_values=None,
+                             k_per_cat=5, k_flat=10):
     """Rank exact ICD diagnoses within the top-5 predicted categories.
 
     Returns a serializable block, or None when the resolver isn't available.
-    Uses the 3-char rollup granularity (the benchmarked headline target). This
-    is advisory: it does NOT alter the category or department predictions.
+    Uses the 3-char rollup granularity (the benchmarked headline target). When
+    the resolver carries the vitals-conditioned weights + standardizer AND the
+    nurse vitals are available, the patient's z-scored physiology vector adds a
+    3rd similarity term (text cosine + vitals + prevalence); otherwise it falls
+    back to the 2-term text+prevalence blend. Advisory: it does NOT alter the
+    category or department predictions.
     """
     if resolver is None:
         return None
@@ -187,10 +192,23 @@ def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
     cat_probs = [(diagnosis_labels[i], float(diag_proba[i])) for i in top5_idx]
     q_vec = icdr.vectorize_query(complaint_text, tfidf)
     gindex = resolver["granularities"]["rollup"]
-    resolved = icdr.resolve_exact_diagnoses(
-        cat_probs, q_vec, gindex, resolver["alpha"],
-        k_per_cat=k_per_cat, k_flat=k_flat,
-    )
+
+    weights = resolver.get("weights")
+    standardizer = resolver.get("standardizer")
+    used_vitals = bool(weights and standardizer is not None and physio_values is not None)
+    if used_vitals:
+        physio_q = icdr.physio_vector(physio_values, standardizer)
+        resolved = icdr.resolve_exact_diagnoses_v2(
+            cat_probs, q_vec, physio_q, gindex, weights,
+            k_per_cat=k_per_cat, k_flat=k_flat,
+        )
+        method = "Stage-2 retrieval: TF-IDF prototype cosine + vitals + prevalence"
+    else:
+        resolved = icdr.resolve_exact_diagnoses(
+            cat_probs, q_vec, gindex, resolver["alpha"],
+            k_per_cat=k_per_cat, k_flat=k_flat,
+        )
+        method = "Stage-2 retrieval: TF-IDF prototype cosine + prevalence prior"
 
     per_category = [
         {
@@ -218,8 +236,8 @@ def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
     ]
     return {
         "granularity": "ICD 3-char rollup",
-        "method": "Stage-2 retrieval: TF-IDF prototype cosine + prevalence prior",
-        "alpha": resolver["alpha"],
+        "method": method,
+        "used_vitals": used_vitals,
         "disclaimer": "Experimental, advisory only — does not change the "
                       "category/department predictions above.",
         "top_per_category": per_category,
@@ -699,12 +717,20 @@ class DoctorPredictionToolV3(BaseTool):
         ]
 
         # ── 12b. Stage-2: exact ICD diagnoses within the top-5 categories ──
-        # Optional retrieval stage (TF-IDF prototype cosine + prevalence prior).
+        # Optional retrieval stage (TF-IDF prototype cosine + vitals + prevalence).
         # Advisory only; surfaces likely exact diagnoses without changing the
         # category/department predictions. Skipped if the resolver isn't built.
+        # The patient's cleaned vitals + abnormal flags feed the vitals term.
+        physio_values = {
+            **{v: vital_values[v] for v in
+               ("temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp")},
+            "fever": fever, "tachycardia": tachycardia, "bradycardia": bradycardia,
+            "tachypnea": tachypnea, "hypoxia": hypoxia,
+            "hypertension": hypertension, "hypotension": hypotension,
+        }
         exact_diagnoses = _resolve_exact_diagnoses(
             models.get("icd_resolver"), diag_proba, diagnosis_labels, complaint_text,
-            tfidf,
+            tfidf, physio_values=physio_values,
         )
 
         # ── 13. Predict department (cascading) ──

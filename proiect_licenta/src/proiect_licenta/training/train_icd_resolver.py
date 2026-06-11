@@ -5,9 +5,12 @@ from the **Doctor v3 training split only**, at two granularities:
   - "rollup" : 3-char ICD category (headline target)
   - "full"   : full ICD code (secondary/stretch target)
 
-The blend weight ``alpha`` (cosine vs prevalence) is tuned on a held-out slice
-of the training split using the oracle-category top-5 rollup hit rate, then the
-final indices are rebuilt on the *full* training split and saved.
+Each candidate code also carries a vitals centroid (mean standardized
+physiology vector). The 3-term blend weights (text cosine / vitals / prevalence)
+are grid-searched on a held-out slice of the training split using the
+oracle-category top-5 rollup hit rate, then the final indices are rebuilt on the
+*full* training split and saved (with the legacy 2-term alpha kept for the
+backward-compatible text+prevalence path).
 
 Run: ``uv run train_icd_resolver``  (heavy: reuses the v3 data loader).
 
@@ -29,6 +32,7 @@ from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.training.train_doctor import (
     DIAGNOSIS_GROUP_MAP, SERVICE_GROUP_MAP, CATCH_ALL_LABEL,
 )
+from proiect_licenta.training.train_nurse import _clean_vitals
 from proiect_licenta import icd_resolution as icdr
 
 # Same split parameters as train_nurse_v3.main (must match exactly so the test
@@ -36,10 +40,22 @@ from proiect_licenta import icd_resolution as icdr
 TEST_SIZE = 0.2
 SPLIT_SEED = 42
 
-# Alpha sweep for the cosine/prevalence blend.
-ALPHA_GRID = [round(x, 2) for x in np.linspace(0.0, 1.0, 11)]
-TUNE_VAL_FRACTION = 0.10  # held-out slice of TRAIN for alpha tuning
+TUNE_VAL_FRACTION = 0.10  # held-out slice of TRAIN for weight tuning
 TUNE_K = 5                # oracle-category top-5 rollup hit rate
+
+
+def _weight_simplex(step: int = 10):
+    """Enumerate (w_text, w_vit, w_prev) on the simplex in 1/step increments."""
+    grid = []
+    for i in range(step + 1):
+        for j in range(step + 1 - i):
+            wt, wv = i / step, j / step
+            grid.append({"text": round(wt, 3), "vit": round(wv, 3),
+                         "prev": round(1.0 - wt - wv, 3)})
+    return grid
+
+
+WEIGHT_GRID = _weight_simplex(10)  # 66 (text, vit, prev) combinations
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +134,12 @@ def _load_light() -> pd.DataFrame:
         icdr.rollup_icd(c, v) for c, v in zip(df["icd_code"], df["icd_version"])
     ]
     df["complaint_text_norm"] = df["chiefcomplaint"].apply(normalize_complaint_text)
+
+    # Snapshot vitals + abnormal flags for the vitals-conditioned term. These
+    # come from triage.csv (already merged), so this stays cheap — no
+    # vitalsign.csv / PMH load. `_clean_vitals` clips, median-imputes, and adds
+    # the 7 flags (fever/tachycardia/...), all in-place.
+    _clean_vitals(df)
     return df
 
 
@@ -176,56 +198,78 @@ def _code_column(df: pd.DataFrame, granularity: str) -> list:
     return df["rollup_code"].tolist() if granularity == "rollup" else df["icd_code"].tolist()
 
 
-def _build_for_granularity(df_rows: pd.DataFrame, tfidf, granularity: str) -> dict:
+def _build_for_granularity(df_rows: pd.DataFrame, tfidf, granularity: str,
+                           standardizer: dict) -> dict:
     vectors = icdr.vectorize_queries(df_rows["complaint_text_norm"].tolist(), tfidf)
+    physio = icdr.physio_matrix(df_rows, standardizer)
     return icdr.build_index(
         vectors_l2=vectors,
         codes=_code_column(df_rows, granularity),
         titles=df_rows["icd_title"].tolist(),
         categories=df_rows["diagnosis_group"].tolist(),
+        physio=physio,
     )
 
 
 # ---------------------------------------------------------------------------
-# Alpha tuning (oracle-category top-5 rollup hit rate)
+# Weight tuning — 3-term simplex (text cosine / vitals / prevalence)
 # ---------------------------------------------------------------------------
-def _tune_alpha(df_train: pd.DataFrame, tfidf) -> tuple[float, dict]:
+def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict):
+    """Grid-search the (text, vit, prev) simplex on a held-out train slice.
+
+    Metric: oracle-category top-5 rollup hit rate. Returns the best 3-term
+    weights, the best 2-term weights (vit == 0, for the no-vitals ablation),
+    and the full rate table. Precomputes the per-category min-max'd term
+    matrices once so the 66-combo grid is just weighted sums + argsort.
+    """
     build_df, val_df = train_test_split(
         df_train, test_size=TUNE_VAL_FRACTION, random_state=SPLIT_SEED,
         stratify=df_train["diagnosis_group"],
     )
-    print(f"\n  Alpha tuning: build on {len(build_df):,}, validate on {len(val_df):,} "
-          f"(oracle-category top-{TUNE_K} rollup hit rate)")
+    print(f"\n  Weight tuning: build on {len(build_df):,}, validate on {len(val_df):,} "
+          f"(oracle-category top-{TUNE_K} rollup hit rate, {len(WEIGHT_GRID)} combos)")
 
-    index = _build_for_granularity(build_df, tfidf, "rollup")
-    hits = {a: 0 for a in ALPHA_GRID}
+    index = _build_for_granularity(build_df, tfidf, "rollup", standardizer)
+
+    # Per category, precompute the three min-max'd term matrices + each val
+    # row's true-code index (−1 if the code isn't a candidate).
+    precomp = []
     total = 0
     for cat, sub in val_df.groupby("diagnosis_group"):
         entry = index.get(cat)
+        total += len(sub)
         if entry is None:
-            total += len(sub)
             continue
         Q = icdr.vectorize_queries(sub["complaint_text_norm"].tolist(), tfidf)
-        cos = np.asarray(Q @ entry["centroids"].T, dtype=np.float32)  # (Nc, m)
-        codes_arr = np.asarray(entry["codes"])
-        true_codes = sub["rollup_code"].tolist()
-        for a in ALPHA_GRID:
-            score = icdr.blend_scores(cos, entry["prevalence"], a)
-            topk = np.argsort(-score, axis=1)[:, :TUNE_K]
-            for r in range(len(sub)):
-                if true_codes[r] in set(codes_arr[topk[r]].tolist()):
-                    hits[a] += 1
-        total += len(sub)
+        text_cos = np.asarray(Q @ entry["centroids"].T, dtype=np.float32)  # (Nc,m)
+        physio = icdr.physio_matrix(sub, standardizer)
+        vit = icdr._neg_euclidean(physio, entry["vital_centroids"])        # (Nc,m)
+        Tn = icdr._minmax_rows(text_cos)
+        Vn = icdr._minmax_rows(vit)
+        Pn = icdr._minmax(entry["prevalence"])
+        code_pos = {c: i for i, c in enumerate(entry["codes"])}
+        true_idx = np.array([code_pos.get(c, -1) for c in sub["rollup_code"]], dtype=int)
+        precomp.append((Tn, Vn, Pn, true_idx))
 
-    rates = {a: hits[a] / total for a in ALPHA_GRID}
-    best_alpha = max(rates, key=rates.get)
-    print("    alpha  oracle-top5")
-    for a in ALPHA_GRID:
-        marker = "  <-- best" if a == best_alpha else ""
-        print(f"    {a:>4.2f}   {rates[a]:.4f}{marker}")
-    print(f"  Chosen alpha = {best_alpha:.2f}  "
-          f"(prevalence-only={rates[0.0]:.4f}, cosine-only={rates[1.0]:.4f})")
-    return best_alpha, rates
+    def _rate(w):
+        hits = 0
+        for Tn, Vn, Pn, true_idx in precomp:
+            score = w["text"] * Tn + w["vit"] * Vn + w["prev"] * Pn[None, :]
+            topk = np.argsort(-score, axis=1)[:, :TUNE_K]
+            hits += int(((topk == true_idx[:, None]) & (true_idx[:, None] >= 0)).any(axis=1).sum())
+        return hits / total
+
+    rates = [(w, _rate(w)) for w in WEIGHT_GRID]
+    best_w, best_rate = max(rates, key=lambda x: x[1])
+    novit = [(w, r) for w, r in rates if w["vit"] == 0.0]
+    best_novit_w, best_novit_rate = max(novit, key=lambda x: x[1])
+
+    print(f"    best 3-term: text={best_w['text']:.1f} vit={best_w['vit']:.1f} "
+          f"prev={best_w['prev']:.1f}  -> {best_rate:.4f}")
+    print(f"    best 2-term (vit=0): text={best_novit_w['text']:.1f} "
+          f"prev={best_novit_w['prev']:.1f}  -> {best_novit_rate:.4f}")
+    print(f"    vitals lift on val: {best_rate - best_novit_rate:+.4f}")
+    return best_w, best_rate, best_novit_w, best_novit_rate, rates
 
 
 # ---------------------------------------------------------------------------
@@ -267,27 +311,39 @@ def main():
     tfidf = joblib.load(tfidf_path)
     print(f"  Loaded TF-IDF vectorizer (vocab={len(tfidf.vocabulary_):,})")
 
-    # 1. Tune alpha on a held-out train slice.
-    best_alpha, alpha_rates = _tune_alpha(df_train, tfidf)
+    # Fit the physiology standardizer on the full training split.
+    standardizer = icdr.build_standardizer(df_train)
 
-    # 2. Rebuild final indices on the FULL train split.
+    # 1. Tune the 3-term (text/vit/prev) blend on a held-out train slice.
+    best_w, best_rate, best_novit_w, best_novit_rate, weight_rates = \
+        _tune_weights(df_train, tfidf, standardizer)
+    # Legacy 2-term alpha (text vs prevalence) for the backward-compatible
+    # rank_within_category path — derived from the best vit=0 combo.
+    denom = best_novit_w["text"] + best_novit_w["prev"]
+    best_alpha = best_novit_w["text"] / denom if denom > 0 else 0.5
+
+    # 2. Rebuild final indices (with vitals centroids) on the FULL train split.
     print("\n  Building final indices on the full training split...")
     granularities = {}
     for g in icdr.GRANULARITIES:
-        granularities[g] = _build_for_granularity(df_train, tfidf, g)
+        granularities[g] = _build_for_granularity(df_train, tfidf, g, standardizer)
         _print_summary(granularities[g], g)
 
     # 3. Assemble + save resolver.
     resolver = icdr.make_resolver(
         granularities=granularities,
         alpha=best_alpha,
+        weights=best_w,
+        standardizer=standardizer,
         vocab_size=len(tfidf.vocabulary_),
         tfidf_path=str(tfidf_path),
         n_train=len(df_train),
         extra={
-            "alpha_grid": ALPHA_GRID,
-            "alpha_tuning_metric": f"oracle-category top-{TUNE_K} rollup hit rate",
-            "alpha_tuning_rates": {str(a): r for a, r in alpha_rates.items()},
+            "weights_novit": best_novit_w,
+            "tuning_metric": f"oracle-category top-{TUNE_K} rollup hit rate",
+            "tuning_val_rate_3term": round(float(best_rate), 4),
+            "tuning_val_rate_2term": round(float(best_novit_rate), 4),
+            "physio_cols": icdr.PHYSIO_COLS,
             "split": {"test_size": TEST_SIZE, "random_state": SPLIT_SEED},
             "n_test": int(n_test),
         },
@@ -297,9 +353,13 @@ def main():
     # Human-readable metadata sidecar.
     meta = {
         "built_at": resolver["built_at"],
-        "alpha": best_alpha,
-        "alpha_grid": ALPHA_GRID,
-        "alpha_tuning_rates": resolver["alpha_tuning_rates"],
+        "weights_3term": best_w,
+        "weights_2term": best_novit_w,
+        "alpha_2term": round(best_alpha, 3),
+        "tuning_val_rate_3term": round(float(best_rate), 4),
+        "tuning_val_rate_2term": round(float(best_novit_rate), 4),
+        "vitals_lift_on_val": round(float(best_rate - best_novit_rate), 4),
+        "physio_cols": icdr.PHYSIO_COLS,
         "n_train": len(df_train),
         "n_test": int(n_test),
         "vocab_size": resolver["vocab_size"],

@@ -752,16 +752,38 @@ The resolver is **model-agnostic**: its candidates + prototype centroids come fr
 | E2E union (full code, blend) | 0.4553 | 0.4622 | +0.0069 |
 | E2E flat-10 (full code, blend) | 0.3944 | 0.4069 | +0.0125 |
 
-**Interpretation (a useful finding):** nurse data helps exact-ICD only **indirectly and modestly (+1 to +1.3pp)**. The resolver ranks on chief-complaint text, which is *unchanged* by the nurse step (vitals/meds/PMH don't alter what the patient said), so its only lever is Stage 1: better category recall (90.6% → 92.8%) lets more true codes into the candidate set, and that +2.2pp flows through to the ~+1pp E2E lift. The conditional metric dips slightly negative because v3-nurse's larger correct-category set newly includes exactly the *harder* cases v3_base missed (which also have lower exact-code recall), diluting the within-bucket average even as the unconditional recall rises. **Implication:** to lift the oracle *ceiling* itself, Stage 2 would need nurse signals fed *into the resolver* (e.g. vitals-conditioned centroids), not just better Stage-1 categories — a sharper future direction than version unification alone.
+**Interpretation (a useful finding):** nurse data helps exact-ICD only **indirectly and modestly (+1 to +1.3pp)**. The resolver ranks on chief-complaint text, which is *unchanged* by the nurse step (vitals/meds/PMH don't alter what the patient said), so its only lever is Stage 1: better category recall (90.6% → 92.8%) lets more true codes into the candidate set, and that +2.2pp flows through to the ~+1pp E2E lift. The conditional metric dips slightly negative because v3-nurse's larger correct-category set newly includes exactly the *harder* cases v3_base missed (which also have lower exact-code recall), diluting the within-bucket average even as the unconditional recall rises. **Implication:** to lift the oracle *ceiling* itself, Stage 2 would need nurse signals fed *into the resolver* (e.g. vitals-conditioned centroids), not just better Stage-1 categories — a sharper future direction than version unification alone. That direction was then implemented (next).
+
+### Vitals-conditioned centroids (Stage-2 v2, shipped 2026-06-11)
+
+Acting on the implication above: each candidate code gets a **vitals centroid** = the mean of its training patients' **standardized physiology vector** (6 z-scored vitals + 7 abnormal flags, standardized together). At inference the patient's z-scored physiology is compared to each centroid by negative Euclidean distance ("nearest physiological prototype"), entering as a **third blended term**:
+
+```
+score = w_text·text_cos + w_vit·vitals + w_prev·prevalence   (each min-max'd within category)
+```
+
+The 3 weights are grid-searched on the simplex (held-out train slice, oracle top-5 rollup). Tuned: **text=0.4, vit=0.3, prev=0.3** — the grid put real weight on vitals, not zero. The snapshot vitals come from `triage.csv`, so the builder stays fast (no vitalsign/PMH load). This **lifts the oracle ceiling itself**, out-of-sample, at both granularities (v3-nurse test split):
+
+| metric (v3-nurse) | blend (text+prev) | blend+vitals | Δ |
+|---|---|---|---|
+| Oracle@5 rollup | 0.6698 | **0.6832** | +1.34pp |
+| Oracle@5 full code | 0.4919 | **0.5129** | +2.10pp |
+| Oracle@10 full code | 0.6072 | 0.6254 | +1.82pp |
+| E2E union rollup | 0.6285 | **0.6419** | +1.34pp |
+| E2E union full code | 0.4622 | **0.4816** | +1.94pp |
+| Cond@union rollup | 0.6775 | **0.6919** | +1.44pp |
+
+Full code benefits more (+2.1pp) — more candidates to disambiguate physiologically. The term is correctly near-neutral for normal-vitals patients; the lift comes from abnormal-physiology cases (a fever+hypoxia+tachycardia "fever, SOB, cough" patient surfaces 486 Pneumonia / A41 Sepsis / J18 at the top). The resolver stays backward compatible (keeps the 2-term `alpha`); builder, benchmark, and `doctor_tool_v3` use the 3-term path whenever the patient's vitals are present, falling back to text+prevalence otherwise.
 
 ### Inference wiring
 
-`doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer). `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
+`doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer + a `used_vitals` flag). It passes the patient's cleaned vitals + abnormal flags so the **3-term vitals path** is used when present (falling back to text+prevalence otherwise). `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
 
 ### What's next
 
-- ~~**v3_base Stage-2**~~ **DONE (2026-06-11)** — see [v3_base vs v3-nurse](#v3_base-vs-v3-nurse--beforeafter-the-nurse-step) above. Nurse data adds +1 to +1.3pp E2E exact-ICD, entirely via better Stage-1 category recall; the Stage-2 oracle ceiling is identical.
-- **Vitals-conditioned centroids (highest-ceiling Stage-2 idea).** The before/after result shows the resolver can't benefit from nurse data because it ranks on complaint text alone. Conditioning the prototype centroids (or adding a second similarity term) on the nurse-collected vitals / abnormal-flags / rhythm could raise the *oracle* ceiling itself, not just Stage-1 recall.
+- ~~**v3_base Stage-2**~~ **DONE (2026-06-11)** — see [v3_base vs v3-nurse](#v3_base-vs-v3-nurse--beforeafter-the-nurse-step). Nurse data adds +1 to +1.3pp E2E exact-ICD, entirely via better Stage-1 category recall; the Stage-2 oracle ceiling is identical.
+- ~~**Vitals-conditioned centroids**~~ **DONE (2026-06-11)** — see [Vitals-conditioned centroids](#vitals-conditioned-centroids-stage-2-v2-shipped-2026-06-11). Adds a z-scored physiology similarity term; lifts the oracle ceiling +1.3pp rollup / +2.1pp full @5, out-of-sample. Wired into the runtime tool.
+- **Rhythm + longitudinal vitals in the centroid.** The vitals term currently uses the snapshot triage vitals only. Adding cardiac rhythm and the longitudinal min/max/last/delta (from `vitalsign.csv`, as the v3 model uses) could extend the lift — at the cost of the slow vitalsign load in the builder.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
 
 ---
