@@ -41,8 +41,10 @@ A retrieval cascade on top of the Doctor v3 diagnosis model that ranks the **exa
 
 Stage-1 category recall caps end-to-end (top-5 = 92.8%). At full-code, cosine-only collapses (0.2480@5) while prevalence is robust (0.4288) — fine codes fragment the complaint signal; the blend reconciles both. Strong clinical face validity on misses (e.g. "s/p Fall" → femur/rib/vertebra fractures).
 
+**v3_base vs v3-nurse before/after (DONE 2026-06-11).** `benchmark_icd_resolution.py` now runs both diagnosis models against the shared resolver (the index is model-agnostic, so the **oracle ceiling is identical** — rollup blend @5 = 66.98% for both — and only end-to-end differs). Nurse data lifts E2E exact-ICD by **+1.0pp union / +1.3pp flat-10** (rollup, blend), entirely via better Stage-1 category recall (top-5 90.6% → 92.8%); the conditional metric dips −0.5pp because v3-nurse's larger correct-category set newly includes the harder cases v3_base missed. Key takeaway: the resolver ranks on complaint text, which the nurse step doesn't change, so nurse data can only help Stage 2 *indirectly* through Stage 1.
+
 **Next work (deferred):**
-- **v3_base Stage-2** — build/benchmark the same resolver on the pre-nurse v3_base model for a before/after-nurse comparison of exact-ICD recall. The builder's light loader + benchmark generalize directly (swap the artifact dir + diagnosis model).
+- **Vitals-conditioned centroids (highest-ceiling).** The before/after result shows Stage 2 can't exploit nurse data because it ranks on complaint text alone. Conditioning the prototype centroids (or adding a vitals/abnormal-flag similarity term) would let nurse signals raise the *oracle ceiling* itself, not just Stage-1 recall.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is split across versions (e.g. `599` vs `N39`, both UTI; `586` vs `N17`, renal failure), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers materially.
 
 ### Doctor disposition v3 — peer admit/discharge model (Option B from plan section 3) (SHIPPED 2026-05-28, model trained; inference wiring PENDING)

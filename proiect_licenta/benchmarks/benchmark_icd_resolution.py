@@ -1,8 +1,14 @@
-"""Benchmark: Stage-2 exact-ICD resolution within predicted categories (Doctor v3).
+"""Benchmark: Stage-2 exact-ICD resolution — Doctor v3_base (pre-nurse) vs v3-nurse.
 
-Reuses the Doctor v3 with-nurse test split and diagnosis model, then evaluates
-the Stage-2 resolver (built by `uv run train_icd_resolver`) at two granularities
-(3-char rollup = headline, full code = secondary) and three blend variants:
+Both Doctor v3 diagnosis models share one test split, and the Stage-2 resolver
+(built by `uv run train_icd_resolver`) is model-agnostic — its candidate codes +
+prototype centroids come from the shared training split, not from either
+diagnosis model. So the **oracle** metrics (which use the true category) are
+identical for both models and reported once; only the **end-to-end** metrics
+differ, isolating how much the nurse-collected data improves exact-ICD recall.
+
+Evaluated at two granularities (3-char rollup = headline, full code = secondary)
+and three blend variants:
 
   - blend       : the resolver's tuned alpha (cosine + prevalence)
   - prevalence  : alpha = 0 (frequency-only baseline)
@@ -45,12 +51,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from proiect_licenta.paths import (
-    TRIAGE_V1_DIR, DIAGNOSIS_CSV, DOCTOR_V3_DIR, DOCTOR_V3_ICD_RESOLVER_DIR,
+    TRIAGE_V1_DIR, DIAGNOSIS_CSV, DOCTOR_V3_DIR, DOCTOR_V3_BASE_DIR,
+    DOCTOR_V3_ICD_RESOLVER_DIR,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.training.train_nurse_v3 import (
     load_and_clean_data as load_v3_data,
     build_features as build_v3_with_nurse_features,
+)
+from proiect_licenta.training.train_doctor_v3 import (
+    build_features as build_v3_base_features,
 )
 from proiect_licenta import icd_resolution as icdr
 
@@ -168,90 +178,130 @@ def _end_to_end_recall(Q_test, df_test, proba, top5_cat_idx, gindex,
     )
 
 
+def _print_recall_table(label, variants, row_fn):
+    """Print a small per-variant table. `row_fn(name, alpha)` -> tuple of floats."""
+    cols = row_fn("__header__", None)  # list of (header, width)
+    head = "".join(f"{h:>{w}s}" for h, w in cols)
+    print(f"\n  [{label}]  {'Variant':<12s}{head}")
+    for name, alpha in variants.items():
+        vals = row_fn(name, alpha)
+        body = "".join(f"{v:>{w}.4f}" for v, (_, w) in zip(vals, cols))
+        print(f"               {name:<12s}{body}")
+
+
 def main():
     print("\n" + "#" * 72)
-    print("  STAGE-2 EXACT-ICD RESOLUTION BENCHMARK (Doctor v3)")
+    print("  STAGE-2 EXACT-ICD BENCHMARK — Doctor v3_base (pre-nurse) vs v3 with-nurse")
     print("#" * 72)
 
-    # 1. Load data + reproduce v3 split.
+    # 1. Load once + reproduce the SHARED v3_base / v3-nurse split.
     df = load_v3_data()
     df = _attach_icd_version(df)
     df["complaint_text_norm"] = df["chiefcomplaint"].apply(normalize_complaint_text)
 
-    print_section("BUILDING v3 WITH-NURSE FEATURES (for the diagnosis model)")
-    features = build_v3_with_nurse_features(df)
+    print_section("BUILDING FEATURES (v3_base + v3 with-nurse; one shared test split)")
+    features_base = build_v3_base_features(df)
+    features_nurse = build_v3_with_nurse_features(df)
 
-    meta = json.loads((DOCTOR_V3_DIR / "metadata.json").read_text())
-    diagnosis_labels = meta["diagnosis_labels"]
+    meta_nurse = json.loads((DOCTOR_V3_DIR / "metadata.json").read_text())
+    meta_base = json.loads((DOCTOR_V3_BASE_DIR / "metadata.json").read_text())
+    diagnosis_labels = meta_nurse["diagnosis_labels"]
+    assert meta_base["diagnosis_labels"] == diagnosis_labels, (
+        "v3_base and v3-nurse have different diagnosis label spaces"
+    )
     diag_map = {l: i for i, l in enumerate(sorted(df["diagnosis_group"].unique()))}
-    # Both are sorted(unique) by construction, so proba column i <-> diagnosis_labels[i].
     assert list(diag_map.keys()) == diagnosis_labels, (
         "diagnosis label space mismatch between data and v3 metadata"
     )
     y_diag = df["diagnosis_group"].map(diag_map).reset_index(drop=True)
 
+    # v3_base and v3-nurse share this split (same seed + same y_diag stratify),
+    # so the resolver (built on the v3 train split) is held out for both.
     idx_all = np.arange(len(df))
     train_idx, test_idx = train_test_split(
         idx_all, test_size=TEST_SIZE, random_state=SPLIT_SEED, stratify=y_diag,
     )
-    X_test = features.iloc[test_idx].reset_index(drop=True)
+    Xb_test = features_base.iloc[test_idx].reset_index(drop=True)
+    Xn_test = features_nurse.iloc[test_idx].reset_index(drop=True)
     df_test = df.iloc[test_idx].reset_index(drop=True)
-    print(f"  Test set: {len(df_test):,} stays")
-
-    # 2. Diagnosis model -> category soft-probs -> top-5 categories.
-    print_section("LOADING DIAGNOSIS MODEL + RESOLVER")
-    diag_model = joblib.load(DOCTOR_V3_DIR / "diagnosis_model.joblib")
-    proba = diag_model.predict_proba(X_test)  # (N, 13)
-    # Reorder proba columns to diagnosis_labels order if needed: the model's
-    # class index i corresponds to diag_map label order == sorted labels, which
-    # is exactly diagnosis_labels in v3 metadata. They match by construction.
-    top5_cat_idx = np.argsort(-proba, axis=1)[:, :TOP_CATS]
-
     true_cat_idx = df_test["diagnosis_group"].map(diag_map).to_numpy()
+    print(f"  Test set: {len(df_test):,} stays (shared by v3_base and v3 with-nurse)")
 
+    # 2. Shared resolver + query vectors.
     resolver = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
     alpha_blend = resolver["alpha"]
-    print(f"  Resolver alpha (tuned) = {alpha_blend:.2f}  | n_train={resolver['n_train']:,}")
-
     tfidf = joblib.load(TRIAGE_V1_DIR / "tfidf_vectorizer.joblib")
     Q_test = icdr.vectorize_queries(df_test["complaint_text_norm"].tolist(), tfidf)
-
-    # Category recall sanity (Stage-1 ceiling).
-    cat_top5 = (top5_cat_idx == true_cat_idx[:, None]).any(axis=1).mean()
-    cat_top1 = (np.argmax(proba, axis=1) == true_cat_idx).mean()
-    print(f"  Stage-1 category recall: top-1={cat_top1:.4f}  top-5={cat_top5:.4f}")
-
     variants = {"prevalence": 0.0, "cosine": 1.0, "blend": alpha_blend}
+    print(f"  Resolver alpha (tuned) = {alpha_blend:.2f} | n_train={resolver['n_train']:,}")
+    print("  (Stage-2 index is shared — its candidates + centroids do NOT depend on the")
+    print("   diagnosis model; only Stage-1's predicted categories differ between models.)")
 
-    # 3. Evaluate each granularity.
+    # 3. Stage-2 ORACLE ceiling — model-INDEPENDENT (uses the TRUE category, so it
+    #    is identical for v3_base and v3-nurse; reported once).
+    print_section("STAGE-2 ORACLE CEILING (shared — within the true category)")
     for g in icdr.GRANULARITIES:
         gindex = resolver["granularities"][g]
         code_col = "rollup_code" if g == "rollup" else "icd_code"
         label = "3-char rollup (PRIMARY)" if g == "rollup" else "full code (secondary)"
-        print_section(f"GRANULARITY: {label}")
 
-        n_codes_total = sum(len(e["codes"]) for e in gindex.values())
-        print(f"  Candidate pool: {n_codes_total:,} codes across {len(gindex)} categories")
-
-        print(f"\n  {'Variant':<12s} {'alpha':>6s} | "
-              f"{'Oracle@5':>9s} {'Oracle@10':>10s} | "
-              f"{'E2E union':>10s} {'E2E flat10':>11s} {'Cond@union':>11s}")
-        print(f"  {'-'*78}")
-        for name, alpha in variants.items():
+        def _orow(name, alpha, _g=gindex, _c=code_col):
+            if name == "__header__":
+                return [("Oracle@5", 11), ("Oracle@10", 11)]
             o5, o10, _ = _oracle_recall(
-                Q_test, df_test, true_cat_idx, gindex, diagnosis_labels,
-                code_col, alpha,
-            )
-            ee_union, ee_flat, cond, _ = _end_to_end_recall(
-                Q_test, df_test, proba, top5_cat_idx, gindex,
-                diagnosis_labels, code_col, alpha, true_cat_idx,
-            )
-            print(f"  {name:<12s} {alpha:>6.2f} | "
-                  f"{o5:>9.4f} {o10:>10.4f} | "
-                  f"{ee_union:>10.4f} {ee_flat:>11.4f} {cond:>11.4f}")
+                Q_test, df_test, true_cat_idx, _g, diagnosis_labels, _c, alpha)
+            return (o5, o10)
+        _print_recall_table(label, variants, _orow)
 
-    # 4. Spot-check a couple of cases.
-    print_section("SPOT-CHECK (blend, rollup) — first 3 admitted test stays")
+    # 4. END-TO-END per diagnosis model — this is where nurse data matters.
+    models = [
+        ("v3_base (pre-nurse)", DOCTOR_V3_BASE_DIR, Xb_test),
+        ("v3 with-nurse", DOCTOR_V3_DIR, Xn_test),
+    ]
+    e2e_blend = {}             # (model_name, g) -> (union, flat, cond)
+    nurse_proba = nurse_top5 = None
+    for model_name, model_dir, X_test in models:
+        model = joblib.load(model_dir / "diagnosis_model.joblib")
+        proba = model.predict_proba(X_test)
+        top5 = np.argsort(-proba, axis=1)[:, :TOP_CATS]
+        if model_dir == DOCTOR_V3_DIR:
+            nurse_proba, nurse_top5 = proba, top5
+        cat_top1 = (np.argmax(proba, axis=1) == true_cat_idx).mean()
+        cat_top5 = (top5 == true_cat_idx[:, None]).any(axis=1).mean()
+        print_section(f"END-TO-END — {model_name}")
+        print(f"  Stage-1 category recall: top-1={cat_top1:.4f}  top-5={cat_top5:.4f}")
+        for g in icdr.GRANULARITIES:
+            gindex = resolver["granularities"][g]
+            code_col = "rollup_code" if g == "rollup" else "icd_code"
+            label = "3-char rollup (PRIMARY)" if g == "rollup" else "full code (secondary)"
+
+            def _erow(name, alpha, _g=gindex, _c=code_col, _p=proba, _t=top5, _gn=g):
+                if name == "__header__":
+                    return [("E2E union", 11), ("E2E flat10", 12), ("Cond@union", 12)]
+                u, f, c, _ = _end_to_end_recall(
+                    Q_test, df_test, _p, _t, _g, diagnosis_labels, _c, alpha,
+                    true_cat_idx)
+                if name == "blend":
+                    e2e_blend[(model_name, _gn)] = (u, f, c)
+                return (u, f, c)
+            _print_recall_table(label, variants, _erow)
+
+    # 5. Before/after-nurse summary (blend).
+    print_section(f"BEFORE/AFTER NURSE — exact-ICD end-to-end lift (blend, alpha={alpha_blend:.2f})")
+    base_name, nurse_name = models[0][0], models[1][0]
+    for g in icdr.GRANULARITIES:
+        label = "3-char rollup" if g == "rollup" else "full code"
+        ub, fb, cb = e2e_blend[(base_name, g)]
+        un, fn, cn = e2e_blend[(nurse_name, g)]
+        print(f"\n  [{label}]  {'Metric':<14s} {'v3_base':>9s} {'v3_nurse':>9s} {'delta':>9s}")
+        for mlabel, vb, vn in [("E2E union", ub, un),
+                               ("E2E flat-10", fb, fn),
+                               ("Cond@union", cb, cn)]:
+            print(f"               {mlabel:<14s} {vb:>9.4f} {vn:>9.4f} {vn - vb:>+9.4f}")
+
+    # 6. Spot-check (v3 with-nurse, blend, rollup).
+    proba, top5_cat_idx = nurse_proba, nurse_top5
+    print_section("SPOT-CHECK (v3 with-nurse, blend, rollup) — first 3 test stays")
     gindex = resolver["granularities"]["rollup"]
     for r in range(min(3, len(df_test))):
         complaint = df_test["chiefcomplaint"].iloc[r]

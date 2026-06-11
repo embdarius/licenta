@@ -738,13 +738,30 @@ Stage-1 category recall (the end-to-end ceiling): top-1 = 64.1%, **top-5 = 92.8%
 - Full code is much harder (49.2% oracle@5) because laterality/episode variants explode the candidate space. Notably, **cosine-only collapses at full code (24.8%)** while prevalence stays robust (42.9%) — fine-grained codes fragment the complaint signal across near-duplicates, so frequency carries more weight there; the blend reconciles both.
 - Spot-checks show strong clinical face validity even on misses (e.g. "s/p Fall" → femur/rib/vertebra fractures; "chest pain, SOB" → CHF / pneumonia / COPD / pulmonary HTN).
 
+### v3_base vs v3-nurse — before/after the nurse step
+
+The resolver is **model-agnostic**: its candidates + prototype centroids come from the shared training split, so the same index serves both Doctor v3 diagnosis models (which use the identical 13-class split). `benchmark_icd_resolution.py` runs both. The **oracle ceiling is therefore identical** (rollup blend @5 = 66.98% / @10 = 79.90% for both) — an empirical confirmation that Stage 2 doesn't touch the diagnosis model. Only the **end-to-end** numbers differ, isolating the nurse contribution:
+
+| | v3_base (pre-nurse) | v3-nurse | Δ nurse |
+|---|---|---|---|
+| Stage-1 category recall — top-1 | 60.1% | 64.1% | +4.0pp |
+| Stage-1 category recall — top-5 | 90.6% | 92.8% | +2.2pp |
+| E2E union (rollup, blend) | 0.6184 | 0.6285 | **+0.0101** |
+| E2E flat-10 (rollup, blend) | 0.5414 | 0.5546 | **+0.0131** |
+| Cond@union (rollup, blend) | 0.6829 | 0.6775 | −0.0054 |
+| E2E union (full code, blend) | 0.4553 | 0.4622 | +0.0069 |
+| E2E flat-10 (full code, blend) | 0.3944 | 0.4069 | +0.0125 |
+
+**Interpretation (a useful finding):** nurse data helps exact-ICD only **indirectly and modestly (+1 to +1.3pp)**. The resolver ranks on chief-complaint text, which is *unchanged* by the nurse step (vitals/meds/PMH don't alter what the patient said), so its only lever is Stage 1: better category recall (90.6% → 92.8%) lets more true codes into the candidate set, and that +2.2pp flows through to the ~+1pp E2E lift. The conditional metric dips slightly negative because v3-nurse's larger correct-category set newly includes exactly the *harder* cases v3_base missed (which also have lower exact-code recall), diluting the within-bucket average even as the unconditional recall rises. **Implication:** to lift the oracle *ceiling* itself, Stage 2 would need nurse signals fed *into the resolver* (e.g. vitals-conditioned centroids), not just better Stage-1 categories — a sharper future direction than version unification alone.
+
 ### Inference wiring
 
 `doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer). `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
 
 ### What's next
 
-- **v3_base Stage-2** — build/benchmark the same resolver on the pre-nurse v3_base model for a before/after-nurse comparison of exact-ICD recall. (Deferred; the builder's light loader + benchmark generalize directly.)
+- ~~**v3_base Stage-2**~~ **DONE (2026-06-11)** — see [v3_base vs v3-nurse](#v3_base-vs-v3-nurse--beforeafter-the-nurse-step) above. Nurse data adds +1 to +1.3pp E2E exact-ICD, entirely via better Stage-1 category recall; the Stage-2 oracle ceiling is identical.
+- **Vitals-conditioned centroids (highest-ceiling Stage-2 idea).** The before/after result shows the resolver can't benefit from nurse data because it ranks on complaint text alone. Conditioning the prototype centroids (or adding a second similarity term) on the nurse-collected vitals / abnormal-flags / rhythm could raise the *oracle* ceiling itself, not just Stage-1 recall.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
 
 ---
