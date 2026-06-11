@@ -26,14 +26,27 @@ from sklearn.model_selection import train_test_split
 
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR, TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, SERVICES_CSV,
-    DIAGNOSIS_CSV, DOCTOR_V3_ICD_RESOLVER_DIR,
+    DIAGNOSIS_CSV, VITALSIGN_CSV, DOCTOR_V3_ICD_RESOLVER_DIR,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.training.train_doctor import (
     DIAGNOSIS_GROUP_MAP, SERVICE_GROUP_MAP, CATCH_ALL_LABEL,
 )
 from proiect_licenta.training.train_nurse import _clean_vitals
+from proiect_licenta.training.train_nurse_v3 import (
+    _aggregate_vitalsigns, _fill_longitudinal_vitals, LONG_VITAL_FEATURE_COLS,
+)
 from proiect_licenta import icd_resolution as icdr
+
+# Physiology features for the vitals-conditioned term. Snapshot vitals + flags
+# (from triage.csv) PLUS the genuinely-new longitudinal signals that the
+# snapshot lacks: cardiac rhythm (one-hot buckets + rhythm_irregular) and the
+# per-vital trajectory delta. min/max/last and abnormal-reading counts are
+# excluded — they mostly triplicate the snapshot value (a snapshot-only patient
+# has min==max==last==snapshot), adding redundancy without new information.
+_LONG_RHYTHM_DELTA = [c for c in LONG_VITAL_FEATURE_COLS
+                      if c.endswith("_delta") or c.startswith("rhythm_")]
+PHYSIO_COLS_V2 = icdr.PHYSIO_CONT + icdr.PHYSIO_FLAGS + _LONG_RHYTHM_DELTA
 
 # Same split parameters as train_nurse_v3.main (must match exactly so the test
 # split stays held out from the resolver).
@@ -135,11 +148,20 @@ def _load_light() -> pd.DataFrame:
     ]
     df["complaint_text_norm"] = df["chiefcomplaint"].apply(normalize_complaint_text)
 
-    # Snapshot vitals + abnormal flags for the vitals-conditioned term. These
-    # come from triage.csv (already merged), so this stays cheap — no
-    # vitalsign.csv / PMH load. `_clean_vitals` clips, median-imputes, and adds
-    # the 7 flags (fever/tachycardia/...), all in-place.
+    # Snapshot vitals + abnormal flags (from triage.csv) for the vitals term.
+    # `_clean_vitals` clips, median-imputes, and adds the 7 flags, all in-place.
     _clean_vitals(df)
+
+    # Longitudinal vitals + cardiac rhythm from vitalsign.csv (over the same
+    # [intime, intime+4h] window the v3 model uses). This is the one heavy add
+    # vs the pure light loader (~a few minutes) — still far cheaper than the
+    # full v3 loader, which also parses the 3.3 GB discharge.csv for PMH (which
+    # the resolver does not need). `_fill_longitudinal_vitals` falls back to the
+    # snapshot for stays with no readings, mirroring inference.
+    df["intime"] = pd.to_datetime(df["intime"])
+    long_vitals = _aggregate_vitalsigns(df[["stay_id", "intime"]], VITALSIGN_CSV)
+    df = df.merge(long_vitals, on="stay_id", how="left")
+    _fill_longitudinal_vitals(df)
     return df
 
 
@@ -311,8 +333,11 @@ def main():
     tfidf = joblib.load(tfidf_path)
     print(f"  Loaded TF-IDF vectorizer (vocab={len(tfidf.vocabulary_):,})")
 
-    # Fit the physiology standardizer on the full training split.
-    standardizer = icdr.build_standardizer(df_train)
+    # Fit the physiology standardizer on the full training split (snapshot
+    # vitals + flags + rhythm + vital deltas).
+    standardizer = icdr.build_standardizer(df_train, cols=PHYSIO_COLS_V2)
+    print(f"  Physiology features: {len(PHYSIO_COLS_V2)} "
+          f"(snapshot 13 + rhythm/delta {len(_LONG_RHYTHM_DELTA)})")
 
     # 1. Tune the 3-term (text/vit/prev) blend on a held-out train slice.
     best_w, best_rate, best_novit_w, best_novit_rate, weight_rates = \
@@ -343,7 +368,7 @@ def main():
             "tuning_metric": f"oracle-category top-{TUNE_K} rollup hit rate",
             "tuning_val_rate_3term": round(float(best_rate), 4),
             "tuning_val_rate_2term": round(float(best_novit_rate), 4),
-            "physio_cols": icdr.PHYSIO_COLS,
+            "physio_cols": PHYSIO_COLS_V2,
             "split": {"test_size": TEST_SIZE, "random_state": SPLIT_SEED},
             "n_test": int(n_test),
         },
@@ -359,7 +384,7 @@ def main():
         "tuning_val_rate_3term": round(float(best_rate), 4),
         "tuning_val_rate_2term": round(float(best_novit_rate), 4),
         "vitals_lift_on_val": round(float(best_rate - best_novit_rate), 4),
-        "physio_cols": icdr.PHYSIO_COLS,
+        "physio_cols": PHYSIO_COLS_V2,
         "n_train": len(df_train),
         "n_test": int(n_test),
         "vocab_size": resolver["vocab_size"],

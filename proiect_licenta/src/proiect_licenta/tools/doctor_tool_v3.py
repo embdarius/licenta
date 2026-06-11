@@ -720,13 +720,17 @@ class DoctorPredictionToolV3(BaseTool):
         # Optional retrieval stage (TF-IDF prototype cosine + vitals + prevalence).
         # Advisory only; surfaces likely exact diagnoses without changing the
         # category/department predictions. Skipped if the resolver isn't built.
-        # The patient's cleaned vitals + abnormal flags feed the vitals term.
+        # The patient's cleaned snapshot vitals + flags + longitudinal block
+        # (rhythm one-hots + per-vital deltas) feed the vitals term. The
+        # resolver's standardizer picks exactly the columns it was built with;
+        # extra keys here (min/max/last/counts) are simply ignored.
         physio_values = {
             **{v: vital_values[v] for v in
                ("temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp")},
             "fever": fever, "tachycardia": tachycardia, "bradycardia": bradycardia,
             "tachypnea": tachypnea, "hypoxia": hypoxia,
             "hypertension": hypertension, "hypotension": hypotension,
+            **{c: long_data[c] for c in LONG_VITAL_FEATURE_COLS},
         }
         exact_diagnoses = _resolve_exact_diagnoses(
             models.get("icd_resolver"), diag_proba, diagnosis_labels, complaint_text,

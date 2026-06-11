@@ -762,18 +762,26 @@ Acting on the implication above: each candidate code gets a **vitals centroid** 
 score = w_text·text_cos + w_vit·vitals + w_prev·prevalence   (each min-max'd within category)
 ```
 
-The 3 weights are grid-searched on the simplex (held-out train slice, oracle top-5 rollup). Tuned: **text=0.4, vit=0.3, prev=0.3** — the grid put real weight on vitals, not zero. The snapshot vitals come from `triage.csv`, so the builder stays fast (no vitalsign/PMH load). This **lifts the oracle ceiling itself**, out-of-sample, at both granularities (v3-nurse test split):
+The 3 weights are grid-searched on the simplex (held-out train slice, oracle top-5 rollup). The physiology vector is **28-dim**: 6 z-scored snapshot vitals + 7 abnormal flags (from `triage.csv`) **+ cardiac rhythm (8 one-hot buckets + `rhythm_irregular`) + per-vital trajectory delta** (from `vitalsign.csv`, over the same `[intime, intime+4h]` window the v3 model uses). The longitudinal **min/max/last and reading-counts are deliberately excluded** — for a snapshot-only patient they collapse to the snapshot value, so they triplicate it without adding information; the genuinely-new signals are rhythm and the trajectory deltas. Tuned weights: **text=0.3, vit=0.4, prev=0.3** — vitals is now the *largest* weight.
+
+This **lifts the oracle ceiling itself**, out-of-sample, in three steps (v3-nurse test split, oracle@5):
+
+| oracle@5 | text+prev | + snapshot (13-dim) | + rhythm/delta (28-dim) | total Δ |
+|---|---|---|---|---|
+| rollup | 0.6698 | 0.6832 (+1.34) | **0.6913** (+0.81) | **+2.15pp** |
+| full code | 0.4919 | 0.5129 (+2.10) | **0.5253** (+1.24) | **+3.34pp** |
+
+End-to-end (v3-nurse, blend → blend+vitals with rhythm/delta):
 
 | metric (v3-nurse) | blend (text+prev) | blend+vitals | Δ |
 |---|---|---|---|
-| Oracle@5 rollup | 0.6698 | **0.6832** | +1.34pp |
-| Oracle@5 full code | 0.4919 | **0.5129** | +2.10pp |
-| Oracle@10 full code | 0.6072 | 0.6254 | +1.82pp |
-| E2E union rollup | 0.6285 | **0.6419** | +1.34pp |
-| E2E union full code | 0.4622 | **0.4816** | +1.94pp |
-| Cond@union rollup | 0.6775 | **0.6919** | +1.44pp |
+| Oracle@10 rollup | 0.7990 | **0.8130** | +1.40pp |
+| Oracle@10 full code | 0.6072 | **0.6378** | +3.06pp |
+| E2E union rollup | 0.6285 | **0.6488** | +2.03pp |
+| E2E union full code | 0.4622 | **0.4933** | +3.11pp |
+| Cond@union rollup | 0.6775 | **0.6993** | +2.18pp |
 
-Full code benefits more (+2.1pp) — more candidates to disambiguate physiologically. The term is correctly near-neutral for normal-vitals patients; the lift comes from abnormal-physiology cases (a fever+hypoxia+tachycardia "fever, SOB, cough" patient surfaces 486 Pneumonia / A41 Sepsis / J18 at the top). The resolver stays backward compatible (keeps the 2-term `alpha`); builder, benchmark, and `doctor_tool_v3` use the 3-term path whenever the patient's vitals are present, falling back to text+prevalence otherwise.
+Full code benefits most (+3.34pp oracle@5) — rhythm (afib/paced/AV-block) sharply disambiguates among the many specific cardiac codes, and there are more candidates to separate. The term is correctly near-neutral for normal-vitals patients; the lift comes from abnormal-physiology cases (a fever+hypoxia+tachycardia "fever, SOB, cough" patient surfaces 486 Pneumonia / A41 Sepsis / J18 at the top). Adding `vitalsign.csv` is the one builder cost (~5–8 min vs ~1 min), still far cheaper than the full v3 loader (which also parses the 3.3 GB discharge.csv for PMH the resolver doesn't need). The resolver stays backward compatible (keeps the 2-term `alpha`); builder, benchmark, and `doctor_tool_v3` use the 3-term path whenever the patient's vitals are present (the standardizer's column list drives which features are assembled), falling back to text+prevalence otherwise.
 
 ### Inference wiring
 
@@ -782,8 +790,8 @@ Full code benefits more (+2.1pp) — more candidates to disambiguate physiologic
 ### What's next
 
 - ~~**v3_base Stage-2**~~ **DONE (2026-06-11)** — see [v3_base vs v3-nurse](#v3_base-vs-v3-nurse--beforeafter-the-nurse-step). Nurse data adds +1 to +1.3pp E2E exact-ICD, entirely via better Stage-1 category recall; the Stage-2 oracle ceiling is identical.
-- ~~**Vitals-conditioned centroids**~~ **DONE (2026-06-11)** — see [Vitals-conditioned centroids](#vitals-conditioned-centroids-stage-2-v2-shipped-2026-06-11). Adds a z-scored physiology similarity term; lifts the oracle ceiling +1.3pp rollup / +2.1pp full @5, out-of-sample. Wired into the runtime tool.
-- **Rhythm + longitudinal vitals in the centroid.** The vitals term currently uses the snapshot triage vitals only. Adding cardiac rhythm and the longitudinal min/max/last/delta (from `vitalsign.csv`, as the v3 model uses) could extend the lift — at the cost of the slow vitalsign load in the builder.
+- ~~**Vitals-conditioned centroids**~~ **DONE (2026-06-11)** — see [Vitals-conditioned centroids](#vitals-conditioned-centroids-stage-2-v2-shipped-2026-06-11). Adds a z-scored physiology similarity term (28-dim: snapshot vitals + flags + cardiac rhythm + vital deltas). Lifts the oracle ceiling **+2.15pp rollup / +3.34pp full @5**, out-of-sample. Wired into the runtime tool.
+- **PMH / past-medication centroids (highest-value next).** Within a category, the patient's prior diagnoses (and meds as a proxy) strongly predict the *exact* recurrent code — chronic-exacerbation and return visits dominate admissions. Likely a bigger lift than vitals for the returning-patient subset, but only available for patients with history; design it as an **availability-gated** term (apply only when `no_history==0`) and report the has-PMH vs no-PMH subsets separately. Cost: the 3.3 GB discharge.csv parse (cache the per-stay PMH features to keep the builder fast). Meds are a redundant proxy for PMH — optional rider, not standalone.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
 
 ---

@@ -163,19 +163,22 @@ def build_index(vectors_l2, codes, titles, categories, physio=None) -> dict:
 # ---------------------------------------------------------------------------
 # Physiology (vitals) standardization + similarity (Stage-2 v2)
 # ---------------------------------------------------------------------------
-def build_standardizer(df) -> dict:
-    """Fit a z-score standardizer over PHYSIO_COLS from training rows.
+def build_standardizer(df, cols=None) -> dict:
+    """Fit a z-score standardizer over `cols` (default PHYSIO_COLS) from rows.
 
-    Continuous vitals and binary flags are standardized together so the
-    Euclidean "nearest physiological prototype" comparison treats every
-    dimension on the same scale. Returns {cols, mean, std} (std floored away
-    from 0 to avoid divide-by-zero on a constant column).
+    Continuous vitals, binary flags, vital deltas, and rhythm one-hots are
+    standardized together so the Euclidean "nearest physiological prototype"
+    comparison treats every dimension on the same scale. Returns {cols, mean,
+    std} (std floored away from 0 to avoid divide-by-zero on a constant column).
+    The caller chooses `cols` (e.g. snapshot-only, or snapshot + rhythm +
+    deltas); inference reads them back from the saved standardizer.
     """
-    X = df[PHYSIO_COLS].astype(float)
+    cols = list(cols) if cols is not None else list(PHYSIO_COLS)
+    X = df[cols].astype(float)
     mean = X.mean().to_numpy().astype(np.float32)
     std = X.std(ddof=0).to_numpy().astype(np.float32)
     std = np.where(std < 1e-8, np.float32(1.0), std)
-    return {"cols": list(PHYSIO_COLS), "mean": mean, "std": std}
+    return {"cols": cols, "mean": mean, "std": std}
 
 
 def physio_matrix(df, standardizer) -> np.ndarray:
