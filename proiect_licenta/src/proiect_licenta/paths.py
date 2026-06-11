@@ -82,6 +82,11 @@ DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # nurse step. metadata.json gains a "disposition" sub-block.
 DOCTOR_V3_BASE_DIR = ARTIFACTS_DIR / "doctor" / "v3_base"
 DOCTOR_V3_DIR = ARTIFACTS_DIR / "doctor" / "v3"
+# Stage-2 exact-ICD resolver (per-category prototype centroids + prevalence
+# priors) built offline by `uv run train_icd_resolver` from the Doctor v3
+# training split. Consumed by benchmarks/benchmark_icd_resolution.py (and,
+# later, the runtime doctor tool). See src/proiect_licenta/icd_resolution.py.
+DOCTOR_V3_ICD_RESOLVER_DIR = DOCTOR_V3_DIR / "icd_resolver"
 
 # ---- Patient-history (EHR-simulation) index -----------------------------
 # Prebuilt per-subject prior-encounter index (admissions / ED visits / ICD /

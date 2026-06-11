@@ -24,6 +24,27 @@ The v1 -> v2 upgrade added 31 new features (20 vital signs + 11 medications) yet
 
 ## Empirical findings — experiments shipped
 
+### Stage-2 exact-ICD resolution within categories (SHIPPED 2026-06-11, built + benchmarked + wired into runtime)
+
+A retrieval cascade on top of the Doctor v3 diagnosis model that ranks the **exact ICD diagnosis** within each of the top-5 predicted categories (3-char rollup headline + full-code secondary). No retrain, no new dependencies — reuses the TF-IDF vectorizer. Core: `src/proiect_licenta/icd_resolution.py`; builder `uv run train_icd_resolver` → `artifacts/doctor/v3/icd_resolver/`; benchmark `benchmarks/benchmark_icd_resolution.py`; wired advisory-only into `doctor_tool_v3` (`diagnosis_prediction.exact_diagnoses`) + the reassessment task.
+
+**Method.** Per category, each candidate code carries a prototype centroid (mean of L2-normalized TF-IDF complaint vectors of training stays with that code) + a within-category prevalence prior. Rank by `score = α·minmax(cosine) + (1−α)·minmax(prevalence)`; flat cross-category list by `P(cat)·score`. **α=0.60** tuned on a held-out 10% slice of the v3 training split (built leakage-free — candidate pool + centroids come from the train split only, reproduced exactly via a fast light loader).
+
+**Results (20,420-row v3 test split). Blend beats both single-signal baselines everywhere:**
+
+| | Oracle@5 | Oracle@10 | E2E union | E2E flat-10 | Cond@union |
+|---|---|---|---|---|---|
+| rollup prevalence-only | 0.5522 | 0.7047 | 0.5141 | 0.4473 | 0.5542 |
+| rollup cosine-only | 0.5030 | 0.6673 | 0.4772 | 0.4197 | 0.5144 |
+| **rollup blend (α=0.60)** | **0.6698** | **0.7990** | **0.6285** | **0.5546** | **0.6775** |
+| **full-code blend (α=0.60)** | **0.4919** | **0.6072** | **0.4622** | — | **0.4983** |
+
+Stage-1 category recall caps end-to-end (top-5 = 92.8%). At full-code, cosine-only collapses (0.2480@5) while prevalence is robust (0.4288) — fine codes fragment the complaint signal; the blend reconciles both. Strong clinical face validity on misses (e.g. "s/p Fall" → femur/rib/vertebra fractures).
+
+**Next work (deferred):**
+- **v3_base Stage-2** — build/benchmark the same resolver on the pre-nurse v3_base model for a before/after-nurse comparison of exact-ICD recall. The builder's light loader + benchmark generalize directly (swap the artifact dir + diagnosis model).
+- **ICD-9 ↔ ICD-10 unification** — the same disease is split across versions (e.g. `599` vs `N39`, both UTI; `586` vs `N17`, renal failure), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers materially.
+
 ### Doctor disposition v3 — peer admit/discharge model (Option B from plan section 3) (SHIPPED 2026-05-28, model trained; inference wiring PENDING)
 
 Implements "Option B" from the Triage Improvements + Doctor-Level Discharge Prediction plan (`plans/read-the-documentation-of-tidy-scone.md`, section 3): a peer **binary admit/discharge classifier** sitting alongside the v3 diagnosis + department models, trained on the **FULL 418K ED stays** (admit + discharge in their real-world ~37%/63% ratio) rather than the admitted-only ~102K slice used by diagnosis/department. Refines the triage-time disposition using nurse-collected snapshot vitals + longitudinal vitals + rhythm + medications + PMH.

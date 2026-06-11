@@ -105,6 +105,14 @@ def train_doctor_disposition():
     train_pipeline()
 
 
+def train_icd_resolver():
+    """Build the Stage-2 exact-ICD resolver (per-category prototype centroids +
+    prevalence priors) from the Doctor v3 training split. Offline/benchmark-only;
+    drives benchmarks/benchmark_icd_resolution.py."""
+    from proiect_licenta.training.train_icd_resolver import main as build_resolver
+    build_resolver()
+
+
 def build_history_index():
     """Build the patient-history (EHR-simulation) index offline
     (scripts/build_history_index.py). Persists the per-subject prior-encounter

@@ -699,11 +699,61 @@ Threshold tuning is documented as the next lever: the default 0.5 trades sensiti
 
 ---
 
+## Stage 2 — Exact-ICD resolution within categories (shipped 2026-06-11)
+
+The diagnosis models above predict a diagnosis **category** (13 ICD-chapter groups). Stage 2 adds a second, retrieval-based stage that ranks the **exact ICD diagnosis** inside each predicted category and surfaces the top-5 codes per category. It is a **cascade on top of the Doctor v3 diagnosis model** — it does **not** retrain or alter the category/department predictions; it is advisory.
+
+### Design
+
+- **Candidate pool** per category = the ICD codes observed in that category in the **Doctor v3 training split only** (no test leakage; the split is reproduced exactly from `train_nurse_v3`). Built at two granularities: **3-char rollup** (ICD-10 rubric / ICD-9 3-digit — the headline target) and **full code** (secondary/stretch).
+- Each candidate carries (a) a **prototype centroid** = mean of the L2-normalized TF-IDF chief-complaint vectors of the training stays that received that code (symptom→symptom matching, sidesteps the complaint-vs-ICD-title gap), and (b) a **prevalence prior** = the code's frequency within its category.
+- **Ranking blend:** `score = α·minmax(cosine) + (1−α)·minmax(prevalence)`, cosine = centroid · query (both L2-normalized). **α=0.60**, tuned offline on a held-out 10% slice of the training split (oracle-category top-5 rollup hit rate). The flat cross-category list ranks by `P(category)·score`.
+- **No new dependencies** — reuses the existing TF-IDF vectorizer (`artifacts/triage/v1/tfidf_vectorizer.joblib`) + numpy/sklearn. Core in `src/proiect_licenta/icd_resolution.py`; built by `uv run train_icd_resolver` → `artifacts/doctor/v3/icd_resolver/`.
+
+### Benchmark results (same 20,420-row v3 test split, `random_state=42`)
+
+Stage-1 category recall (the end-to-end ceiling): top-1 = 64.1%, **top-5 = 92.8%**. The blend beats both single-signal baselines at every metric and granularity.
+
+**3-char rollup (PRIMARY — 1,188 candidate codes):**
+
+| Variant | α | Oracle@5 | Oracle@10 | E2E union | E2E flat-10 | Cond@union |
+|---|---|---|---|---|---|---|
+| prevalence-only | 0.00 | 0.5522 | 0.7047 | 0.5141 | 0.4473 | 0.5542 |
+| cosine-only | 1.00 | 0.5030 | 0.6673 | 0.4772 | 0.4197 | 0.5144 |
+| **blend** | **0.60** | **0.6698** | **0.7990** | **0.6285** | **0.5546** | **0.6775** |
+
+**Full code (secondary — 4,497 candidates):**
+
+| Variant | α | Oracle@5 | Oracle@10 | E2E union | Cond@union |
+|---|---|---|---|---|---|
+| prevalence-only | 0.00 | 0.4288 | 0.5507 | 0.3993 | 0.4304 |
+| cosine-only | 1.00 | 0.2480 | 0.4116 | 0.2327 | 0.2508 |
+| **blend** | **0.60** | **0.4919** | **0.6072** | **0.4622** | **0.4983** |
+
+*Metrics: **Oracle** = within the TRUE category, is the true code in top-k (isolates Stage-2 from Stage-1 errors). **E2E union** = true code in the union of (top-5 predicted categories × top-5 codes ≈ 25 candidates). **E2E flat-10** = true code in the single `P(cat)·score`-ranked top-10. **Cond@union** = E2E union restricted to the 92.8% of cases where the true category is in the predicted top-5 (removes the Stage-1 ceiling).*
+
+**Reading the table:**
+- The blend is the whole story — neither prevalence nor cosine alone suffices; together they lift oracle@5 rollup to 67.0% (+11.8pp over prevalence, +16.7pp over cosine).
+- **~63% of admitted patients** get their exact 3-char diagnosis inside the top-5-cats × top-5-codes set; **80% within oracle top-10**.
+- Full code is much harder (49.2% oracle@5) because laterality/episode variants explode the candidate space. Notably, **cosine-only collapses at full code (24.8%)** while prevalence stays robust (42.9%) — fine-grained codes fragment the complaint signal across near-duplicates, so frequency carries more weight there; the blend reconciles both.
+- Spot-checks show strong clinical face validity even on misses (e.g. "s/p Fall" → femur/rib/vertebra fractures; "chest pain, SOB" → CHF / pneumonia / COPD / pulmonary HTN).
+
+### Inference wiring
+
+`doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer). `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
+
+### What's next
+
+- **v3_base Stage-2** — build/benchmark the same resolver on the pre-nurse v3_base model for a before/after-nurse comparison of exact-ICD recall. (Deferred; the builder's light loader + benchmark generalize directly.)
+- **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
+
+---
+
 ## Tools
 
 - **`DoctorPredictionTool` (v1)** — `src/proiect_licenta/tools/doctor_tool.py`. Wraps the diagnosis v1 + department v1 models, rebuilds the 2025-feature vector from triage output.
 - **`DoctorPredictionToolV2` (v2)** — `src/proiect_licenta/tools/doctor_tool_v2.py`. Wraps the diagnosis v2 + department v2 models, builds the 2056-feature vector, applies vital imputation and medication classification, and emits a JSON result that includes a `nurse_data_used` section so the output makes the comparison with v1 explicit.
-- **`DoctorPredictionToolV3` (v3)** — `src/proiect_licenta/tools/doctor_tool_v3.py`. Wraps the v3 diagnosis + department models, accepts the nurse's `rhythm`, `prior_history`, and `n_prior_admissions` fields, rebuilds the ~2116-feature vector (including the 19 Change 1 PMH columns), and uses the snapshot-as-trajectory fallback for longitudinal vitals plus the all-zero + `no_history=1` fallback for PMH when the nurse doesn't collect it. Output JSON includes `rhythm_raw`, `rhythm_bucket`, `rhythm_irregular`, `prior_history_raw`, `pmh_categories_detected`, `n_prior_admissions_reported`, and `no_history_fallback` under `nurse_data_used`, plus a `label_space` note flagging that catch-all is excluded.
+- **`DoctorPredictionToolV3` (v3)** — `src/proiect_licenta/tools/doctor_tool_v3.py`. Wraps the v3 diagnosis + department models, accepts the nurse's `rhythm`, `prior_history`, and `n_prior_admissions` fields, rebuilds the ~2116-feature vector (including the 19 Change 1 PMH columns), and uses the snapshot-as-trajectory fallback for longitudinal vitals plus the all-zero + `no_history=1` fallback for PMH when the nurse doesn't collect it. Output JSON includes `rhythm_raw`, `rhythm_bucket`, `rhythm_irregular`, `prior_history_raw`, `pmh_categories_detected`, `n_prior_admissions_reported`, and `no_history_fallback` under `nurse_data_used`, plus a `label_space` note flagging that catch-all is excluded. As of 2026-06-11 it also attaches the advisory `diagnosis_prediction.exact_diagnoses` block from the [Stage-2 resolver](#stage-2--exact-icd-resolution-within-categories-shipped-2026-06-11) (or `null` if the resolver isn't built).
 
 All three tools lazy-load their artifacts at first use.
 
@@ -715,6 +765,8 @@ All three tools lazy-load their artifacts at first use.
 - **v2 pipeline:** `src/proiect_licenta/training/train_nurse.py`. Run with `uv run train_nurse` (~45 minutes for both v2 models on 80K samples; medication aggregation over 3M rows from `medrecon.csv` adds ~5 minutes to data loading).
 - **v3 base pipeline:** `src/proiect_licenta/training/train_doctor_v3.py`. Run with `uv run train_doctor_v3`. Same architecture as v1 but filters the catch-all class and trains on the full ~102K filtered admitted-patient set (no sub-sample). Expected runtime ~40 minutes.
 - **v3 with-nurse pipeline:** `src/proiect_licenta/training/train_nurse_v3.py`. Run with `uv run train_nurse_v3`. v3 base + snapshot vitals + medications + longitudinal vitals/rhythm from `vitalsign.csv` + **PMH features (Change 1)** parsed from prior `discharge.csv` notes and `diagnoses_icd.csv`. Expected runtime ~40 minutes on Colab CPU / ~70 minutes locally (the chunked discharge.csv parse adds ~15-25 minutes on top of the prior ~70-minute pipeline; the 4-hour time-window filter is applied during longitudinal-vital aggregation; PMH is gated by `prior_admittime < current_intime` for leakage safety). tqdm progress bars cover the discharge.csv parse, PMH assembly, longitudinal-vitals aggregation, and each XGBoost boosting iteration.
+
+- **Stage-2 ICD resolver:** `src/proiect_licenta/training/train_icd_resolver.py`. Run with `uv run train_icd_resolver`. Builds the per-category prototype-centroid + prevalence indices (rollup + full) from the v3 training split and tunes α. **Fast (~1 minute)** — it uses a light loader that reproduces the exact v3 split without the slow vitalsign/medrecon/PMH IO (those are post-row-set left joins, so skipping them is leakage-free; `--verify` runs the full v3 loader once to assert identical row order). Benchmark: `uv run python benchmarks/benchmark_icd_resolution.py` (heavy — it rebuilds the full v3 feature matrix for the diagnosis model's `predict_proba`).
 
 The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, stratified on `diagnosis_group`) so v1 and v2 can be evaluated on identical test sets for direct comparison. v3 base and v3 with-nurse share their own filtered split (also `random_state=42`, also stratified on `diagnosis_group`) so they can be compared to each other on identical 13-class test sets. v1/v2 (14-class, sampled) and v3 (13-class, full) are not on identical test sets and should not be compared as if they were — `benchmarks/compare_all_versions.py` flags this in its output.
 

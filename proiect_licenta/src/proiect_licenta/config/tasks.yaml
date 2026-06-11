@@ -462,6 +462,15 @@ doctor_reassessment_task:
            the tool's `diagnosis_prediction.top_3_categories` array
            (e.g., "Most likely: Circulatory (52.1%); alternatives:
            Respiratory (18.7%), Digestive (11.4%)").
+         - **Likely exact diagnoses (advisory):** if
+           `diagnosis_prediction.exact_diagnoses` is present (not null), list
+           the top few entries from its `flat_ranking` array — each has
+           `icd_3char`, `title`, and `category`. Present them as a SUGGESTED
+           differential (e.g., "Within these categories, the most likely exact
+           diagnoses are: 428 Congestive heart failure, 486 Pneumonia, ..."),
+           and state clearly that this is an experimental, advisory retrieval
+           that does NOT change the category/department predictions. Omit this
+           line entirely if `exact_diagnoses` is null.
          - **Updated department WITH explicit top-3 + probabilities** from
            the tool's `department_prediction.top_3_departments` array.
            Include the human-readable `name` field for each.
@@ -501,9 +510,10 @@ doctor_reassessment_task:
     RECOMMENDATIONS.
   expected_output: >
     An enhanced doctor assessment. For admitted patients (REFINED admit):
-    top-3 diagnoses with probabilities, top-3 departments with probabilities,
-    explicit comparison with the v3_base initial assessment and the
-    disposition refinement, vitals/meds/PMH impact analysis, and clinical
+    top-3 diagnoses with probabilities, the advisory likely-exact-diagnosis
+    differential (when `exact_diagnoses` is present), top-3 departments with
+    probabilities, explicit comparison with the v3_base initial assessment and
+    the disposition refinement, vitals/meds/PMH impact analysis, and clinical
     reasoning. For discharged patients (REFINED discharge): discharge
     confirmation with follow-up instructions, calling out any triage
     override and the rationale.

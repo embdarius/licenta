@@ -40,9 +40,13 @@ from pydantic import BaseModel, Field
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR as MODELS_DIR,
     DOCTOR_V3_DIR as DOCTOR_MODELS_DIR,
+    DOCTOR_V3_ICD_RESOLVER_DIR,
 )
 
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
+# Stage-2 exact-ICD resolver (within-category code ranking). Loaded lazily and
+# gracefully skipped if the artifact hasn't been built (uv run train_icd_resolver).
+from proiect_licenta import icd_resolution as icdr
 
 # ---------------------------------------------------------------------------
 # Medication classification — shared vocabulary with the training pipeline
@@ -144,6 +148,14 @@ def get_doctor_v3_models():
         with open(DOCTOR_MODELS_DIR / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
+        # Stage-2 exact-ICD resolver — optional. Absent until built via
+        # `uv run train_icd_resolver`; the tool degrades gracefully (no
+        # exact-diagnosis block) rather than failing when it's missing.
+        try:
+            icd_resolver = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
+        except (FileNotFoundError, OSError):
+            icd_resolver = None
+
         _doctor_v3_cache = {
             "tfidf": tfidf,
             "severity_map": severity_map,
@@ -152,8 +164,67 @@ def get_doctor_v3_models():
             "diagnosis_model": diagnosis_model,
             "department_model": department_model,
             "metadata": metadata,
+            "icd_resolver": icd_resolver,
         }
     return _doctor_v3_cache
+
+
+# ---------------------------------------------------------------------------
+# Stage-2 exact-ICD resolution (within-category code ranking)
+# ---------------------------------------------------------------------------
+def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
+                             complaint_text, tfidf, k_per_cat=5, k_flat=10):
+    """Rank exact ICD diagnoses within the top-5 predicted categories.
+
+    Returns a serializable block, or None when the resolver isn't available.
+    Uses the 3-char rollup granularity (the benchmarked headline target). This
+    is advisory: it does NOT alter the category or department predictions.
+    """
+    if resolver is None:
+        return None
+
+    top5_idx = np.argsort(diag_proba)[::-1][:5]
+    cat_probs = [(diagnosis_labels[i], float(diag_proba[i])) for i in top5_idx]
+    q_vec = icdr.vectorize_query(complaint_text, tfidf)
+    gindex = resolver["granularities"]["rollup"]
+    resolved = icdr.resolve_exact_diagnoses(
+        cat_probs, q_vec, gindex, resolver["alpha"],
+        k_per_cat=k_per_cat, k_flat=k_flat,
+    )
+
+    per_category = [
+        {
+            "category": pc["category"],
+            "category_probability": f"{pc['p_category']:.1%}",
+            "candidates": [
+                {
+                    "icd_3char": c["code"],
+                    "title": c["title"],
+                    "score": round(c["score"], 4),
+                }
+                for c in pc["codes"]
+            ],
+        }
+        for pc in resolved["per_category"]
+    ]
+    flat_top = [
+        {
+            "icd_3char": d["code"],
+            "title": d["title"],
+            "category": d["category"],
+            "combined_score": round(d["combined"], 4),
+        }
+        for d in resolved["flat_top"]
+    ]
+    return {
+        "granularity": "ICD 3-char rollup",
+        "method": "Stage-2 retrieval: TF-IDF prototype cosine + prevalence prior",
+        "alpha": resolver["alpha"],
+        "disclaimer": "Experimental, advisory only — does not change the "
+                      "category/department predictions above.",
+        "top_per_category": per_category,
+        "flat_ranking": flat_top,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +698,15 @@ class DoctorPredictionToolV3(BaseTool):
             for i in top3_diag_idx
         ]
 
+        # ── 12b. Stage-2: exact ICD diagnoses within the top-5 categories ──
+        # Optional retrieval stage (TF-IDF prototype cosine + prevalence prior).
+        # Advisory only; surfaces likely exact diagnoses without changing the
+        # category/department predictions. Skipped if the resolver isn't built.
+        exact_diagnoses = _resolve_exact_diagnoses(
+            models.get("icd_resolver"), diag_proba, diagnosis_labels, complaint_text,
+            tfidf,
+        )
+
         # ── 13. Predict department (cascading) ──
         # A3: cascade the full diagnosis softmax (13 probability columns)
         # instead of the single argmax integer. metadata["diag_cascade_cols"]
@@ -733,6 +813,9 @@ class DoctorPredictionToolV3(BaseTool):
                 "confidence": f"{diag_confidence:.1%}",
                 "top_3_categories": top3_diagnoses,
                 "label_space": f"{len(diagnosis_labels)} classes (catch-all excluded)",
+                # Stage-2: likely exact ICD diagnoses within the top-5 categories
+                # (None when the resolver artifact hasn't been built).
+                "exact_diagnoses": exact_diagnoses,
             },
             "department_prediction": {
                 "predicted_department": dept_label,

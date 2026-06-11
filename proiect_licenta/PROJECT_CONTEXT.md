@@ -69,6 +69,7 @@ Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
 | Doctor v3 nurse — Department (11 classes) | **70.8%** | **94.1%** | +10.1pp over v3 base; Tier A softmax cascade (A3) + isotonic calibration (A4) |
 | Triage v3 cascade — Disposition (binary, baseline for next row) | 80.2% | — | ROC AUC 0.8894, ECE 0.0748. Computed on the disposition test split (83,617 rows). Triage v3's own headline 77.98% is from the *triage* pipeline's split — see doctor-agent.md for the two-reference-numbers explanation. |
 | **Doctor disposition v3 (binary, calibrated, deployment-ready)** | **84.0%** | — | **ROC AUC 0.9138, ECE 0.0036, Brier 0.1128. +3.77pp accuracy / +0.0244 AUC over the triage v3 cascade baseline on the same 83,617 test rows. Specificity 88.3% (+8.3pp), sensitivity 76.5% (−4.05pp at threshold 0.5). Plan section 3 / Option B — peer binary admit/discharge model trained on the full 418K stays. **Live in the runtime crew as of 2026-05-30** (`doctor_disposition_tool` between nurse and reassessment; the reassessment gates on this task's `is_admitted` rather than triage's).** |
+| **Doctor Stage-2 exact-ICD (3-char rollup, on v3 nurse)** | **—** | **—** | **Retrieval cascade (TF-IDF prototype cosine + prevalence, α=0.60). Within the top-5 predicted categories: 62.9% of admitted patients get their exact 3-char ICD in the top-5-cats×top-5-codes set, 55.5% in a flat top-10; oracle-category (true category given) 67.0%@5 / 79.9%@10. Blend beats prevalence-only (+11.8pp@5) and cosine-only (+16.7pp@5). Full-code secondary: 49.2%@5 oracle. Advisory only — does not change category/department. Shipped 2026-06-11.** |
 
 v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't be compared as if they were. Full per-class metrics and confusion matrices live in the per-agent docs.
 
@@ -88,6 +89,7 @@ v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't 
 8. **No ICU data** — Project focuses entirely on the Emergency Department pathway.
 9. **v3 tier (catch-all excluded)** — A separate Doctor v3 model tier excludes the "Symptoms, Signs, Ill-Defined" catch-all class (33% of admitted patients) which acts as a labeling artifact. v3 trains on the full filtered dataset (~102K rows, no 100K cap) and the v3 with-nurse variant adds longitudinal vitals + cardiac rhythm aggregated from `vitalsign.csv`. v1/v2 are kept as 14-class baselines for direct thesis comparison.
 10. **Change 1 — PMH features (Doctor v3 nurse, 2026-05-21)** — Past Medical History features are derived from prior MIMIC encounters: 13 binary `pmh_<diagnosis_group>` flags parsed from the "Past Medical History" section of prior discharge summaries (`mimic-iv-notes/discharge.csv`, ~3.3 GB) and OR'd with ICD-derived flags from `hosp/diagnoses_icd.csv`, plus 6 repeat-visit numerics (`n_prior_admissions`, `days_since_last_admission`, `same_complaint_as_prior`, etc.). Leakage-free by construction (`prior_admittime < current_intime`). +1.08pp diagnosis / +1.50pp department over the pre-Change-1 v3 nurse baseline. The Nurse Agent now also asks the patient about chronic conditions at inference — zero-fill fallback identical to first-time-patient training rows.
+11. **Stage-2 exact-ICD resolution (Doctor v3, 2026-06-11)** — A retrieval cascade on top of the v3 diagnosis model predicts the *exact* ICD diagnosis within each predicted category (3-char rollup headline + full-code secondary), ranking candidates by `α·cosine + (1−α)·prevalence` where cosine compares the complaint's TF-IDF vector to per-code prototype centroids built from the training split. α=0.60 tuned offline. It does **not** retrain or alter the category/department predictions — it's advisory, surfaced as `diagnosis_prediction.exact_diagnoses` and gracefully skipped if the artifact isn't built. No new dependencies (reuses the TF-IDF vectorizer). See [`docs/agents/doctor-agent.md#stage-2--exact-icd-resolution-within-categories-shipped-2026-06-11`](docs/agents/doctor-agent.md#stage-2--exact-icd-resolution-within-categories-shipped-2026-06-11).
 
 ---
 
@@ -124,6 +126,10 @@ uv run train_nurse_v3
 # (~60 minutes on Colab T4 GPU; see notebooks/train_doctor_disposition.ipynb)
 uv run train_doctor_disposition
 
+# Build the Stage-2 exact-ICD resolver from the v3 training split (~1 minute; light
+# loader, no GPU. Add --verify to assert the split matches the full v3 loader once.)
+uv run train_icd_resolver
+
 # Run the full 4-agent, 5-task system interactively
 uv run crewai run
 
@@ -140,6 +146,7 @@ uv run python benchmarks/benchmark_nurse.py                 # Doctor v1 vs v2 co
 uv run python benchmarks/benchmark_doctor_v3.py             # Doctor v3 base (13 classes)
 uv run python benchmarks/benchmark_nurse_v3.py              # Doctor v3 base vs v3 with-nurse
 uv run python benchmarks/benchmark_doctor_disposition.py    # Doctor disposition v3 (Option B) — head-to-head vs triage v3 cascade dispo on the same test rows, with per-subgroup deltas + feature-importance audit
+uv run python benchmarks/benchmark_icd_resolution.py        # Doctor Stage-2 exact-ICD (rollup + full; blend vs prevalence-only vs cosine-only; oracle + end-to-end)
 uv run python benchmarks/compare_all_versions.py            # Four-way table v1/v2/v3-base/v3-nurse
 ```
 
