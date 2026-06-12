@@ -97,23 +97,43 @@ def _attach_icd_version(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _score_rows(Q_rows, physio_rows, entry, weights):
-    """3-term blended scores for a row subset against one category's candidates.
+def _score_rows(Q_rows, physio_rows, pmh_rows, has_pmh_rows, entry,
+                weights, weights_nopmh=None):
+    """Blended scores for a row subset against one category's candidates.
 
-    Falls back to text+prevalence when w_vit == 0 or the entry has no vitals
-    centroids (older resolver). Returns (n_rows, m)."""
+    Unifies all variants via `gated_score`: text cosine always, vitals when a
+    weight uses it, and the gated PMH term when `weights['pmh'] > 0` and PMH
+    data is present (patients with `has_pmh_rows` get `weights`, the rest get
+    `weights_nopmh`). Returns (n_rows, m)."""
     text_cos = np.asarray(Q_rows @ entry["centroids"].T, dtype=np.float32)
+    wn = weights_nopmh if weights_nopmh is not None else weights
+    use_vit = weights.get("vit", 0.0) > 0 or wn.get("vit", 0.0) > 0
     vit = None
-    if weights.get("vit", 0.0) > 0 and physio_rows is not None \
-            and entry.get("vital_centroids") is not None:
+    if use_vit and physio_rows is not None and entry.get("vital_centroids") is not None:
         vit = icdr._neg_euclidean(physio_rows, entry["vital_centroids"])
-    return icdr.blend3(text_cos, vit, entry["prevalence"], weights)
+    pmh_sim = None
+    if weights.get("pmh", 0.0) > 0 and pmh_rows is not None \
+            and entry.get("pmh_centroids") is not None:
+        pmh_sim = icdr._neg_euclidean(pmh_rows, entry["pmh_centroids"])
+    hp = has_pmh_rows if has_pmh_rows is not None else False
+    return icdr.gated_score(text_cos, vit, pmh_sim, entry["prevalence"],
+                            weights, wn, hp)
 
 
-def _oracle_recall(Q_test, physio_test, df_test, true_cat_idx, gindex,
-                   diagnosis_labels, code_col, weights):
+def _subset_rows(rows, physio_test, pmh_test, has_pmh, subset_mask):
+    """Filter `rows` by `subset_mask` and return aligned physio/pmh/has_pmh."""
+    if subset_mask is not None:
+        rows = rows[subset_mask[rows]]
+    physio_rows = physio_test[rows] if physio_test is not None else None
+    pmh_rows = pmh_test[rows] if pmh_test is not None else None
+    hp_rows = has_pmh[rows] if has_pmh is not None else None
+    return rows, physio_rows, pmh_rows, hp_rows
+
+
+def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx,
+                   gindex, diagnosis_labels, code_col, weights,
+                   weights_nopmh=None, subset_mask=None):
     """Within the TRUE category, recall@5 / recall@10 of the true code."""
-    n = len(df_test)
     hit5 = hit10 = scored = 0
     true_codes = df_test[code_col].to_numpy()
     for c_idx, cat in enumerate(diagnosis_labels):
@@ -121,10 +141,12 @@ def _oracle_recall(Q_test, physio_test, df_test, true_cat_idx, gindex,
         if entry is None:
             continue
         rows = np.where(true_cat_idx == c_idx)[0]
+        rows, physio_rows, pmh_rows, hp_rows = _subset_rows(
+            rows, physio_test, pmh_test, has_pmh, subset_mask)
         if len(rows) == 0:
             continue
-        physio_rows = physio_test[rows] if physio_test is not None else None
-        score = _score_rows(Q_test[rows], physio_rows, entry, weights)
+        score = _score_rows(Q_test[rows], physio_rows, pmh_rows, hp_rows,
+                            entry, weights, weights_nopmh)
         order = np.argsort(-score, axis=1)
         codes_arr = np.asarray(entry["codes"])
         top5 = codes_arr[order[:, :K_PER_CAT]]
@@ -136,15 +158,19 @@ def _oracle_recall(Q_test, physio_test, df_test, true_cat_idx, gindex,
                 hit5 += 1
             if tc in set(top10[j].tolist()):
                 hit10 += 1
+    if scored == 0:
+        return 0.0, 0.0, 0
     return hit5 / scored, hit10 / scored, scored
 
 
-def _end_to_end_recall(Q_test, physio_test, df_test, proba, top5_cat_idx, gindex,
-                       diagnosis_labels, code_col, weights, true_cat_idx):
+def _end_to_end_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, proba,
+                       top5_cat_idx, gindex, diagnosis_labels, code_col, weights,
+                       true_cat_idx, weights_nopmh=None, subset_mask=None):
     """End-to-end recall: union(top-5 cats x top-5 codes) and flat top-10.
 
     Also returns the conditional recall (rows whose true category is in the
     predicted top-5), which removes the Stage-1 category-recall ceiling.
+    `subset_mask` restricts the final tally (e.g. to has-PMH rows).
     """
     n = len(df_test)
     true_codes = df_test[code_col].to_numpy()
@@ -159,7 +185,10 @@ def _end_to_end_recall(Q_test, physio_test, df_test, proba, top5_cat_idx, gindex
         if len(rows) == 0:
             continue
         physio_rows = physio_test[rows] if physio_test is not None else None
-        score = _score_rows(Q_test[rows], physio_rows, entry, weights)
+        pmh_rows = pmh_test[rows] if pmh_test is not None else None
+        hp_rows = has_pmh[rows] if has_pmh is not None else None
+        score = _score_rows(Q_test[rows], physio_rows, pmh_rows, hp_rows,
+                            entry, weights, weights_nopmh)
         order = np.argsort(-score, axis=1)[:, :K_PER_CAT]
         codes_arr = np.asarray(entry["codes"])
         p_rows = proba[rows, c_idx]
@@ -171,9 +200,13 @@ def _end_to_end_recall(Q_test, physio_test, df_test, proba, top5_cat_idx, gindex
                 flat_lists[r].append((p_rows[j] * sc, cc))
 
     cat_correct = (top5_cat_idx == true_cat_idx[:, None]).any(axis=1)
-    union_hit = flat_hit = 0
+    keep = np.ones(n, dtype=bool) if subset_mask is None else subset_mask
+    union_hit = flat_hit = tally = 0
     cond_union_hit = cond_total = 0
     for r in range(n):
+        if not keep[r]:
+            continue
+        tally += 1
         tc = true_codes[r]
         in_union = tc in union_sets[r]
         flat_top = [c for _, c in sorted(flat_lists[r], reverse=True)[:K_FLAT]]
@@ -184,10 +217,10 @@ def _end_to_end_recall(Q_test, physio_test, df_test, proba, top5_cat_idx, gindex
             cond_total += 1
             cond_union_hit += in_union
     return (
-        union_hit / n,
-        flat_hit / n,
+        union_hit / tally,
+        flat_hit / tally,
         (cond_union_hit / cond_total if cond_total else 0.0),
-        cat_correct.mean(),
+        cat_correct[keep].mean(),
     )
 
 
@@ -247,6 +280,11 @@ def main():
     standardizer = resolver.get("standardizer")
     physio_test = (icdr.physio_matrix(df_test, standardizer)
                    if standardizer is not None else None)
+    # PMH (gated history term): standardized PMH vectors + has-history mask.
+    pmh_standardizer = resolver.get("pmh_standardizer")
+    pmh_test = (icdr.physio_matrix(df_test, pmh_standardizer)
+                if pmh_standardizer is not None else None)
+    has_pmh = (df_test["no_history"] == 0).to_numpy() if "no_history" in df_test else None
 
     # Variants as 3-term weight dicts {text, vit, prev}. "blend" = tuned text+
     # prevalence (no vitals); "blend+vitals" = tuned 3-term (the headline).
@@ -278,7 +316,7 @@ def main():
             if name == "__header__":
                 return [("Oracle@5", 11), ("Oracle@10", 11)]
             o5, o10, _ = _oracle_recall(
-                Q_test, physio_test, df_test, true_cat_idx, _g,
+                Q_test, physio_test, None, None, df_test, true_cat_idx, _g,
                 diagnosis_labels, _c, w)
             return (o5, o10)
         _print_recall_table(label, variants, _orow)
@@ -309,8 +347,8 @@ def main():
                 if name == "__header__":
                     return [("E2E union", 11), ("E2E flat10", 12), ("Cond@union", 12)]
                 u, f, c, _ = _end_to_end_recall(
-                    Q_test, physio_test, df_test, _p, _t, _g, diagnosis_labels,
-                    _c, w, true_cat_idx)
+                    Q_test, physio_test, None, None, df_test, _p, _t, _g,
+                    diagnosis_labels, _c, w, true_cat_idx)
                 if name == HEADLINE:
                     e2e_blend[(model_name, _gn)] = (u, f, c)
                 return (u, f, c)
@@ -328,6 +366,45 @@ def main():
                                ("E2E flat-10", fb, fn),
                                ("Cond@union", cb, cn)]:
             print(f"               {mlabel:<14s} {vb:>9.4f} {vn:>9.4f} {vn - vb:>+9.4f}")
+
+    # 5b. Gated PMH term — only patients WITH prior history get the 4th term.
+    w_pmh = resolver.get("weights_pmh")
+    if w_pmh is not None and pmh_test is not None and has_pmh is not None:
+        n_has, n_no = int(has_pmh.sum()), int((~has_pmh).sum())
+        print_section(f"PMH-GATED TERM — has-PMH {n_has:,} / no-PMH {n_no:,} "
+                      f"({100*has_pmh.mean():.0f}% have history)")
+        print(f"  no-PMH weights (text/vit/prev) = "
+              f"{w_full['text']:.1f}/{w_full['vit']:.1f}/{w_full['prev']:.1f}  |  "
+              f"has-PMH (text/vit/pmh/prev) = {w_pmh['text']:.1f}/{w_pmh['vit']:.1f}/"
+              f"{w_pmh['pmh']:.1f}/{w_pmh['prev']:.1f}")
+        print("  (baseline = blend+vitals; +PMH = gated 4-term. no-PMH subset should be ~unchanged.)")
+        for g in icdr.GRANULARITIES:
+            gindex = resolver["granularities"][g]
+            code_col = "rollup_code" if g == "rollup" else "icd_code"
+            label = "3-char rollup" if g == "rollup" else "full code"
+            print(f"\n  [{label}]  {'subset':<10s} {'metric':<10s} "
+                  f"{'baseline':>10s} {'+PMH':>10s} {'delta':>9s}")
+            for sub_name, mask in [("all", None), ("has-PMH", has_pmh), ("no-PMH", ~has_pmh)]:
+                o5b, _, _ = _oracle_recall(
+                    Q_test, physio_test, None, None, df_test, true_cat_idx, gindex,
+                    diagnosis_labels, code_col, w_full, subset_mask=mask)
+                o5g, _, _ = _oracle_recall(
+                    Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx,
+                    gindex, diagnosis_labels, code_col, w_pmh,
+                    weights_nopmh=w_full, subset_mask=mask)
+                print(f"             {sub_name:<10s} {'oracle@5':<10s} "
+                      f"{o5b:>10.4f} {o5g:>10.4f} {o5g - o5b:>+9.4f}")
+            for sub_name, mask in [("all", None), ("has-PMH", has_pmh)]:
+                ub, _, _, _ = _end_to_end_recall(
+                    Q_test, physio_test, None, None, df_test, nurse_proba,
+                    nurse_top5, gindex, diagnosis_labels, code_col, w_full,
+                    true_cat_idx, subset_mask=mask)
+                ug, _, _, _ = _end_to_end_recall(
+                    Q_test, physio_test, pmh_test, has_pmh, df_test, nurse_proba,
+                    nurse_top5, gindex, diagnosis_labels, code_col, w_pmh,
+                    true_cat_idx, weights_nopmh=w_full, subset_mask=mask)
+                print(f"             {sub_name:<10s} {'E2E union':<10s} "
+                      f"{ub:>10.4f} {ug:>10.4f} {ug - ub:>+9.4f}")
 
     # 6. Spot-check (v3 with-nurse, blend+vitals, rollup).
     proba, top5_cat_idx = nurse_proba, nurse_top5

@@ -26,7 +26,8 @@ from sklearn.model_selection import train_test_split
 
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR, TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, SERVICES_CSV,
-    DIAGNOSIS_CSV, VITALSIGN_CSV, DOCTOR_V3_ICD_RESOLVER_DIR,
+    DIAGNOSIS_CSV, VITALSIGN_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
+    DISCHARGE_NOTES_CSV, DERIVED_DIR, DOCTOR_V3_ICD_RESOLVER_DIR,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.training.train_doctor import (
@@ -36,7 +37,17 @@ from proiect_licenta.training.train_nurse import _clean_vitals
 from proiect_licenta.training.train_nurse_v3 import (
     _aggregate_vitalsigns, _fill_longitudinal_vitals, LONG_VITAL_FEATURE_COLS,
 )
+from proiect_licenta.pmh_vocab import PMH_CATEGORIES
+from proiect_licenta.pmh_features import aggregate_pmh, fill_missing_pmh_columns
 from proiect_licenta import icd_resolution as icdr
+
+# PMH features for the gated history term. The 13 prior-diagnosis-category
+# flags + the same-complaint Jaccard are the directly discriminative signals
+# for the *exact* recurrent code; the count/days numerics (recurrence/acuity,
+# and the 9999 "no prior" sentinel) are excluded to avoid sentinel pollution of
+# the z-score. Centroids are built from has-history rows only.
+PMH_RESOLVER_COLS = [f"pmh_{c}" for c in PMH_CATEGORIES] + ["same_complaint_as_prior"]
+PMH_CACHE = DERIVED_DIR / "icd_resolver_pmh.parquet"
 
 # Physiology features for the vitals-conditioned term. Snapshot vitals + flags
 # (from triage.csv) PLUS the genuinely-new longitudinal signals that the
@@ -69,6 +80,22 @@ def _weight_simplex(step: int = 10):
 
 
 WEIGHT_GRID = _weight_simplex(10)  # 66 (text, vit, prev) combinations
+
+
+def _weight_simplex4(step: int = 10):
+    """Enumerate (w_text, w_vit, w_pmh, w_prev) on the simplex in 1/step steps."""
+    grid = []
+    for i in range(step + 1):
+        for j in range(step + 1 - i):
+            for k in range(step + 1 - i - j):
+                wt, wv, wm = i / step, j / step, k / step
+                grid.append({"text": round(wt, 3), "vit": round(wv, 3),
+                             "pmh": round(wm, 3),
+                             "prev": round(1.0 - wt - wv - wm, 3)})
+    return grid
+
+
+WEIGHT_GRID4 = _weight_simplex4(10)  # 286 (text, vit, pmh, prev) combinations
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +189,45 @@ def _load_light() -> pd.DataFrame:
     long_vitals = _aggregate_vitalsigns(df[["stay_id", "intime"]], VITALSIGN_CSV)
     df = df.merge(long_vitals, on="stay_id", how="left")
     _fill_longitudinal_vitals(df)
+
+    # PMH features (prior-diagnosis flags + same-complaint Jaccard) for the
+    # gated history term. This is the heavy step (3.3 GB discharge.csv parse),
+    # so the per-stay output is cached to parquet and reused across builds.
+    df = _attach_pmh(df, edstays)
+    return df
+
+
+def _attach_pmh(df: pd.DataFrame, edstays_full: pd.DataFrame) -> pd.DataFrame:
+    """Attach PMH_FEATURE_COLS (incl. no_history) to df, with a parquet cache.
+
+    Reuses the vetted, leakage-safe `pmh_features.aggregate_pmh` verbatim (the
+    `prior_admittime < intime` guard lives inside it). The per-stay result is
+    cached on first run; subsequent builds skip the discharge.csv parse.
+    """
+    need = set(df["stay_id"].astype(int))
+    pmh_df = None
+    if PMH_CACHE.exists():
+        cached = pd.read_parquet(PMH_CACHE)
+        if need.issubset(set(cached["stay_id"].astype(int))):
+            pmh_df = cached[cached["stay_id"].astype(int).isin(need)].copy()
+            print(f"  [PMH cache] hit — {len(pmh_df):,} stays from {PMH_CACHE.name}")
+    if pmh_df is None:
+        print("  [PMH cache] miss — computing PMH (heavy discharge.csv parse)...")
+        pmh_df = aggregate_pmh(
+            stays_df=df[["stay_id", "subject_id", "intime", "complaint_text_norm"]],
+            edstays_full=edstays_full,
+            diagnoses_icd_csv_path=DIAGNOSES_ICD_CSV,
+            admissions_csv_path=ADMISSIONS_CSV,
+            discharge_csv_path=DISCHARGE_NOTES_CSV,
+            diagnosis_csv_path=DIAGNOSIS_CSV,
+            diagnosis_group_map=DIAGNOSIS_GROUP_MAP,
+            catch_all_label=CATCH_ALL_LABEL,
+        )
+        DERIVED_DIR.mkdir(parents=True, exist_ok=True)
+        pmh_df.to_parquet(PMH_CACHE, index=False)
+        print(f"  [PMH cache] saved {len(pmh_df):,} stays -> {PMH_CACHE.name}")
+    df = df.merge(pmh_df, on="stay_id", how="left")
+    fill_missing_pmh_columns(df)
     return df
 
 
@@ -236,25 +302,34 @@ def _build_for_granularity(df_rows: pd.DataFrame, tfidf, granularity: str,
 # ---------------------------------------------------------------------------
 # Weight tuning — 3-term simplex (text cosine / vitals / prevalence)
 # ---------------------------------------------------------------------------
-def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict):
-    """Grid-search the (text, vit, prev) simplex on a held-out train slice.
+def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict,
+                  pmh_standardizer: dict):
+    """Grid-search the blend weights on a held-out train slice.
 
-    Metric: oracle-category top-5 rollup hit rate. Returns the best 3-term
-    weights, the best 2-term weights (vit == 0, for the no-vitals ablation),
-    and the full rate table. Precomputes the per-category min-max'd term
-    matrices once so the 66-combo grid is just weighted sums + argsort.
+    Tunes (a) the 3-term (text, vit, prev) simplex on ALL val rows — the weights
+    used for patients without history — and (b) the gated 4-term (text, vit,
+    pmh, prev) simplex on the HAS-PMH val rows only, the weights applied to
+    patients with prior history. Metric: oracle-category top-5 rollup hit rate.
+    Returns best 3-term, best 2-term (vit=0 ablation), best 4-term, and rates.
     """
     build_df, val_df = train_test_split(
         df_train, test_size=TUNE_VAL_FRACTION, random_state=SPLIT_SEED,
         stratify=df_train["diagnosis_group"],
     )
+    n_pmh_val = int((val_df["no_history"] == 0).sum())
     print(f"\n  Weight tuning: build on {len(build_df):,}, validate on {len(val_df):,} "
-          f"(oracle-category top-{TUNE_K} rollup hit rate, {len(WEIGHT_GRID)} combos)")
+          f"({n_pmh_val:,} with PMH); oracle-category top-{TUNE_K} rollup hit rate")
 
     index = _build_for_granularity(build_df, tfidf, "rollup", standardizer)
+    # Attach PMH centroids from has-history build rows only.
+    icdr.attach_centroids(
+        index, icdr.physio_matrix(build_df, pmh_standardizer),
+        _code_column(build_df, "rollup"), build_df["diagnosis_group"].tolist(),
+        key="pmh_centroids", row_mask=(build_df["no_history"] == 0).to_numpy(),
+    )
 
-    # Per category, precompute the three min-max'd term matrices + each val
-    # row's true-code index (−1 if the code isn't a candidate).
+    # Per category, precompute the min-max'd term matrices, true-code indices,
+    # and the has-PMH mask.
     precomp = []
     total = 0
     for cat, sub in val_df.groupby("diagnosis_group"):
@@ -263,35 +338,66 @@ def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict):
         if entry is None:
             continue
         Q = icdr.vectorize_queries(sub["complaint_text_norm"].tolist(), tfidf)
-        text_cos = np.asarray(Q @ entry["centroids"].T, dtype=np.float32)  # (Nc,m)
-        physio = icdr.physio_matrix(sub, standardizer)
-        vit = icdr._neg_euclidean(physio, entry["vital_centroids"])        # (Nc,m)
+        text_cos = np.asarray(Q @ entry["centroids"].T, dtype=np.float32)
+        vit = icdr._neg_euclidean(icdr.physio_matrix(sub, standardizer),
+                                  entry["vital_centroids"])
+        pmh = icdr._neg_euclidean(icdr.physio_matrix(sub, pmh_standardizer),
+                                  entry["pmh_centroids"])
         Tn = icdr._minmax_rows(text_cos)
         Vn = icdr._minmax_rows(vit)
+        Mn = icdr._minmax_rows(pmh)
         Pn = icdr._minmax(entry["prevalence"])
         code_pos = {c: i for i, c in enumerate(entry["codes"])}
         true_idx = np.array([code_pos.get(c, -1) for c in sub["rollup_code"]], dtype=int)
-        precomp.append((Tn, Vn, Pn, true_idx))
+        has_pmh = (sub["no_history"] == 0).to_numpy()
+        precomp.append((Tn, Vn, Mn, Pn, true_idx, has_pmh))
 
-    def _rate(w):
+    def _hits(score, true_idx):
+        topk = np.argsort(-score, axis=1)[:, :TUNE_K]
+        return int(((topk == true_idx[:, None]) & (true_idx[:, None] >= 0)).any(axis=1).sum())
+
+    def _rate3(w):
         hits = 0
-        for Tn, Vn, Pn, true_idx in precomp:
-            score = w["text"] * Tn + w["vit"] * Vn + w["prev"] * Pn[None, :]
-            topk = np.argsort(-score, axis=1)[:, :TUNE_K]
-            hits += int(((topk == true_idx[:, None]) & (true_idx[:, None] >= 0)).any(axis=1).sum())
+        for Tn, Vn, _Mn, Pn, true_idx, _hp in precomp:
+            hits += _hits(w["text"] * Tn + w["vit"] * Vn + w["prev"] * Pn[None, :], true_idx)
         return hits / total
 
-    rates = [(w, _rate(w)) for w in WEIGHT_GRID]
-    best_w, best_rate = max(rates, key=lambda x: x[1])
-    novit = [(w, r) for w, r in rates if w["vit"] == 0.0]
+    def _rate4(w):
+        hits = 0
+        for Tn, Vn, Mn, Pn, true_idx, hp in precomp:
+            if hp.sum() == 0:
+                continue
+            score = (w["text"] * Tn[hp] + w["vit"] * Vn[hp]
+                     + w["pmh"] * Mn[hp] + w["prev"] * Pn[None, :])
+            hits += _hits(score, true_idx[hp])
+        return hits / n_pmh_val
+
+    rates3 = [(w, _rate3(w)) for w in WEIGHT_GRID]
+    best_w, best_rate = max(rates3, key=lambda x: x[1])
+    novit = [(w, r) for w, r in rates3 if w["vit"] == 0.0]
     best_novit_w, best_novit_rate = max(novit, key=lambda x: x[1])
 
-    print(f"    best 3-term: text={best_w['text']:.1f} vit={best_w['vit']:.1f} "
-          f"prev={best_w['prev']:.1f}  -> {best_rate:.4f}")
-    print(f"    best 2-term (vit=0): text={best_novit_w['text']:.1f} "
-          f"prev={best_novit_w['prev']:.1f}  -> {best_novit_rate:.4f}")
-    print(f"    vitals lift on val: {best_rate - best_novit_rate:+.4f}")
-    return best_w, best_rate, best_novit_w, best_novit_rate, rates
+    # 4-term: tuned on has-PMH rows. The vit=pmh=0 corner reproduces the 2-term
+    # baseline restricted to has-PMH rows, so the lift is apples-to-apples.
+    rates4 = [(w, _rate4(w)) for w in WEIGHT_GRID4]
+    best_w_pmh, best_rate_pmh = max(rates4, key=lambda x: x[1])
+    nopmh_haspmh = [(w, r) for w, r in rates4 if w["pmh"] == 0.0]
+    best_nopmh_w, best_nopmh_rate = max(nopmh_haspmh, key=lambda x: x[1])
+
+    print(f"    best 3-term (all val): text={best_w['text']:.1f} vit={best_w['vit']:.1f} "
+          f"prev={best_w['prev']:.1f}  -> {best_rate:.4f}  "
+          f"(vitals lift {best_rate - best_novit_rate:+.4f})")
+    print(f"    best 4-term (has-PMH val): text={best_w_pmh['text']:.1f} "
+          f"vit={best_w_pmh['vit']:.1f} pmh={best_w_pmh['pmh']:.1f} "
+          f"prev={best_w_pmh['prev']:.1f}  -> {best_rate_pmh:.4f}")
+    print(f"    PMH lift on has-PMH val (vs best pmh=0): {best_rate_pmh - best_nopmh_rate:+.4f}")
+    return {
+        "weights": best_w, "weights_novit": best_novit_w,
+        "weights_pmh": best_w_pmh,
+        "rate_3term": best_rate, "rate_2term": best_novit_rate,
+        "rate_4term_haspmh": best_rate_pmh, "rate_nopmh_haspmh": best_nopmh_rate,
+        "n_pmh_val": n_pmh_val,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -333,25 +439,39 @@ def main():
     tfidf = joblib.load(tfidf_path)
     print(f"  Loaded TF-IDF vectorizer (vocab={len(tfidf.vocabulary_):,})")
 
-    # Fit the physiology standardizer on the full training split (snapshot
-    # vitals + flags + rhythm + vital deltas).
+    # Fit standardizers on the training split: physiology (vitals + flags +
+    # rhythm + deltas) on all rows; PMH (prior-dx flags + same-complaint) on
+    # has-history rows only (so the no-history sentinel doesn't pollute z-scores).
     standardizer = icdr.build_standardizer(df_train, cols=PHYSIO_COLS_V2)
+    has_pmh_train = (df_train["no_history"] == 0)
+    pmh_standardizer = icdr.build_standardizer(
+        df_train[has_pmh_train], cols=PMH_RESOLVER_COLS)
     print(f"  Physiology features: {len(PHYSIO_COLS_V2)} "
-          f"(snapshot 13 + rhythm/delta {len(_LONG_RHYTHM_DELTA)})")
+          f"(snapshot 13 + rhythm/delta {len(_LONG_RHYTHM_DELTA)}) | "
+          f"PMH features: {len(PMH_RESOLVER_COLS)} | "
+          f"has-PMH train: {int(has_pmh_train.sum()):,}/{len(df_train):,} "
+          f"({100*has_pmh_train.mean():.1f}%)")
 
-    # 1. Tune the 3-term (text/vit/prev) blend on a held-out train slice.
-    best_w, best_rate, best_novit_w, best_novit_rate, weight_rates = \
-        _tune_weights(df_train, tfidf, standardizer)
-    # Legacy 2-term alpha (text vs prevalence) for the backward-compatible
-    # rank_within_category path — derived from the best vit=0 combo.
+    # 1. Tune the 3-term (no-PMH) and gated 4-term (has-PMH) blends.
+    tune = _tune_weights(df_train, tfidf, standardizer, pmh_standardizer)
+    best_w, best_novit_w, best_w_pmh = (
+        tune["weights"], tune["weights_novit"], tune["weights_pmh"])
+    # Legacy 2-term alpha for the backward-compatible rank_within_category path.
     denom = best_novit_w["text"] + best_novit_w["prev"]
     best_alpha = best_novit_w["text"] / denom if denom > 0 else 0.5
 
-    # 2. Rebuild final indices (with vitals centroids) on the FULL train split.
+    # 2. Rebuild final indices on the FULL train split: text + vitals centroids,
+    #    then PMH centroids (from has-history rows only).
     print("\n  Building final indices on the full training split...")
     granularities = {}
+    pmh_matrix = icdr.physio_matrix(df_train, pmh_standardizer)
     for g in icdr.GRANULARITIES:
         granularities[g] = _build_for_granularity(df_train, tfidf, g, standardizer)
+        icdr.attach_centroids(
+            granularities[g], pmh_matrix, _code_column(df_train, g),
+            df_train["diagnosis_group"].tolist(), key="pmh_centroids",
+            row_mask=has_pmh_train.to_numpy(),
+        )
         _print_summary(granularities[g], g)
 
     # 3. Assemble + save resolver.
@@ -360,15 +480,19 @@ def main():
         alpha=best_alpha,
         weights=best_w,
         standardizer=standardizer,
+        weights_pmh=best_w_pmh,
+        pmh_standardizer=pmh_standardizer,
         vocab_size=len(tfidf.vocabulary_),
         tfidf_path=str(tfidf_path),
         n_train=len(df_train),
         extra={
             "weights_novit": best_novit_w,
             "tuning_metric": f"oracle-category top-{TUNE_K} rollup hit rate",
-            "tuning_val_rate_3term": round(float(best_rate), 4),
-            "tuning_val_rate_2term": round(float(best_novit_rate), 4),
+            "tuning_val_rate_3term": round(float(tune["rate_3term"]), 4),
+            "tuning_val_rate_2term": round(float(tune["rate_2term"]), 4),
+            "tuning_val_rate_4term_haspmh": round(float(tune["rate_4term_haspmh"]), 4),
             "physio_cols": PHYSIO_COLS_V2,
+            "pmh_cols": PMH_RESOLVER_COLS,
             "split": {"test_size": TEST_SIZE, "random_state": SPLIT_SEED},
             "n_test": int(n_test),
         },
@@ -380,11 +504,17 @@ def main():
         "built_at": resolver["built_at"],
         "weights_3term": best_w,
         "weights_2term": best_novit_w,
+        "weights_4term_pmh": best_w_pmh,
         "alpha_2term": round(best_alpha, 3),
-        "tuning_val_rate_3term": round(float(best_rate), 4),
-        "tuning_val_rate_2term": round(float(best_novit_rate), 4),
-        "vitals_lift_on_val": round(float(best_rate - best_novit_rate), 4),
+        "tuning_val_rate_3term": round(float(tune["rate_3term"]), 4),
+        "tuning_val_rate_2term": round(float(tune["rate_2term"]), 4),
+        "vitals_lift_on_val": round(float(tune["rate_3term"] - tune["rate_2term"]), 4),
+        "tuning_val_rate_4term_haspmh": round(float(tune["rate_4term_haspmh"]), 4),
+        "pmh_lift_on_haspmh_val": round(
+            float(tune["rate_4term_haspmh"] - tune["rate_nopmh_haspmh"]), 4),
+        "n_pmh_val": tune["n_pmh_val"],
         "physio_cols": PHYSIO_COLS_V2,
+        "pmh_cols": PMH_RESOLVER_COLS,
         "n_train": len(df_train),
         "n_test": int(n_test),
         "vocab_size": resolver["vocab_size"],

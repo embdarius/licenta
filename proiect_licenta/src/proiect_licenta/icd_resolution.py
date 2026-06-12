@@ -233,6 +233,87 @@ def blend3(text_cos, vitals_sim, prevalence, weights) -> np.ndarray:
     return wt * t + wv * (v if np.isscalar(v) else v) + wp * prev_n[None, :]
 
 
+def attach_centroids(index: dict, matrix, codes, categories, key, row_mask=None):
+    """Attach a per-code centroid set under `key`, in entry['codes'] order.
+
+    `matrix` is an (n, P) feature matrix (e.g. standardized PMH vectors) aligned
+    with `codes`/`categories`. When `row_mask` is given (bool (n,)), only those
+    rows contribute to the means — used to build PMH centroids from has-history
+    rows only. Codes with no contributing rows get a zero (neutral) centroid.
+    """
+    n = matrix.shape[0]
+    P = matrix.shape[1]
+    meta = pd.DataFrame({
+        "row": np.arange(n),
+        "code": [str(c) for c in codes],
+        "cat": list(categories),
+    })
+    if row_mask is not None:
+        meta = meta[np.asarray(row_mask, dtype=bool)]
+    for cat, entry in index.items():
+        sub = meta[meta["cat"] == cat]
+        code_to_rows = {c: g["row"].to_numpy() for c, g in sub.groupby("code")}
+        cents = np.zeros((len(entry["codes"]), P), dtype=np.float32)
+        for i, code in enumerate(entry["codes"]):
+            rows = code_to_rows.get(str(code))
+            if rows is not None and len(rows):
+                cents[i] = matrix[rows].mean(axis=0)
+        entry[key] = cents
+
+
+def gated_score(text_cos, vital_sim, pmh_sim, prevalence,
+                weights_pmh, weights_nopmh, has_pmh):
+    """Blend terms, applying the PMH term only to patients with history.
+
+    Works for a single query (1-D term arrays, scalar `has_pmh`) or a batch
+    (2-D (N, m) term arrays, `has_pmh` shape (N,)). `vital_sim`/`pmh_sim` may be
+    None (term dropped). Patients with `has_pmh` use `weights_pmh` (4-term);
+    the rest use `weights_nopmh` (3-term). Each term is min-max'd within the
+    candidate set first.
+    """
+    text_cos = np.asarray(text_cos, dtype=np.float32)
+    is_batch = text_cos.ndim == 2
+    mm = _minmax_rows if is_batch else _minmax
+    Tn = mm(text_cos)
+    Vn = mm(vital_sim) if vital_sim is not None else 0.0
+    Pn = _minmax(prevalence)
+    if is_batch:
+        Pn = Pn[None, :]
+
+    def _combine(w):
+        return (w["text"] * Tn + w.get("vit", 0.0) * Vn + w["prev"] * Pn)
+
+    score_no = _combine(weights_nopmh)
+    if pmh_sim is None:
+        return score_no
+    Mn = mm(pmh_sim)
+    score_pmh = _combine(weights_pmh) + weights_pmh.get("pmh", 0.0) * Mn
+    if is_batch:
+        return np.where(np.asarray(has_pmh, dtype=bool)[:, None], score_pmh, score_no)
+    return score_pmh if has_pmh else score_no
+
+
+def rank_within_category_v3(text_q_l2, physio_q, pmh_q, has_pmh, cat_entry,
+                            weights_pmh, weights_nopmh, k):
+    """Single-query ranking with the gated PMH term (and the vitals term)."""
+    centroids = cat_entry["centroids"]
+    text_cos = centroids @ np.asarray(text_q_l2, dtype=np.float32).ravel()
+    vital_sim = None
+    if physio_q is not None and cat_entry.get("vital_centroids") is not None:
+        vital_sim = _neg_euclidean(physio_q, cat_entry["vital_centroids"])
+    pmh_sim = None
+    if has_pmh and pmh_q is not None and cat_entry.get("pmh_centroids") is not None:
+        pmh_sim = _neg_euclidean(pmh_q, cat_entry["pmh_centroids"])
+    score = gated_score(text_cos, vital_sim, pmh_sim, cat_entry["prevalence"],
+                        weights_pmh, weights_nopmh, bool(has_pmh))
+    order = np.argsort(score)[::-1][:k]
+    return [
+        (cat_entry["codes"][i], cat_entry["titles"][i], float(score[i]),
+         float(text_cos[i]), float(cat_entry["prevalence"][i]))
+        for i in order
+    ]
+
+
 def rank_within_category_v2(text_q_l2, physio_q, cat_entry, weights, k):
     """Single-query ranking with the optional vitals term.
 
@@ -368,6 +449,43 @@ def resolve_exact_diagnoses(
     return {"per_category": per_category, "flat_top": flat[:k_flat]}
 
 
+def resolve_exact_diagnoses_v3(
+    category_probs, query_l2, physio_q, pmh_q, has_pmh,
+    granularity_index, weights_pmh, weights_nopmh,
+    k_per_cat: int = 5, k_flat: int = 10,
+) -> dict:
+    """Resolve exact diagnoses with the gated PMH term + vitals term.
+
+    `pmh_q` is a (P,) standardized PMH vector and `has_pmh` whether the patient
+    has prior history (PMH term applies only then). Falls back to the v2/v1
+    behavior when those are absent.
+    """
+    per_category, flat = [], []
+    for cat, p in category_probs:
+        entry = granularity_index.get(cat)
+        if entry is None:
+            continue
+        ranked = rank_within_category_v3(
+            query_l2, physio_q, pmh_q, has_pmh, entry,
+            weights_pmh, weights_nopmh, k_per_cat)
+        per_category.append({
+            "category": cat,
+            "p_category": float(p),
+            "codes": [
+                {"code": code, "title": title, "score": score,
+                 "text_cos": tc, "prevalence": prev}
+                for (code, title, score, tc, prev) in ranked
+            ],
+        })
+        for (code, title, score, tc, prev) in ranked:
+            flat.append({
+                "category": cat, "code": code, "title": title,
+                "combined": float(p) * score, "score": score,
+            })
+    flat.sort(key=lambda d: d["combined"], reverse=True)
+    return {"per_category": per_category, "flat_top": flat[:k_flat]}
+
+
 def resolve_exact_diagnoses_v2(
     category_probs,
     query_l2: np.ndarray,
@@ -412,18 +530,24 @@ def resolve_exact_diagnoses_v2(
 def make_resolver(granularities: dict, alpha: float, vocab_size: int,
                   tfidf_path: str, n_train: int, weights: dict | None = None,
                   standardizer: dict | None = None,
+                  weights_pmh: dict | None = None,
+                  pmh_standardizer: dict | None = None,
                   extra: dict | None = None) -> dict:
     """Assemble the on-disk resolver object.
 
     `alpha` is the legacy 2-term text-vs-prevalence weight (kept so the
     backward-compatible `rank_within_category` path keeps working). `weights`
-    is the tuned 3-term blend {text, vit, prev} and `standardizer` is the
-    physiology z-score fit — both needed for the vitals-conditioned v2 path.
+    is the tuned 3-term blend {text, vit, prev} and `standardizer` the
+    physiology z-score fit (vitals-conditioned v2 path). `weights_pmh` is the
+    tuned 4-term blend {text, vit, pmh, prev} applied to patients with history,
+    and `pmh_standardizer` the PMH z-score fit (gated v3 path).
     """
     resolver = {
         "alpha": float(alpha),
-        "weights": weights,            # {"text":, "vit":, "prev":} or None
-        "standardizer": standardizer,  # {"cols":, "mean":, "std":} or None
+        "weights": weights,                  # 3-term, no-PMH patients
+        "weights_pmh": weights_pmh,          # 4-term, has-PMH patients
+        "standardizer": standardizer,        # physiology z-score fit
+        "pmh_standardizer": pmh_standardizer,  # PMH z-score fit
         "granularities": granularities,   # {"rollup": {...}, "full": {...}}
         "vocab_size": int(vocab_size),
         "tfidf_path": str(tfidf_path),

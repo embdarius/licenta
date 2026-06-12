@@ -783,15 +783,40 @@ End-to-end (v3-nurse, blend → blend+vitals with rhythm/delta):
 
 Full code benefits most (+3.34pp oracle@5) — rhythm (afib/paced/AV-block) sharply disambiguates among the many specific cardiac codes, and there are more candidates to separate. The term is correctly near-neutral for normal-vitals patients; the lift comes from abnormal-physiology cases (a fever+hypoxia+tachycardia "fever, SOB, cough" patient surfaces 486 Pneumonia / A41 Sepsis / J18 at the top). Adding `vitalsign.csv` is the one builder cost (~5–8 min vs ~1 min), still far cheaper than the full v3 loader (which also parses the 3.3 GB discharge.csv for PMH the resolver doesn't need). The resolver stays backward compatible (keeps the 2-term `alpha`); builder, benchmark, and `doctor_tool_v3` use the 3-term path whenever the patient's vitals are present (the standardizer's column list drives which features are assembled), falling back to text+prevalence otherwise.
 
+### PMH-gated history term (Stage-2 v3, shipped 2026-06-12)
+
+Within a category, a patient's **prior diagnoses** strongly predict the *exact recurrent* code — chronic-disease exacerbations and return visits dominate admissions, and "last admission's diagnosis predicts this one's" is a legitimate signal (the `pmh_<cat>` flags come from strictly-prior ICDs, `< intime`, so it is leakage-safe). PMH is available only for patients with history, so it enters as a **gated 4th term**:
+
+- **patients with history** (`no_history == 0`): `score = w_text·text + w_vit·vitals + w_pmh·pmh + w_prev·prevalence`, tuned weights **0.2 / 0.4 / 0.2 / 0.2**;
+- **patients without history**: the unchanged 3-term vitals blend.
+
+The PMH vector is **14-dim** (13 `pmh_<category>` flags + the `same_complaint_as_prior` Jaccard); the count/days numerics are dropped to avoid the "no prior" sentinel polluting the z-score. Centroids are built from **has-history rows only**. The features come from the vetted, leakage-safe `pmh_features.aggregate_pmh`; the 3.3 GB discharge.csv parse is **cached to parquet**, so only the first build pays it. **64.9% of admitted patients have prior history.**
+
+Results (v3-nurse test split; baseline = blend+vitals from above):
+
+| oracle@5 | subset | baseline | +PMH | Δ |
+|---|---|---|---|---|
+| rollup | all | 0.6913 | 0.6976 | +0.63pp |
+| rollup | **has-PMH (65%)** | 0.7172 | **0.7269** | **+0.97pp** |
+| rollup | no-PMH (35%) | 0.6441 | 0.6441 | **+0.0000** |
+| full code | all | 0.5253 | 0.5367 | +1.14pp |
+| full code | **has-PMH** | 0.5657 | **0.5834** | **+1.77pp** |
+| full code | no-PMH | 0.4515 | 0.4515 | **+0.0000** |
+
+End-to-end union (v3-nurse, has-PMH): rollup **+0.92pp**, full **+1.59pp**. Key points: (1) the **gate is provably correct** — the no-PMH subset is *exactly unchanged*, so first-time patients are never penalized; (2) PMH helps the 65% who have history (full code most — it disambiguates *which* chronic condition recurred); (3) the overall lift is diluted by the 35% no-PMH patients, so PMH should be read on its subset; (4) has-PMH patients also have a higher *baseline* (returning patients are inherently more predictable), and PMH stacks on top.
+
+**Cumulative Stage-2 progression** (v3-nurse oracle@5 rollup): text+prev 0.6698 → +vitals 0.6832 → +rhythm/delta 0.6913 → +PMH 0.6976 (**0.7269 on has-PMH**). Full code: 0.4919 → 0.5129 → 0.5253 → 0.5367 (**0.5834 on has-PMH**).
+
 ### Inference wiring
 
-`doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer + a `used_vitals` flag). It passes the patient's cleaned vitals + abnormal flags so the **3-term vitals path** is used when present (falling back to text+prevalence otherwise). `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
+`doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer + a `used_vitals` flag). It passes the patient's cleaned vitals + abnormal flags (3-term vitals path) and the PMH vector — when the patient has history (`no_history == 0`) the **gated 4-term PMH path** is used, else the 3-term vitals path, else text+prevalence. The output records `used_vitals` and `used_pmh` flags. `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
 
 ### What's next
 
 - ~~**v3_base Stage-2**~~ **DONE (2026-06-11)** — see [v3_base vs v3-nurse](#v3_base-vs-v3-nurse--beforeafter-the-nurse-step). Nurse data adds +1 to +1.3pp E2E exact-ICD, entirely via better Stage-1 category recall; the Stage-2 oracle ceiling is identical.
 - ~~**Vitals-conditioned centroids**~~ **DONE (2026-06-11)** — see [Vitals-conditioned centroids](#vitals-conditioned-centroids-stage-2-v2-shipped-2026-06-11). Adds a z-scored physiology similarity term (28-dim: snapshot vitals + flags + cardiac rhythm + vital deltas). Lifts the oracle ceiling **+2.15pp rollup / +3.34pp full @5**, out-of-sample. Wired into the runtime tool.
-- **PMH / past-medication centroids (highest-value next).** Within a category, the patient's prior diagnoses (and meds as a proxy) strongly predict the *exact* recurrent code — chronic-exacerbation and return visits dominate admissions. Likely a bigger lift than vitals for the returning-patient subset, but only available for patients with history; design it as an **availability-gated** term (apply only when `no_history==0`) and report the has-PMH vs no-PMH subsets separately. Cost: the 3.3 GB discharge.csv parse (cache the per-stay PMH features to keep the builder fast). Meds are a redundant proxy for PMH — optional rider, not standalone.
+- ~~**PMH-gated centroids**~~ **DONE (2026-06-12)** — see [PMH-gated history term](#pmh-gated-history-term-stage-2-v3-shipped-2026-06-12). Gated 4th term; +0.97pp rollup / +1.77pp full oracle@5 on the 65% has-PMH subset, no-PMH provably unchanged. Wired into the runtime tool.
+- **Past-medication rider (optional).** Meds are a (noisier) proxy for PMH; fold the `medrecon` medication-category flags into the gated PMH vector to catch patients whose meds reveal a chronic condition their prior ICDs missed. Low marginal value over PMH; cheap to try once `medrecon` is loaded.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
 
 ---

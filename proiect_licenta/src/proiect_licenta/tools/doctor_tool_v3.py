@@ -174,16 +174,18 @@ def get_doctor_v3_models():
 # ---------------------------------------------------------------------------
 def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
                              complaint_text, tfidf, physio_values=None,
+                             pmh_values=None, has_pmh=False,
                              k_per_cat=5, k_flat=10):
     """Rank exact ICD diagnoses within the top-5 predicted categories.
 
     Returns a serializable block, or None when the resolver isn't available.
-    Uses the 3-char rollup granularity (the benchmarked headline target). When
-    the resolver carries the vitals-conditioned weights + standardizer AND the
-    nurse vitals are available, the patient's z-scored physiology vector adds a
-    3rd similarity term (text cosine + vitals + prevalence); otherwise it falls
-    back to the 2-term text+prevalence blend. Advisory: it does NOT alter the
-    category or department predictions.
+    Uses the 3-char rollup granularity (the benchmarked headline target). Picks
+    the richest scoring path the resolver + patient data support:
+      - **gated PMH** (text + vitals + PMH + prevalence) when the patient has
+        prior history (`has_pmh`) and the resolver carries the PMH weights;
+      - **vitals** (text + vitals + prevalence) when vitals are available;
+      - **text + prevalence** otherwise.
+    Advisory: it does NOT alter the category or department predictions.
     """
     if resolver is None:
         return None
@@ -195,8 +197,22 @@ def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
 
     weights = resolver.get("weights")
     standardizer = resolver.get("standardizer")
+    weights_pmh = resolver.get("weights_pmh")
+    pmh_standardizer = resolver.get("pmh_standardizer")
     used_vitals = bool(weights and standardizer is not None and physio_values is not None)
-    if used_vitals:
+    used_pmh = bool(
+        used_vitals and has_pmh and weights_pmh and pmh_standardizer is not None
+        and pmh_values is not None
+    )
+    if used_pmh:
+        physio_q = icdr.physio_vector(physio_values, standardizer)
+        pmh_q = icdr.physio_vector(pmh_values, pmh_standardizer)
+        resolved = icdr.resolve_exact_diagnoses_v3(
+            cat_probs, q_vec, physio_q, pmh_q, True, gindex,
+            weights_pmh, weights, k_per_cat=k_per_cat, k_flat=k_flat,
+        )
+        method = "Stage-2 retrieval: TF-IDF cosine + vitals + PMH + prevalence (gated)"
+    elif used_vitals:
         physio_q = icdr.physio_vector(physio_values, standardizer)
         resolved = icdr.resolve_exact_diagnoses_v2(
             cat_probs, q_vec, physio_q, gindex, weights,
@@ -238,6 +254,7 @@ def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
         "granularity": "ICD 3-char rollup",
         "method": method,
         "used_vitals": used_vitals,
+        "used_pmh": used_pmh,
         "disclaimer": "Experimental, advisory only — does not change the "
                       "category/department predictions above.",
         "top_per_category": per_category,
@@ -732,9 +749,13 @@ class DoctorPredictionToolV3(BaseTool):
             "hypertension": hypertension, "hypotension": hypotension,
             **{c: long_data[c] for c in LONG_VITAL_FEATURE_COLS},
         }
+        # PMH vector (prior-dx flags + same-complaint) for the gated history
+        # term, applied only when the patient actually has prior history
+        # (EHR lookup hit or self-reported conditions -> no_history == 0).
         exact_diagnoses = _resolve_exact_diagnoses(
             models.get("icd_resolver"), diag_proba, diagnosis_labels, complaint_text,
             tfidf, physio_values=physio_values,
+            pmh_values=pmh_data, has_pmh=(pmh_no_history == 0),
         )
 
         # ── 13. Predict department (cascading) ──
