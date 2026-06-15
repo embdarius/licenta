@@ -20,10 +20,15 @@ truth:
                             restricted to the 20 stay_ids.
 
 Targets scored: ESI acuity, refined disposition (admit/discharge), diagnosis
-top-1/top-3, department top-1/top-3. Diagnosis/department are scored over the
-admitted ground-truth cases (with a coverage note for cases the pipeline routed
-to discharge). Also prints a per-case dump and an NL-fidelity report (what the
-parser extracted vs the tabular truth).
+top-1/top-3, department top-1/top-3, and the Stage-2 exact-ICD resolver
+(doctor+nurse, 3-char rollup): exact @1/@5, flat@10, and union — comparable to the
+E2E flat-10 / E2E union metrics in benchmark_icd_resolution.py (the runtime tool
+resolves over top-5 cats / k_per_cat=5 / k_flat=10, the same parameters). The
+exact-ICD candidates come from the v3 tool's `exact_diagnoses` block (E2E +
+tool-direct) or from running the resolver on the cached features (feature-vector).
+Diagnosis/department/exact-ICD are scored over the admitted ground-truth cases
+(with a coverage note for cases the pipeline routed to discharge). Also prints a
+per-case dump and an NL-fidelity report (what the parser extracted vs tabular truth).
 
 Usage:
     uv run python benchmarks/benchmark_pipeline_e2e.py [--limit N] [--skip-feature-vector] [--skip-e2e]
@@ -53,9 +58,12 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from proiect_licenta.paths import DOCTOR_V3_DIR
+from proiect_licenta.paths import (
+    DOCTOR_V3_DIR, DOCTOR_V3_ICD_RESOLVER_DIR, DIAGNOSIS_CSV, TRIAGE_V1_DIR,
+)
 from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.case_generation import load_cases, load_feature_cache, VITAL_COLS
+from proiect_licenta import icd_resolution as icdr
 from proiect_licenta.tools.doctor_tool_v3_base import DEPARTMENT_NAMES  # noqa: F401
 
 # Tool classes (patched for E2E capture; instantiated for tool-direct)
@@ -99,6 +107,52 @@ def _dept_top3(tool_json) -> list:
 def _vital_arg(v):
     """Tool vital arg: measured value, or -1.0 if the patient didn't have it."""
     return -1.0 if v is None else float(v)
+
+
+def _exact_icd_from_block(block) -> dict:
+    """Normalize a tool's `exact_diagnoses` JSON to the common scoring shape
+    ``{"flat": [rollup_code, ...] (ordered), "union": {rollup_code, ...}}``.
+    Returns None when no resolver block was produced."""
+    if not block:
+        return None
+    flat = [d["icd_3char"] for d in block.get("flat_ranking", [])]
+    union = {
+        c["icd_3char"]
+        for pc in block.get("top_per_category", [])
+        for c in pc.get("candidates", [])
+    }
+    return {"flat": flat, "union": union}
+
+
+def _exact_icd_from_resolved(resolved) -> dict:
+    """Same as `_exact_icd_from_block` but for the resolver's raw return dict
+    (keys `flat_top` / `per_category`), used by the feature-vector mode."""
+    if not resolved:
+        return None
+    flat = [d["code"] for d in resolved.get("flat_top", [])]
+    union = {
+        c["code"]
+        for pc in resolved.get("per_category", [])
+        for c in pc.get("codes", [])
+    }
+    return {"flat": flat, "union": union}
+
+
+def true_rollups(stay_ids) -> dict:
+    """Map each stay_id -> its primary-diagnosis 3-char ICD rollup, derived from
+    MIMIC (the cases carry only diagnosis_group, not the exact code). Mirrors
+    `_attach_icd_version` in benchmark_icd_resolution.py."""
+    import pandas as pd
+    want = {int(s) for s in stay_ids}
+    diag = pd.read_csv(DIAGNOSIS_CSV, dtype={"icd_code": str, "icd_version": str})
+    diag = diag[(diag["seq_num"] == 1) & (diag["stay_id"].isin(want))]
+    diag = diag.drop_duplicates("stay_id")
+    out = {}
+    for _, r in diag.iterrows():
+        code = str(r["icd_code"] or "").strip().upper()
+        ver = str(r["icd_version"] or "").strip()
+        out[int(r["stay_id"])] = icdr.rollup_icd(code, ver)
+    return out
 
 
 # ===========================================================================
@@ -155,7 +209,7 @@ def run_tool_direct(case, pmh_lookup_json: str = "", med_lookup_json: str = "") 
     n = case["nurse_inputs"]
     tools = _direct_tools()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None}
+           "diag_top3": None, "dept_top3": None, "exact_icd": None}
 
     # EMS vitals only for ambulance/helicopter (matches live triage).
     ems = t["ems_vitals"] or {v: None for v in VITAL_COLS}
@@ -212,6 +266,8 @@ def run_tool_direct(case, pmh_lookup_json: str = "", med_lookup_json: str = "") 
         ))
         out["diag_top3"] = _diag_top3(v3_j)
         out["dept_top3"] = _dept_top3(v3_j)
+        out["exact_icd"] = _exact_icd_from_block(
+            v3_j["diagnosis_prediction"].get("exact_diagnoses"))
     return out
 
 
@@ -239,13 +295,55 @@ def _fv_models():
         _FV["diag_labels"] = meta["diagnosis_labels"]
         _FV["dept_labels"] = meta["department_labels"]
         _FV["cascade_cols"] = meta.get("diag_cascade_cols")
+        # Stage-2 exact-ICD resolver + the shared TF-IDF vectorizer, so the
+        # feature-vector column scores exact-ICD the same way the live tool does.
+        try:
+            _FV["resolver"] = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
+            _FV["tfidf"] = joblib.load(TRIAGE_V1_DIR / "tfidf_vectorizer.joblib")
+        except (FileNotFoundError, OSError):
+            _FV["resolver"] = None
+            _FV["tfidf"] = None
     return _FV
+
+
+def _fv_exact_icd(m, case, Xn, diag_proba) -> dict:
+    """Feature-vector exact-ICD: run the Stage-2 resolver on the FV diagnosis
+    softmax + the cached physio/PMH columns, mirroring the runtime tool's path
+    selection (gated-PMH -> vitals -> text+prevalence). Returns the common
+    {"flat","union"} shape, or None when the resolver isn't available."""
+    resolver = m.get("resolver")
+    if resolver is None:
+        return None
+    gindex = resolver["granularities"]["rollup"]
+    top5 = np.argsort(diag_proba)[::-1][:5]
+    cat_probs = [(m["diag_labels"][i], float(diag_proba[i])) for i in top5]
+    q_vec = icdr.vectorize_query(
+        normalize_complaint_text(case["triage_inputs"]["chief_complaints"]), m["tfidf"])
+    weights = resolver.get("weights")
+    weights_pmh = resolver.get("weights_pmh")
+    standardizer = resolver.get("standardizer")
+    pmh_standardizer = resolver.get("pmh_standardizer")
+    physio_q = (icdr.physio_matrix(Xn, standardizer)[0]
+                if standardizer is not None else None)
+    has_pmh = ("no_history" in Xn.columns) and (int(Xn["no_history"].iloc[0]) == 0)
+    if has_pmh and weights_pmh and pmh_standardizer is not None and physio_q is not None:
+        pmh_q = icdr.physio_matrix(Xn, pmh_standardizer)[0]
+        resolved = icdr.resolve_exact_diagnoses_v3(
+            cat_probs, q_vec, physio_q, pmh_q, True, gindex,
+            weights_pmh, weights, k_per_cat=5, k_flat=10)
+    elif physio_q is not None and weights:
+        resolved = icdr.resolve_exact_diagnoses_v2(
+            cat_probs, q_vec, physio_q, gindex, weights, k_per_cat=5, k_flat=10)
+    else:
+        resolved = icdr.resolve_exact_diagnoses(
+            cat_probs, q_vec, gindex, resolver["alpha"], k_per_cat=5, k_flat=10)
+    return _exact_icd_from_resolved(resolved)
 
 
 def run_feature_vector(case, cache_entry) -> dict:
     m = _fv_models()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None}
+           "diag_top3": None, "dept_top3": None, "exact_icd": None}
 
     Xd = cache_entry["dispo_features"]
     # Triage acuity (feature-vector) from the soft-cascade columns build_features
@@ -273,6 +371,8 @@ def run_feature_vector(case, cache_entry) -> dict:
         dept_proba = m["dept"].predict_proba(Xdept)[0]
         top3d = np.argsort(dept_proba)[::-1][:3]
         out["dept_top3"] = [m["dept_labels"][i] for i in top3d]
+
+        out["exact_icd"] = _fv_exact_icd(m, case, Xn, diag_proba)
     return out
 
 
@@ -434,7 +534,8 @@ def run_e2e(case: dict) -> dict:
     CURRENT_CASE = case
     CAPTURE.clear()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None, "parser": {}, "error": None}
+           "diag_top3": None, "dept_top3": None, "exact_icd": None,
+           "parser": {}, "error": None}
 
     buf = io.StringIO()
     try:
@@ -465,6 +566,8 @@ def run_e2e(case: dict) -> dict:
         if "diagnosis_prediction" in vj:
             out["diag_top3"] = _diag_top3(vj)
             out["dept_top3"] = _dept_top3(vj)
+            out["exact_icd"] = _exact_icd_from_block(
+                vj["diagnosis_prediction"].get("exact_diagnoses"))
     return out
 
 
@@ -476,14 +579,17 @@ def _acc(pairs):
     return (sum(pairs) / len(pairs)) if pairs else float("nan")
 
 
-def score(cases, preds_by_mode, modes):
-    """Aggregate per-target accuracy for each mode."""
+def score(cases, preds_by_mode, modes, true_roll):
+    """Aggregate per-target accuracy for each mode. `true_roll` maps stay_id ->
+    the primary-diagnosis 3-char ICD rollup (for the Stage-2 exact-ICD targets)."""
     rows = {}
     for mode in modes:
         P = preds_by_mode[mode]
         acuity_hits, dispo_hits = [], []
         d1, d3, p1, p3 = [], [], [], []
+        i1, i5, i10, iu = [], [], [], []   # exact-ICD: @1 / @5 / flat@10 / union
         diag_cov, dept_cov, n_admit = 0, 0, 0
+        icd_cov, icd_n = 0, 0
         for c in cases:
             sid = c["stay_id"]
             gt = c["ground_truth"]
@@ -508,12 +614,30 @@ def score(cases, preds_by_mode, modes):
                     p3.append(int(gt["service_group"] in pr["dept_top3"][:3]))
                 else:
                     p1.append(0); p3.append(0)
+                # Exact-ICD (rollup) — only scored when MIMIC records a coded
+                # primary diagnosis for the stay; miss when no Dx was produced.
+                tr = true_roll.get(sid)
+                if tr:
+                    icd_n += 1
+                    ei = pr.get("exact_icd")
+                    if ei:
+                        icd_cov += 1
+                        flat, union = ei["flat"], ei["union"]
+                        i1.append(int(bool(flat) and flat[0] == tr))
+                        i5.append(int(tr in flat[:5]))
+                        i10.append(int(tr in flat[:10]))
+                        iu.append(int(tr in union))
+                    else:
+                        i1.append(0); i5.append(0); i10.append(0); iu.append(0)
         rows[mode] = {
             "acuity": _acc(acuity_hits),
             "dispo": _acc(dispo_hits),
             "diag_top1": _acc(d1), "diag_top3": _acc(d3),
             "dept_top1": _acc(p1), "dept_top3": _acc(p3),
+            "icd_top1": _acc(i1), "icd_top5": _acc(i5),
+            "icd_top10": _acc(i10), "icd_union": _acc(iu),
             "diag_cov": diag_cov, "dept_cov": dept_cov, "n_admit": n_admit,
+            "icd_cov": icd_cov, "icd_n": icd_n,
         }
     return rows
 
@@ -537,6 +661,8 @@ def main():
     if args.limit:
         cases = cases[:args.limit]
     cache = load_feature_cache()
+    # Ground-truth primary-diagnosis ICD rollup per stay (for exact-ICD targets).
+    true_roll = true_rollups([c["stay_id"] for c in cases])
 
     print("\n" + "#" * 78)
     print("  END-TO-END PIPELINE BENCHMARK  (NL crew vs tabular benchmark)")
@@ -625,6 +751,7 @@ def main():
             if not base.get("refined_admit"):
                 g["diag_top3"] = None
                 g["dept_top3"] = None
+                g["exact_icd"] = None
             preds["feature_vector_gated"][c["stay_id"]] = g
         print(f"  derived for {len(preds['feature_vector_gated'])} cases")
 
@@ -645,7 +772,7 @@ def main():
             restore()
 
     # ── Headline table ──
-    rows = score(cases, preds, modes)
+    rows = score(cases, preds, modes, true_roll)
     print_section("ACCURACY ON THE SAME CASES  (per target, per mode)")
     header = f"  {'target':16s}" + "".join(f"{m:>22s}" for m in modes)
     print(header)
@@ -657,16 +784,27 @@ def main():
         ("diag_top3", "diagnosis @3"),
         ("dept_top1", "department @1"),
         ("dept_top3", "department @3"),
+        ("icd_top1", "ICD exact @1"),
+        ("icd_top5", "ICD exact @5"),
+        ("icd_top10", "ICD flat@10"),
+        ("icd_union", "ICD union"),
     ]:
         line = f"  {label:16s}" + "".join(f"{_fmt(rows[m][target]):>22s}" for m in modes)
         print(line)
-    # Diagnosis/department coverage note
+    # Coverage notes
     print()
     for m in modes:
         r = rows[m]
         print(f"  [{m}] diagnosis/department scored over {r['n_admit']} admitted-GT cases; "
               f"pipeline produced a Dx for {r['diag_cov']}/{r['n_admit']} "
               f"(rest routed to discharge => counted as miss).")
+    print()
+    for m in modes:
+        r = rows[m]
+        print(f"  [{m}] exact-ICD (3-char rollup) scored over {r['icd_n']} admitted-GT cases "
+              f"with a coded primary Dx; pipeline produced exact-ICD for "
+              f"{r['icd_cov']}/{r['icd_n']} (rest counted as miss). Compare ICD union / "
+              f"flat@10 with the full-test-set numbers in benchmark_icd_resolution.py.")
 
     # ── Per-case dump ──
     print_section("PER-CASE DETAIL")
@@ -675,7 +813,8 @@ def main():
         gt = c["ground_truth"]
         print(f"\n  stay {sid}  [{'ADMIT' if gt['admitted'] else 'DISCHARGE'}]  "
               f"truth: ESI {gt['acuity']}, "
-              f"dx={gt['diagnosis_group']}, dept={gt['service_group']}")
+              f"dx={gt['diagnosis_group']}, dept={gt['service_group']}, "
+              f"icd={true_roll.get(sid) or '—'}")
         print(f"    complaint (raw): {c['triage_inputs']['chief_complaints']}")
         print(f"    narrative:       {c['narrative']}")
         if not (c.get("grounding") and c["grounding"]["ok"]):
@@ -686,9 +825,12 @@ def main():
                 continue
             dx = pr.get("diag_top3")[0] if pr.get("diag_top3") else "—"
             dp = pr.get("dept_top3")[0] if pr.get("dept_top3") else "—"
+            ei = pr.get("exact_icd")
+            ic = ei["flat"][0] if (ei and ei.get("flat")) else "—"
             extra = f"  err={pr['error']}" if pr.get("error") else ""
             print(f"    {m:14s}: ESI {pr.get('acuity')}, "
-                  f"refined_admit={pr.get('refined_admit')}, dx={dx}, dept={dp}{extra}")
+                  f"refined_admit={pr.get('refined_admit')}, dx={dx}, dept={dp}, "
+                  f"icd={ic}{extra}")
 
     # ── NL-fidelity report (E2E parser extraction vs tabular truth) ──
     if "e2e" in preds:

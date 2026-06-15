@@ -807,6 +807,21 @@ End-to-end union (v3-nurse, has-PMH): rollup **+0.92pp**, full **+1.59pp**. Key 
 
 **Cumulative Stage-2 progression** (v3-nurse oracle@5 rollup): text+prev 0.6698 → +vitals 0.6832 → +rhythm/delta 0.6913 → +PMH 0.6976 (**0.7269 on has-PMH**). Full code: 0.4919 → 0.5129 → 0.5253 → 0.5367 (**0.5834 on has-PMH**).
 
+### End-to-end on the live runtime (20 NL cases, doctor+nurse, 2026-06-15)
+
+All numbers above are the *tabular* benchmark (`benchmark_icd_resolution.py`, 20,420 test stays). To check the resolver through the **live crew** end-to-end, `benchmarks/benchmark_pipeline_e2e.py` now scores it on the 20 synthetic NL cases (13 admitted) alongside the existing acuity/disposition/category targets, reading the v3 tool's `exact_diagnoses` block for the E2E/tool-direct columns and running the resolver on cached features for feature-vector (`_fv_exact_icd`, reuses `physio_matrix`). The runtime tool resolves over top-5 cats / k_per_cat=5 / k_flat=10 — identical to this benchmark — so the metrics are comparable.
+
+Headline (3-char rollup, n=13, **1 case = 7.7pp** — directional only):
+
+| metric | tool-direct | feature-vector | E2E (live) | full-set ref (v3-nurse) |
+|---|---|---|---|---|
+| ICD union | 69.2% | 69.2% | **69.2%** | 64.9% (blend+vitals) / 62.85% (blend) |
+| ICD flat@10 | 69.2% | 69.2% | **61.5%** | 55.5% (blend) |
+| ICD exact @5 | 61.5% | 46.2% | 53.8% | — |
+| ICD exact @1 | 23.1% | 23.1% | **7.7%** | — |
+
+**`union` is mode-invariant (9/13) including E2E** — it's a set-membership test driven by complaint text + the top-5 category set, neither of which the NL layer materially changes, so the resolver's value **survives the full pipeline**. The flat metrics (`@1`/`@5`/`flat@10`) wobble by 1–2 cases because they rank by `P(cat)·score`: a peakier (cleaner) softmax suppresses codes from correctly-but-secondarily ranked categories, so `feature_vector` is actually *worst* at flat@5 despite the best Stage-1 — proof it's pure re-ranking, since union is identical. E2E `@1` collapses (3/13→1/13) as complaint paraphrase perturbs the text-cosine top code. Some misses are ICD-9/10 splits of one disease (truth `518` vs E2E `J18`, both pneumonia), so true recall is a bit higher. Full interpretation: [case-generation-agent.md → Stage-2 exact-ICD end-to-end](case-generation-agent.md#stage-2-exact-icd-end-to-end-doctornurse).
+
 ### Inference wiring
 
 `doctor_tool_v3.py` lazy-loads the resolver (graceful skip if not built), and after the diagnosis prediction calls `_resolve_exact_diagnoses` to attach a `diagnosis_prediction.exact_diagnoses` block (rollup granularity: `top_per_category` + `flat_ranking`, with an advisory disclaimer + a `used_vitals` flag). It passes the patient's cleaned vitals + abnormal flags (3-term vitals path) and the PMH vector — when the patient has history (`no_history == 0`) the **gated 4-term PMH path** is used, else the 3-term vitals path, else text+prevalence. The output records `used_vitals` and `used_pmh` flags. `doctor_reassessment_task` surfaces the top `flat_ranking` entries as a suggested differential. The block is `null` when the resolver artifact is absent, so the pipeline never depends on it.
@@ -817,7 +832,8 @@ End-to-end union (v3-nurse, has-PMH): rollup **+0.92pp**, full **+1.59pp**. Key 
 - ~~**Vitals-conditioned centroids**~~ **DONE (2026-06-11)** — see [Vitals-conditioned centroids](#vitals-conditioned-centroids-stage-2-v2-shipped-2026-06-11). Adds a z-scored physiology similarity term (28-dim: snapshot vitals + flags + cardiac rhythm + vital deltas). Lifts the oracle ceiling **+2.15pp rollup / +3.34pp full @5**, out-of-sample. Wired into the runtime tool.
 - ~~**PMH-gated centroids**~~ **DONE (2026-06-12)** — see [PMH-gated history term](#pmh-gated-history-term-stage-2-v3-shipped-2026-06-12). Gated 4th term; +0.97pp rollup / +1.77pp full oracle@5 on the 65% has-PMH subset, no-PMH provably unchanged. Wired into the runtime tool.
 - **Past-medication rider (optional).** Meds are a (noisier) proxy for PMH; fold the `medrecon` medication-category flags into the gated PMH vector to catch patients whose meds reveal a chronic condition their prior ICDs missed. Low marginal value over PMH; cheap to try once `medrecon` is loaded.
-- **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.)
+- **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.) The 20-case E2E run makes this visible (truth `518` ICD-9 vs E2E `J18` ICD-10, both pneumonia, scored as a miss).
+- **Base-doctor (v3_base) live-E2E exact-ICD** — the v3_base/before-nurse comparison exists only on the *tabular* benchmark; the live base tool (`doctor_tool_v3_base.py`) does **not** wire the resolver, so `benchmark_pipeline_e2e.py` can't score a base E2E column. Mirror `doctor_tool_v3._resolve_exact_diagnoses` into the base tool and the harness picks it up for free via `CAPTURE["base"]`. (Deferred.)
 
 ---
 

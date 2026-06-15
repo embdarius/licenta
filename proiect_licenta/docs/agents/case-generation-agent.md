@@ -211,9 +211,21 @@ department over the 13 admitted-GT cases):
 | Diagnosis @3 | **84.6%** | 92.3% | 100.0% | 76.9% |
 | Department @1 | 53.8% | 61.5% | 69.2% | 61.5% |
 | Department @3 | **84.6%** | 92.3% | 100.0% | 76.9% |
+| ICD exact @1 | 23.1% | 23.1% | 23.1% | 7.7% |
+| ICD exact @5 | **61.5%** | 46.2% | 46.2% | 53.8% |
+| ICD flat@10 | **69.2%** | 69.2% | 69.2% | 61.5% |
+| ICD union | 69.2% | 69.2% | 69.2% | 69.2% |
 
 Dx coverage (cases where the gated pipeline produced a diagnosis): tool-direct
 **11/13**, E2E 11/13, feature-vector-gated 12/13, feature-vector 13/13.
+
+The last four rows score the **Stage-2 exact-ICD resolver** (doctor+nurse / v3,
+3-char rollup) through the same modes — added 2026-06-15; see
+[Stage-2 exact-ICD end-to-end](#stage-2-exact-icd-end-to-end-doctornurse) below.
+The runtime tool resolves over top-5 categories / k_per_cat=5 / k_flat=10, the same
+parameters as `benchmark_icd_resolution.py`, so `ICD union` ≈ that benchmark's *E2E
+union* and `ICD flat@10` ≈ its *E2E flat-10*. `tool_direct_lookup` (omitted from
+this table) scored @1/@5/flat@10/union = 23.1% / 53.8% / 69.2% / 69.2%.
 
 ### Two fixes drove this — runtime vitals + threshold
 
@@ -258,6 +270,59 @@ coverage, and within ~8pp on diagnosis@1.
    itself**, by design: tool-direct/E2E can't diagnose a case the pipeline routes
    to discharge (11/13 covered vs 13/13). Closing it further requires a stronger
    disposition model (raising the gated ceiling), not the NL layer.
+
+### Stage-2 exact-ICD end-to-end (doctor+nurse)
+
+Added 2026-06-15: the benchmark now also scores the [Stage-2 exact-ICD resolver](doctor-agent.md#stage-2--exact-icd-resolution-within-categories-shipped-2026-06-11)
+(doctor+nurse model, 3-char rollup) on the same 13 admitted cases. For the live E2E
+column it reads the v3 tool's `diagnosis_prediction.exact_diagnoses` block; for
+`feature_vector` it runs the resolver on the cached features
+(`_fv_exact_icd` reuses `icd_resolution.physio_matrix` — all 28 physio + 14 PMH
+columns are present in `nurse_v3_features`). Metrics mirror
+`benchmark_icd_resolution.py`: **@1/@5** from the flat list, **flat@10** (≙ that
+benchmark's *E2E flat-10*) and **union** (≙ *E2E union*, the true code anywhere in
+top-5 cats × top-5 codes). Coverage: exact-ICD produced for 11–13/13 per mode.
+
+**Caveat first: n=13, so 1 case = 7.7pp** — read these as ±1–2 case confirmations,
+not precise estimates; the 20,420-row `benchmark_icd_resolution.py` is the
+authoritative source.
+
+1. **`union` is mode-invariant (9/13 = 69.2% everywhere, incl. E2E).** Union is a
+   set-membership test over the candidate pool — it ignores the `P(cat)` ordering and
+   depends only on the true category being in the top-5 (forgiving) and the within-
+   category top-5, which is driven by **complaint text** (identical in tabular modes,
+   only paraphrased in E2E). So the resolver's value **survives the full free-text →
+   crew → nurse pipeline** — the headline result. It matches `benchmark_icd_resolution.py`
+   (full-set v3-nurse E2E union 62.85%; the 13-case sample reads a touch higher).
+2. **`@1`/`@5`/`flat@10` wobble because the flat list ranks by `P(category)·score`** —
+   the category-softmax *shape* is the lever that differs across modes:
+   - **`feature_vector` @5 is the *lowest* (6/13) despite the best Stage-1**
+     (diagnosis@1 69.2%, @3 100%). A cleaner feature vector → **peakier softmax** →
+     `P(cat)` suppresses codes from correctly-but-secondarily ranked categories, so a
+     true code in the #2/#3 category drops below flat rank 5. The degraded
+     (`tool_direct`) and NL-parsed (`e2e`) vectors give flatter softmaxes that surface
+     those codes — hence `tool_direct` 8/13 and `e2e` 7/13 *beat* it on @5. Proof it's
+     pure re-ranking: **union is identical (9/13)** for all three. A better category
+     model can mean worse flat exact-code recall.
+   - **`tool_direct_lookup` @5 (7/13) < `tool_direct` (8/13).** The EHR lookup lifts
+     the coarse targets (diagnosis@1 +7.7pp, coverage 11→12) but its added PMH/prior
+     signal re-weighted the flat order, sliding one true code from rank ≤5 to 6–10
+     (flat@10 unchanged at 9/13). The lookup pays off on disposition/category/coverage,
+     not on the fine exact-code ordering — the resolver ranks on complaint text, which
+     the lookup doesn't change.
+3. **E2E `@1` collapses 3/13 → 1/13.** The flat #1 is dominated by complaint text
+   cosine; the parser's paraphrase perturbs the TF-IDF query, hitting the most precise
+   metric hardest. E2E recovers toward the tabular modes as the window widens
+   (@5 → flat@10 → union).
+4. **Some "misses" are ICD-9/10 splits of the same disease** (e.g. truth `518` ICD-9
+   vs E2E-predicted `J18` ICD-10, both pneumonia), so true clinical recall is somewhat
+   higher than measured — the deferred CCSR-unification item.
+
+**Takeaway:** the resolver is an **advisory differential** (a short candidate list),
+not a single-code prediction — so `union`/`flat@10` are the honest headline, and they
+hold up end-to-end; `@1` is expectedly weak and degrades most under paraphrase. The
+**base-doctor (v3_base)** column is not yet a live-E2E number — its tool doesn't wire
+the resolver (deferred); see [doctor-agent.md](doctor-agent.md#whats-next).
 
 ### Why tool-direct ≠ feature-vector-gated even without the LLM
 
