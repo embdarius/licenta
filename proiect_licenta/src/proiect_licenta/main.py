@@ -135,23 +135,40 @@ def generate_cases():
     Drives benchmarks/benchmark_pipeline_e2e.py.
     """
     import argparse
+    import os
+    # Importing the module does NOT construct any LLM (get_llm() only runs at
+    # crew kickoff), so it's safe to import before resolving --backend.
     from proiect_licenta.case_generation import (
-        generate_and_save_cases, DEFAULT_N_ADMITTED, DEFAULT_N_DISCHARGED, DEFAULT_SEED,
+        generate_and_save_cases, SYNTH_DIR,
+        DEFAULT_N_ADMITTED, DEFAULT_N_DISCHARGED, DEFAULT_SEED,
     )
 
     parser = argparse.ArgumentParser(description="Generate synthetic ED test cases.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only generate the first N sampled cases (smoke test).")
+    parser.add_argument("--backend", choices=["flash", "medgemma"], default=None,
+                        help="LLM backend used to voice the narratives (Experiment B). "
+                             "Default (flash) writes the canonical synthetic_cases/; "
+                             "medgemma writes synthetic_cases_medgemma/ so the two "
+                             "case sets stay separate.")
     parser.add_argument("--n-admitted", type=int, default=DEFAULT_N_ADMITTED)
     parser.add_argument("--n-discharged", type=int, default=DEFAULT_N_DISCHARGED)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = parser.parse_args()
+
+    # Set the backend BEFORE generate_and_save_cases() -> crew kickoff reads it.
+    if args.backend:
+        os.environ["LLM_BACKEND"] = args.backend
+    backend = os.getenv("LLM_BACKEND", "flash").lower()
+    out_dir = (SYNTH_DIR if backend in ("", "flash")
+               else SYNTH_DIR.parent / f"synthetic_cases_{backend}")
 
     generate_and_save_cases(
         n_admitted=args.n_admitted,
         n_discharged=args.n_discharged,
         seed=args.seed,
         limit=args.limit,
+        out_dir=out_dir,
     )
 
 

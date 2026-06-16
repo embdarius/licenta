@@ -32,12 +32,23 @@ per-case dump and an NL-fidelity report (what the parser extracted vs tabular tr
 
 Usage:
     uv run python benchmarks/benchmark_pipeline_e2e.py [--limit N] [--skip-feature-vector] [--skip-e2e]
+
+LLM backend comparison (Flash vs MedGemma):
+    # Flash (default) — full agentic crew, unchanged baseline:
+    uv run python benchmarks/benchmark_pipeline_e2e.py --dump-json artifacts/benchmarks/e2e_flash.json
+    # MedGemma — full agentic crew if it can tool-call, else add the bypass mode:
+    uv run python benchmarks/benchmark_pipeline_e2e.py --llm-backend medgemma --parser-llm \
+        --dump-json artifacts/benchmarks/e2e_medgemma.json
+The orchestration-independent NL-FIDELITY section is the fair parser-quality
+anchor across backends (printed for both the E2E and parser-llm modes).
 """
 
 import argparse
 import contextlib
 import io
 import json
+import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -278,6 +289,95 @@ def run_tool_direct_lookup(case) -> dict:
     tool_direct column = the value of EHR access for returning patients."""
     pmh_json, med_json = _lookup_blocks(case)
     return run_tool_direct(case, pmh_lookup_json=pmh_json, med_lookup_json=med_json)
+
+
+# ===========================================================================
+# Mode — PARSER-LLM bypass (MedGemma-only fallback for broken agentic tool-calling)
+# ===========================================================================
+# When an LLM can't reliably drive CrewAI's agentic tool-calling (the main risk
+# for a non-function-calling medical model like MedGemma), this mode isolates the
+# part we actually want to compare — clinical NL *parsing* — by calling the LLM
+# as a single direct completion for the parse step only, then feeding the parsed
+# fields into the deterministic, LLM-free tool-direct path. The interactive
+# fields the live crew would collect via (monkeypatched) tools — EMS vitals, PMH,
+# prior-admission count — are kept from the case, exactly as in the E2E run, so
+# only the free-text-parsed fields vary. Gemini is never run here (it always
+# drives the full agentic crew); this is MedGemma's evaluation path.
+_PARSE_PROMPT = """You are a clinical intake parser. Read the patient's free-text \
+description and extract ONLY what is stated. Respond with a single JSON object and \
+nothing else, using exactly these keys:
+  "chief_complaints": short comma-separated string of the presenting complaint(s)
+  "age": integer years, or null if not stated
+  "gender": "m" or "f", or null if not stated
+  "arrival_transport": one of "ambulance", "helicopter", or "walk_in". Use "walk_in" \
+unless the patient explicitly says they were brought by ambulance or helicopter \
+(walk-in is the default; there is no "unknown").
+  "pain_score": integer 0-10 if a pain level is stated, else -1
+Do not invent vitals, diagnoses, or history. Patient description:
+{narrative}"""
+
+
+def _coerce_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _llm_parse_triage(narrative: str, llm) -> dict:
+    """One direct LLM completion -> structured triage fields (best-effort)."""
+    raw = llm.call(_PARSE_PROMPT.format(narrative=narrative))
+    s = str(raw).strip()
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.I | re.S).strip()
+    m = re.search(r"\{.*\}", s, flags=re.S)
+    obj = {}
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            obj = {}
+    return obj
+
+
+def run_parser_llm_bypass(case: dict, llm) -> dict:
+    """Parse the narrative with a direct LLM call, then score via tool-direct.
+    Overrides only the free-text-parsed triage fields; everything else (EMS
+    vitals, PMH, prior-admission count, all nurse inputs) is kept from the case,
+    matching how the E2E crew sources them from interactive (monkeypatched) tools."""
+    parsed = _llm_parse_triage(case["narrative"], llm)
+    ti = dict(case["triage_inputs"])
+
+    cc = parsed.get("chief_complaints")
+    if isinstance(cc, list):
+        cc = ", ".join(str(x) for x in cc)
+    if isinstance(cc, str) and cc.strip():
+        ti["chief_complaints"] = cc.strip()
+
+    age = _coerce_int(parsed.get("age"))
+    if age is not None:
+        ti["age"] = age
+    g = str(parsed.get("gender") or "").strip().lower()
+    if g in ("m", "f"):
+        ti["gender"] = g
+    # Live parser convention (tasks.yaml): only ambulance/helicopter are non-default;
+    # anything else (incl. unstated) is walk_in. No "unknown" category exists, so we
+    # don't offer the LLM one (offering it penalised the more literal model).
+    tr = str(parsed.get("arrival_transport") or "").strip().lower().replace(" ", "_")
+    ti["arrival_transport"] = tr if tr in ("ambulance", "helicopter") else "walk_in"
+    ps = _coerce_int(parsed.get("pain_score"))
+    if ps is not None:
+        ti["pain_score"] = ps
+
+    case2 = dict(case)
+    case2["triage_inputs"] = ti
+    out = run_tool_direct(case2)
+    # Surface parser output for the NL-fidelity report (same shape as E2E).
+    out["parser"] = {
+        "complaints": [ti["chief_complaints"]],
+        "age": ti["age"], "gender": ti["gender"],
+        "arrival_transport": ti["arrival_transport"], "pain": ti["pain_score"],
+    }
+    return out
 
 
 # ===========================================================================
@@ -646,6 +746,43 @@ def _fmt(x):
     return "  n/a " if x != x else f"{x*100:5.1f}%"
 
 
+def print_nl_fidelity(cases, mode_preds):
+    """Parser-quality report for any mode that captured a ``parser`` block
+    (the E2E crew or the MedGemma parser-llm bypass). Orchestration-independent,
+    so it is the fair Flash-vs-MedGemma anchor."""
+    age_ok = gen_ok = trans_ok = 0
+    comp_jacc = []
+    n = 0
+    for c in cases:
+        pr = mode_preds.get(c["stay_id"])
+        if not pr or not pr.get("parser"):
+            continue
+        n += 1
+        t = c["triage_inputs"]
+        ps = pr["parser"]
+        age_ok += int(ps.get("age") == t["age"])
+        gen_ok += int(str(ps.get("gender", "")).lower() == t["gender"])
+        pa = str(ps.get("arrival_transport", "")).lower().replace(" ", "_")
+        trans_ok += int(t["arrival_transport"] in pa or pa in t["arrival_transport"])
+        truth_tok = set(normalize_complaint_text(t["chief_complaints"]).split())
+        got_tok = set(normalize_complaint_text(
+            ", ".join(ps.get("complaints", []))).split())
+        if truth_tok or got_tok:
+            comp_jacc.append(len(truth_tok & got_tok) / len(truth_tok | got_tok))
+    jacc = float(np.mean(comp_jacc)) if comp_jacc else float("nan")
+    if n:
+        print(f"  cases with parser output:        {n}")
+        print(f"  age extracted correctly:         {age_ok}/{n}")
+        print(f"  gender extracted correctly:      {gen_ok}/{n}")
+        print(f"  arrival transport correct:       {trans_ok}/{n}")
+        print(f"  mean complaint token Jaccard:    {jacc:.3f}"
+              if comp_jacc else "  mean complaint token Jaccard:    n/a")
+    else:
+        print("  (no parser output captured)")
+    return {"n": n, "age_ok": age_ok, "gender_ok": gen_ok,
+            "transport_ok": trans_ok, "complaint_jaccard_mean": jacc}
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -654,7 +791,23 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip-feature-vector", action="store_true")
     parser.add_argument("--skip-e2e", action="store_true")
+    parser.add_argument("--llm-backend", choices=["flash", "medgemma"], default=None,
+                        help="Override LLM_BACKEND for the E2E crew + parser-llm "
+                             "mode. Default: whatever .env/env says (flash).")
+    parser.add_argument("--parser-llm", action="store_true",
+                        help="Add the MedGemma-only parser-llm bypass mode (one "
+                             "direct LLM parse -> deterministic tool-direct). Use "
+                             "when MedGemma can't drive the agentic crew.")
+    parser.add_argument("--dump-json", default=None,
+                        help="Write the scored metrics + backend tag to this JSON "
+                             "path (for comparing flash vs medgemma runs).")
     args = parser.parse_args()
+
+    # Backend override must be set BEFORE the crew (and its get_llm()) is imported.
+    if args.llm_backend:
+        os.environ["LLM_BACKEND"] = args.llm_backend
+    from proiect_licenta.llm_config import llm_backend
+    backend = llm_backend()
 
     payload = load_cases()
     cases = payload["cases"]
@@ -668,6 +821,8 @@ def main():
     print("  END-TO-END PIPELINE BENCHMARK  (NL crew vs tabular benchmark)")
     print(f"  Cases: {len(cases)}  (generated {payload.get('generated_at','?')}, "
           f"seed {payload.get('seed','?')})")
+    print(f"  LLM backend: {backend.upper()}"
+          f"{'  (model ' + os.getenv('MEDGEMMA_MODEL', '?') + ')' if backend == 'medgemma' else ''}")
     print("#" * 78)
     n_admit_gt = sum(1 for c in cases if c["ground_truth"]["admitted"])
     n_flagged = sum(1 for c in cases if c.get("grounding") and not c["grounding"]["ok"])
@@ -755,6 +910,22 @@ def main():
             preds["feature_vector_gated"][c["stay_id"]] = g
         print(f"  derived for {len(preds['feature_vector_gated'])} cases")
 
+    # Parser-LLM mode: one direct LLM parse -> deterministic tool-direct. Runs for
+    # BOTH backends (get_parse_llm() is never None) so Flash and MedGemma can be
+    # compared in the SAME mode — isolating parser quality from agentic tool-calling.
+    if args.parser_llm:
+        from proiect_licenta.llm_config import get_parse_llm
+        llm = get_parse_llm()
+        print_section("MODE: parser-llm (direct LLM parse -> tool-direct, no agentic tool-calling)")
+        preds["parser_llm"] = {}
+        modes.append("parser_llm")
+        for i, c in enumerate(cases, 1):
+            try:
+                preds["parser_llm"][c["stay_id"]] = run_parser_llm_bypass(c, llm)
+                print(f"  [{i}/{len(cases)}] stay {c['stay_id']}: ok")
+            except Exception as e:
+                print(f"  [{i}/{len(cases)}] stay {c['stay_id']}: ERROR {type(e).__name__}: {e}")
+
     # E2E (last — heaviest, runs the LLM crew)
     if not args.skip_e2e:
         print_section("MODE: E2E (real crew, narrative -> NLP parser -> models)")
@@ -832,36 +1003,24 @@ def main():
                   f"refined_admit={pr.get('refined_admit')}, dx={dx}, dept={dp}, "
                   f"icd={ic}{extra}")
 
-    # ── NL-fidelity report (E2E parser extraction vs tabular truth) ──
-    if "e2e" in preds:
-        print_section("NL-FIDELITY  (what the parser extracted vs tabular truth)")
-        age_ok = gen_ok = trans_ok = 0
-        comp_jacc = []
-        n = 0
-        for c in cases:
-            pr = preds["e2e"].get(c["stay_id"])
-            if not pr or not pr.get("parser"):
-                continue
-            n += 1
-            t = c["triage_inputs"]
-            ps = pr["parser"]
-            age_ok += int(ps.get("age") == t["age"])
-            gen_ok += int(str(ps.get("gender", "")).lower() == t["gender"])
-            pa = str(ps.get("arrival_transport", "")).lower().replace(" ", "_")
-            trans_ok += int(t["arrival_transport"] in pa or pa in t["arrival_transport"])
-            # complaint token Jaccard (normalized)
-            truth_tok = set(normalize_complaint_text(t["chief_complaints"]).split())
-            got_tok = set(normalize_complaint_text(
-                ", ".join(ps.get("complaints", []))).split())
-            if truth_tok or got_tok:
-                comp_jacc.append(len(truth_tok & got_tok) / len(truth_tok | got_tok))
-        if n:
-            print(f"  cases with parser output:        {n}")
-            print(f"  age extracted correctly:         {age_ok}/{n}")
-            print(f"  gender extracted correctly:      {gen_ok}/{n}")
-            print(f"  arrival transport correct:       {trans_ok}/{n}")
-            print(f"  mean complaint token Jaccard:    {np.mean(comp_jacc):.3f}"
-                  if comp_jacc else "  mean complaint token Jaccard:    n/a")
+    # ── NL-fidelity report (parser extraction vs tabular truth) ──
+    # This is the orchestration-independent, apples-to-apples parser-quality
+    # comparison: it works identically for the E2E crew parser AND the MedGemma
+    # parser-llm bypass, so Flash and MedGemma can be compared here even when
+    # MedGemma runs in bypass mode and Gemini runs the full agentic crew.
+    nl_fidelity = {}
+    for fid_mode, fid_label in (("e2e", "E2E crew parser"),
+                                ("parser_llm", "parser-llm (direct LLM parse)")):
+        if fid_mode in preds:
+            print_section(f"NL-FIDELITY [{fid_label}]  (parser extraction vs tabular truth)")
+            nl_fidelity[fid_mode] = print_nl_fidelity(cases, preds[fid_mode])
+
+    if args.dump_json:
+        Path(args.dump_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.dump_json).write_text(json.dumps(
+            {"llm_backend": backend, "modes": modes, "metrics": rows,
+             "nl_fidelity": nl_fidelity, "n_cases": len(cases)}, indent=2), encoding="utf-8")
+        print(f"\n  Metrics dumped -> {args.dump_json}")
 
     print("\n" + "#" * 78)
     print("  BENCHMARK COMPLETE")

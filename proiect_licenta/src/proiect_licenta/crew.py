@@ -7,6 +7,11 @@ from proiect_licenta.tools.triage_tool import TriagePredictionTool
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 from proiect_licenta.tools.nurse_tool import NurseDataCollectionTool
 
+# Switchable LLM backend (Gemini Flash 2.5 vs self-hosted MedGemma). get_llm()
+# returns None for the default `flash` backend, which is the CrewAI Agent
+# default — so the Gemini path is unchanged unless LLM_BACKEND=medgemma is set.
+from proiect_licenta.llm_config import get_llm
+
 # Doctor v3 tier — full swap from v1/v2 (2026-05-28).
 # - v3_base for the pre-nurse initial assessment (13-class label space).
 # - v3 (nurse) for the post-nurse diagnosis/department reassessment.
@@ -42,6 +47,7 @@ class ProiectLicenta():
         return Agent(
             config=self.agents_config['nlp_parser'],  # type: ignore[index]
             tools=[AskPatientTool()],
+            llm=get_llm(),
             verbose=True,
         )
 
@@ -58,6 +64,7 @@ class ProiectLicenta():
         return Agent(
             config=self.agents_config['triage_agent'],  # type: ignore[index]
             tools=[TriagePredictionTool(), PatientHistoryLookupTool()],
+            llm=get_llm(),
             verbose=True,
         )
 
@@ -73,6 +80,7 @@ class ProiectLicenta():
                 DoctorDispositionTool(),
                 DoctorPredictionToolV3(),
             ],
+            llm=get_llm(),
             verbose=True,
         )
 
@@ -82,6 +90,7 @@ class ProiectLicenta():
         return Agent(
             config=self.agents_config['nurse_agent'],  # type: ignore[index]
             tools=[NurseDataCollectionTool()],
+            llm=get_llm(),
             verbose=True,
         )
 

@@ -167,7 +167,55 @@ uv run python benchmarks/benchmark_pipeline_e2e.py   # [--limit N] [--skip-featu
 ```
 MODEL=gemini/gemini-2.5-flash
 GEMINI_API_KEY=<key>
+
+# LLM backend switch (src/proiect_licenta/llm_config.py). flash = Gemini (default,
+# pipeline unchanged); medgemma = self-hosted MedGemma behind a vLLM OpenAI-compatible
+# endpoint (host-agnostic: Colab tunnel / Kaytus / Vertex / local).
+LLM_BACKEND=flash
+MEDGEMMA_BASE_URL=          # e.g. https://<tunnel>/v1   (only used when medgemma)
+MEDGEMMA_API_KEY=EMPTY
+MEDGEMMA_MODEL=google/medgemma-4b-it
 ```
+
+### LLM backend comparison (Flash 2.5 vs MedGemma)
+Only two components touch the LLM — the **NLP Parser** (live crew) and the **Case
+Generation** agent — but in CrewAI every agent is LLM-backed (the LLM drives tool
+calls), so `get_llm()` is wired into all four live agents + the case generator.
+`flash` returns `None` (CrewAI default), so the Gemini path is **byte-for-byte
+unchanged**; only `LLM_BACKEND=medgemma` injects an explicit `crewai.LLM`. MedGemma
+is open weights with no managed API — self-host it behind vLLM and point
+`MEDGEMMA_BASE_URL` at it. Two separately-reported experiments:
+```bash
+# A) Parser/pipeline on the SAME cached cases (clean isolation):
+uv run python benchmarks/benchmark_pipeline_e2e.py --dump-json artifacts/benchmarks/e2e_flash.json
+uv run python benchmarks/benchmark_pipeline_e2e.py --llm-backend medgemma --parser-llm \
+    --dump-json artifacts/benchmarks/e2e_medgemma.json   # --parser-llm = MedGemma fallback if it can't drive the agentic crew
+# B) Case-generation narrative quality (regenerate per backend, compare grounding):
+uv run generate_cases --backend medgemma         # writes data/derived/synthetic_cases_medgemma/
+uv run python benchmarks/compare_case_generation.py
+```
+The orchestration-independent **NL-FIDELITY** section of the E2E benchmark is the
+fair parser-quality anchor across backends.
+
+**Experiment A result (20-case, same-mode `parser_llm`, 2026-06-16).** MedGemma-4B
+(`google/medgemma-4b-it`, self-hosted on Colab via vLLM) vs Gemini Flash 2.5, both
+run in the `parser-llm` mode (one direct LLM parse → the identical deterministic
+tool-direct pipeline), so only the parser LLM varies. The four LLM-free modes were
+byte-identical across both runs (methodology check passed). **The two models are
+statistically indistinguishable as the parser**: tied on disposition (.80), diagnosis
+@1 (.462) / @3 (.692), department @1 (.538), and exact-ICD (@5 .385 / union .615);
+Flash was +1 case on ESI acuity (.75 vs .70) and department @3 (.769 vs .692),
+MedGemma marginally higher on complaint-token fidelity (Jaccard .602 vs .558). NL-
+fidelity was near-identical (both: age 20/20, gender 19/20, transport 19/20). At n=20
+(13 admitted) one case ≈ 7.7pp, so all deltas are within the noise floor. Both LLM
+parsers lose ~15pp on diagnosis@1 vs the exact-field `tool_direct` ref (.615 → .462) —
+the irreducible free-text-paraphrase cost, equal for both. **Operational caveat:**
+Flash also drives the full agentic crew; MedGemma-4B cannot out of the box (vanilla
+vLLM rejects CrewAI's `tool_choice="auto"`; the model isn't function-call tuned), so
+the `parser-llm` bypass is MedGemma's evaluation path. Self-hosting how-to:
+[`colab/README.md`](colab/README.md). **Next:** scale from 20 → ~100 cases for tighter
+confidence intervals, and (optional) retry MedGemma agentic with vLLM
+`--enable-auto-tool-choice` — see [`docs/future-work.md`](docs/future-work.md).
 
 ---
 

@@ -34,9 +34,11 @@ truth. The benchmark then runs fast off the cached JSON + feature pickle.
 """
 
 import json
+import os
 import re
 import warnings
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -55,6 +57,8 @@ from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.pmh_vocab import (
     PMH_CATEGORIES, PMH_KEYWORD_MAP, flags_from_text as pmh_flags_from_text,
 )
+# Switchable LLM backend — None for the default flash backend (Gemini, unchanged).
+from proiect_licenta.llm_config import get_llm
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -381,6 +385,7 @@ class CaseGenerationCrew:
     def case_generator(self) -> Agent:
         return Agent(
             config=self.agents_config["case_generator"],  # type: ignore[index]
+            llm=get_llm(),
             verbose=False,
         )
 
@@ -610,9 +615,19 @@ def generate_and_save_cases(
     n_discharged: int = DEFAULT_N_DISCHARGED,
     seed: int = DEFAULT_SEED,
     limit: Optional[int] = None,
+    out_dir: Optional["Path"] = None,
 ) -> list:
     """Sample, generate validated narratives via the LLM, and persist
-    cases.json + sampled_features.pkl under data/derived/synthetic_cases/."""
+    cases.json + sampled_features.pkl.
+
+    By default these go to data/derived/synthetic_cases/ (the canonical set the
+    E2E benchmark loads). Pass ``out_dir`` to write to a separate directory —
+    used by Experiment B to keep each LLM backend's narratives apart
+    (e.g. synthetic_cases_medgemma/) so the Case-Generation comparison never
+    overwrites the Flash-generated canonical cases."""
+    out_dir = SYNTH_DIR if out_dir is None else Path(out_dir)
+    cases_json = out_dir / "cases.json"
+    features_pkl = out_dir / "sampled_features.pkl"
     cases, feature_cache = sample_and_extract(n_admitted, n_discharged, seed)
 
     if limit is not None:
@@ -633,21 +648,22 @@ def generate_and_save_cases(
         if not g["ok"]:
             n_flagged += 1
 
-    SYNTH_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": datetime.now().isoformat(),
+        "llm_backend": os.getenv("LLM_BACKEND", "flash"),
         "seed": seed,
         "n_admitted": n_admitted,
         "n_discharged": n_discharged,
         "n_cases": len(cases),
         "cases": cases,
     }
-    CASES_JSON.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    joblib.dump(feature_cache, FEATURES_PKL)
+    cases_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    joblib.dump(feature_cache, features_pkl)
 
     print(f"\n{'='*70}")
-    print(f"  Saved {len(cases)} cases -> {CASES_JSON}")
-    print(f"  Saved feature cache -> {FEATURES_PKL}")
+    print(f"  Saved {len(cases)} cases -> {cases_json}")
+    print(f"  Saved feature cache -> {features_pkl}")
     print(f"  Grounding: {len(cases) - n_flagged}/{len(cases)} clean, {n_flagged} flagged")
     print(f"{'='*70}")
     return cases

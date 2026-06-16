@@ -24,6 +24,19 @@ The v1 -> v2 upgrade added 31 new features (20 vital signs + 11 medications) yet
 
 ## Empirical findings — experiments shipped
 
+### LLM backend comparison — Gemini Flash 2.5 vs MedGemma (SHIPPED 2026-06-16, switch + 20-case Experiment A done)
+
+Added a switchable LLM backend (`LLM_BACKEND=flash|medgemma`, `src/proiect_licenta/llm_config.py`) so the pipeline's LLM work can be benchmarked on a domain model. `flash` returns `None` → CrewAI default, so the Gemini path is byte-for-byte unchanged; `medgemma` injects a native-OpenAI `crewai.LLM` pointed at a self-hosted vLLM endpoint (MedGemma is open weights, no managed API — Colab/Kaytus how-to in `colab/`). Wired into all four live agents + the case generator. The benchmark gained `--llm-backend`, a same-mode `parser-llm` mode (one direct LLM parse → deterministic tool-direct, runs for both backends), and `--dump-json` (now incl. NL-fidelity).
+
+**Experiment A result (20-case, same-mode `parser_llm`).** MedGemma-4B and Flash 2.5 are **statistically indistinguishable as the parser**: tied on disposition (.80), diagnosis @1 (.462)/@3 (.692), department @1 (.538), exact-ICD (@5 .385/union .615); Flash +1 case on acuity (.75 vs .70) and dept@3 (.769 vs .692); MedGemma marginally ahead on complaint-token Jaccard (.602 vs .558). NL-fidelity near-identical (both age 20/20, gender 19/20, transport 19/20). At n=20 every delta is within the ~7.7pp/case noise floor. Both LLM parsers cost ~15pp diagnosis@1 vs the exact-field `tool_direct` ref (the irreducible paraphrase cost, equal for both). **Operational asymmetry:** Flash drives the full agentic crew; MedGemma-4B cannot out of the box (vanilla vLLM rejects CrewAI's `tool_choice="auto"`; model not function-call tuned), so `parser-llm` is MedGemma's path.
+
+**A benchmark bug was caught and fixed during interpretation:** the parser prompt offered an `"unknown"` arrival-transport option the live parser (`tasks.yaml`: ambulance/helicopter/walk_in, walk-in default) doesn't have. Flash answered "unknown" for the 11 transport-silent narratives (faithful but mislabelled → 10/20); MedGemma defaulted to walk_in (18/20). Aligning the prompt to the live 3-value contract fixed it (both → 19/20; the lone genuine "unknown"-truth case is an inherent miss).
+
+**Next (future work):**
+- **Scale 20 → ~100 cases** (`generate_cases --backend flash --n-admitted 65 --n-discharged 35`, then re-run) for tighter CIs — at n=20 each case is 7.7pp.
+- **Experiment B** (case-generation narrative quality per backend) not yet run.
+- **MedGemma 27B** (A100 + 4-bit) for a stronger comparison point, and an optional retry of MedGemma *agentic* with vLLM `--enable-auto-tool-choice --tool-call-parser` (expected to remain unreliable for a non-function-tuned 4B model — a reportable finding either way).
+
 ### Stage-2 exact-ICD resolution within categories (SHIPPED 2026-06-11, built + benchmarked + wired into runtime)
 
 A retrieval cascade on top of the Doctor v3 diagnosis model that ranks the **exact ICD diagnosis** within each of the top-5 predicted categories (3-char rollup headline + full-code secondary). No retrain, no new dependencies — reuses the TF-IDF vectorizer. Core: `src/proiect_licenta/icd_resolution.py`; builder `uv run train_icd_resolver` → `artifacts/doctor/v3/icd_resolver/`; benchmark `benchmarks/benchmark_icd_resolution.py`; wired advisory-only into `doctor_tool_v3` (`diagnosis_prediction.exact_diagnoses`) + the reassessment task.
