@@ -11,7 +11,7 @@ These synthetic cases let us measure something the per-model benchmarks can't:
 language and parsed by the LLM, versus handed to the models as clean tabular
 columns.**
 
-- **Type:** CrewAI agent (Gemini), run as a dedicated offline crew.
+- **Type:** CrewAI agent (Gemini by default; **switchable to self-hosted MedGemma** via `LLM_BACKEND` — see [`../llm-backend.md`](../llm-backend.md), incl. `generate_cases --backend` and the Experiment B grounding comparison).
 - **Config:** `config/case_generation_agents.yaml` (`case_generator`) and
   `config/case_generation_tasks.yaml` (`generate_case_task`) — **separate** from
   the live crew's `agents.yaml`/`tasks.yaml` (see "Why separate config" below).

@@ -13,6 +13,7 @@
 | [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor v1 + v2: 4 XGBoost models, grouping tables, vital/medication processing |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse: interactive collection flow, partial data handling |
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case; 4-way E2E vs tabular benchmark (incl. gate-isolating column) + the runtime multi-reading-vitals fix |
+| [`docs/llm-backend.md`](docs/llm-backend.md) | Switchable LLM backend (Gemini Flash 2.5 ↔ self-hosted MedGemma): `llm_config` design, vLLM/Colab serving, same-mode `parser-llm` benchmark, 20-case Experiment A results |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference (used + inspected-but-unused, leakage notes) |
 | [`docs/future-work.md`](docs/future-work.md) | Why v2 gains were modest, prioritized roadmap, known issues, planned phases 4 + 5 |
 

@@ -6,9 +6,10 @@ The first agent in the pipeline. It converts free-text patient descriptions into
 
 ## Role
 
-- **Type:** LLM-based (Gemini 2.5 Flash via CrewAI)
+- **Type:** LLM-based (Gemini 2.5 Flash via CrewAI by default; **switchable to self-hosted MedGemma** — see [`../llm-backend.md`](../llm-backend.md))
 - **Purpose:** Take free-text patient input and output a structured record that the Triage Agent can feed directly into XGBoost.
 - **Config:** `src/proiect_licenta/config/agents.yaml` (`nlp_parser`) and `tasks.yaml` (`parse_symptoms_task`)
+- **Backend:** the LLM is chosen by `LLM_BACKEND` via `src/proiect_licenta/llm_config.py` (`flash` = Gemini, unchanged default; `medgemma` = self-hosted). Experiment A found MedGemma-4B statistically tied with Flash 2.5 as the parser — full results in [`../llm-backend.md`](../llm-backend.md).
 
 ---
 

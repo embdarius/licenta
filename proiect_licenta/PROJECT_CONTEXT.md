@@ -22,6 +22,7 @@ This file is the slim top-level overview. Detailed documentation is split per to
 | [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2 + v3: 7 XGBoost models (v1 diag/dept, v2 diag/dept, v3 base + nurse diag/dept, **and the new v3 disposition peer model**), diagnosis / department grouping tables, four-way comparison (v1 / v2 / v3 base / v3 with-nurse), medication classification, vital sign processing, longitudinal vitals + rhythm in v3, and the binary admit/discharge refinement model from plan section 3 / Option B |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse Agent: interactive collection flow, partial data handling, why a dedicated agent |
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation Agent (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case, and the 4-way end-to-end vs tabular benchmark (incl. the gate-isolating column) + the runtime multi-reading-vitals fix |
+| [`docs/llm-backend.md`](docs/llm-backend.md) | Switchable LLM backend (Gemini Flash 2.5 vs self-hosted MedGemma): `llm_config` design, vLLM/Colab serving, the same-mode `parser-llm` benchmark, and the 20-case Experiment A results + interpretation |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference — used tables + inspected-but-unused tables (`vitalsign.csv`, `pyxis.csv`, `admissions.csv`, clinical notes) with leakage considerations |
 | [`docs/future-work.md`](docs/future-work.md) | Why the Doctor v2 gains were modest, prioritized next-step recommendations, Phase 4 Text Generation, Phase 5 Hospital Infrastructure, model-level improvements, known issues |
 
@@ -184,7 +185,8 @@ calls), so `get_llm()` is wired into all four live agents + the case generator.
 `flash` returns `None` (CrewAI default), so the Gemini path is **byte-for-byte
 unchanged**; only `LLM_BACKEND=medgemma` injects an explicit `crewai.LLM`. MedGemma
 is open weights with no managed API — self-host it behind vLLM and point
-`MEDGEMMA_BASE_URL` at it. Two separately-reported experiments:
+`MEDGEMMA_BASE_URL` at it. **Full reference: [`docs/llm-backend.md`](docs/llm-backend.md)**
+(design, serving, benchmark modes, Experiment A results). Two separately-reported experiments:
 ```bash
 # A) Parser/pipeline on the SAME cached cases (clean isolation):
 uv run python benchmarks/benchmark_pipeline_e2e.py --dump-json artifacts/benchmarks/e2e_flash.json
