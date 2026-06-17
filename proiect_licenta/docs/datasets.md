@@ -2,7 +2,7 @@
 
 This document catalogs every MIMIC-IV table the project uses, every table it has **inspected but not yet used**, and — where relevant — how those unused tables could be integrated. The "unused" section is important: it captures discussion that informed [`future-work.md`](future-work.md) but belongs here with the data itself.
 
-Source root on disk: `src/proiect_licenta/datasets/datasets_mimic-iv/`.
+Source root on disk: `data/` (e.g. `data/mimic-iv-ed/`, `data/mimic-iv/hosp/`, `data/mimic-iv-notes/`), as encoded in `src/proiect_licenta/paths.py`. All paths below are relative to that root.
 
 ---
 

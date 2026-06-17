@@ -18,7 +18,7 @@ This file is the slim top-level overview. Detailed documentation is split per to
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Full agent pipeline diagram, cascading prediction design, shared text preprocessing pipeline, project structure on disk |
 | [`docs/agents/nlp-parser-agent.md`](docs/agents/nlp-parser-agent.md) | NLP Parser Agent (LLM): role, input/output contract, `AskPatientTool` |
-| [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage Agent: acuity + disposition XGBoost models, 2023 features, 66.7% / 75.9% benchmarks, training evolution v1 -> v3b |
+| [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage Agent: acuity + disposition XGBoost models, 2070 features (v3, live), 67.55% / 78.0% benchmarks, training evolution v1 -> v3 (incl. PMH + ordinal-aware acuity) |
 | [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor Agent v1 + v2 + v3: 7 XGBoost models (v1 diag/dept, v2 diag/dept, v3 base + nurse diag/dept, **and the new v3 disposition peer model**), diagnosis / department grouping tables, four-way comparison (v1 / v2 / v3 base / v3 with-nurse), medication classification, vital sign processing, longitudinal vitals + rhythm in v3, and the binary admit/discharge refinement model from plan section 3 / Option B |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse Agent: interactive collection flow, partial data handling, why a dedicated agent |
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation Agent (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case, and the 4-way end-to-end vs tabular benchmark (incl. the gate-isolating column) + the runtime multi-reading-vitals fix |
@@ -32,20 +32,20 @@ This file is the slim top-level overview. Detailed documentation is split per to
 
 - **`src/proiect_licenta/paths.py`** is the single source of truth for filesystem paths. All dataset CSVs and artifact directories (`TRIAGE_V1_DIR`, `DOCTOR_V2_DIR`, `DOCTOR_V3_DIR`, `TRIAGE_CSV`, ...) are exported as constants. Never hard-code paths. `DOCTOR_V3_DIR` now holds three artifact bundles: `diagnosis_model.joblib`, `department_model.joblib`, and `disposition_model.joblib` (+ its `_raw` sibling for audit).
 - **`src/proiect_licenta/preprocessing.py`** owns `ABBREVIATIONS` and `normalize_complaint_text`. Triage v1/v2, doctor, nurse, and runtime tools all import from here so training and inference can't drift.
-- **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/triage/{v1,v2}/` and `artifacts/doctor/{v1,v2,v3_base,v3}/`. Retrain with `uv run train_*` (see "How to Run").
+- **Datasets and trained model weights are gitignored.** Datasets live in `data/`, artifacts in `artifacts/triage/{v1,v2,v3}/` and `artifacts/doctor/{v1,v2,v3_base,v3}/`. Retrain with `uv run train_*` (see "How to Run").
 
 ---
 
 ## System at a Glance
 
 ```
-Patient -> NLP Parser -> Triage -> Doctor v1 -> Nurse -> Doctor v2
-           (LLM)        (ML)      (ML)         (interactive) (ML+vitals+meds)
+Patient -> NLP Parser -> Triage -> Doctor (initial) -> Nurse -> Doctor (disposition) -> Doctor (reassessment)
+           (LLM)        (ML v3)   (ML v3_base)        (interactive) (ML, calibrated)   (ML v3 +vitals+meds)
 ```
 
-- **4 agents**, **5 tasks** (the Doctor runs twice).
-- **Live runtime uses Doctor v1 + v2** (14-class label space). The diagram above reflects that.
-- **A separate Doctor v3 tier** (catch-all class excluded → 13-class label space, full filtered dataset, longitudinal vitals + rhythm) sits alongside v1/v2 in the repo. Used for training/benchmark comparisons; not currently wired into the live crew.
+- **4 agents**, **6 tasks** (the Doctor runs three times: initial v3_base → disposition refinement → enhanced reassessment v3).
+- **Live runtime is the Doctor v3 stack** (catch-all class excluded → 13-class label space, full filtered dataset, longitudinal vitals + rhythm), rewired in on 2026-05-30. The disposition step is a calibrated binary admit/discharge model that the reassessment gates on instead of triage's screening verdict.
+- **Doctor v1 + v2** (14-class label space) are retained on disk as thesis baselines for the before/after-nurse comparison, but are no longer wired into the live crew.
 - **Cascading:** each model's output feeds the next.
 - See [`docs/architecture.md`](docs/architecture.md) for the full diagram and pipeline design, and [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) for the v3 details.
 
@@ -80,7 +80,7 @@ v1/v2 (14-class) and v3 (13-class) are not on identical test sets and shouldn't 
 
 ## Design Decisions
 
-1. **Two-phase doctor assessment** — The Doctor Agent runs twice: v1 (triage data only) and v2 (with nurse data). This allows direct comparison of predictions before and after vital signs/medication data, demonstrating the clinical value of additional data collection.
+1. **Multi-phase doctor assessment** — The Doctor Agent runs three times in the live crew: initial (v3_base, triage data only), disposition refinement (calibrated binary admit/discharge), and enhanced reassessment (v3, with nurse data). The initial-vs-reassessment pair allows direct comparison of predictions before and after vital signs/medication data, demonstrating the clinical value of additional data collection. (The retained v1/v2 baselines encode the same two-phase before/after-nurse split for thesis comparison.)
 2. **LLM for NLP parsing, ML for prediction** — The NLP Parser uses Gemini (LLM) for natural language understanding. All prediction models use supervised ML (XGBoost) trained on 400K+ real encounters for reliable, auditable predictions.
 3. **Cascading prediction** — Each model's output feeds into the next: acuity -> disposition -> diagnosis -> department. This mirrors clinical flow and improves downstream predictions.
 4. **Soft class weighting** — Uses sqrt(inverse_frequency) to balance minority class recall without destroying majority class accuracy.
@@ -131,7 +131,7 @@ uv run train_doctor_disposition
 # loader, no GPU. Add --verify to assert the split matches the full v3 loader once.)
 uv run train_icd_resolver
 
-# Run the full 4-agent, 5-task system interactively
+# Run the full 4-agent, 6-task system interactively
 uv run crewai run
 
 # Or equivalently

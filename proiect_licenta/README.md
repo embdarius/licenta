@@ -2,12 +2,14 @@
 
 Bachelor's thesis project implementing a multi-agent architecture for emergency-department decision support, built on **CrewAI** + **XGBoost** and trained on the **MIMIC-IV-ED** dataset (~425K real patient encounters).
 
-A patient describes their symptoms in natural language; a pipeline of four specialized agents (NLP Parser → Triage → Doctor → Nurse → Doctor v2) walks the case through triage, initial diagnosis, vital-sign collection, and an enhanced reassessment.
+A patient describes their symptoms in natural language; a pipeline of four specialized agents walks the case through triage, initial diagnosis, vital-sign collection, a calibrated disposition refinement, and an enhanced reassessment. The Doctor runs three times (6 tasks total).
 
 ```
-Patient → NLP Parser → Triage → Doctor v1 → Nurse → Doctor v2
-          (LLM)        (ML)     (ML)        (interactive)  (ML+vitals+meds)
+Patient → NLP Parser → Triage → Doctor (initial) → Nurse → Doctor (disposition) → Doctor (reassessment)
+          (LLM)        (ML v3)  (ML v3_base)       (interactive) (ML, calibrated)  (ML v3 +vitals+meds)
 ```
+
+Live models are the **v3 stack** (rewired 2026-05-30); the v1/v2 models are retained as thesis baselines.
 
 ## Documentation
 
@@ -29,22 +31,23 @@ uv sync
 #   MODEL=gemini/gemini-2.5-flash
 #   GEMINI_API_KEY=<your key>
 
-# Run the full 4-agent pipeline
+# Run the full 4-agent / 6-task pipeline
 uv run run_crew
 
-# Train models (see PROJECT_CONTEXT.md for timings)
-uv run train_models       # triage v1
-uv run train_triage_v2    # triage v2 (with vitals)
-uv run train_doctor       # doctor v1
-uv run train_nurse        # doctor v2 (uses nurse data)
+# Train models — live v3 stack (see PROJECT_CONTEXT.md "How to Run" for the full list + timings)
+uv run train_triage_v3         # triage v3 (vitals + PMH) — live
+uv run train_doctor_v3         # doctor v3 base (catch-all excluded) — live initial
+uv run train_nurse_v3          # doctor v3 with nurse data — live reassessment
+uv run train_doctor_disposition  # calibrated binary admit/discharge — live disposition
+# v1/v2 baselines: uv run train_models / train_triage_v2 / train_doctor / train_nurse
 
 # Benchmarks
-uv run python benchmarks/benchmark_triage_v2.py
-uv run python benchmarks/benchmark_doctor.py
-uv run python benchmarks/benchmark_nurse.py
+uv run python benchmarks/benchmark_triage_v3.py
+uv run python benchmarks/benchmark_doctor_v3.py
+uv run python benchmarks/benchmark_nurse_v3.py
 ```
 
-Datasets are not committed — place the MIMIC-IV CSVs under `src/proiect_licenta/datasets/datasets_mimic-iv/` (see `docs/datasets.md`).
+Datasets are not committed — place the MIMIC-IV CSVs under `data/` (e.g. `data/mimic-iv-ed/`, `data/mimic-iv/hosp/`), the layout encoded in `src/proiect_licenta/paths.py` (see `docs/datasets.md`).
 
 ## Tech stack
 
