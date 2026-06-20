@@ -70,9 +70,12 @@ warnings.filterwarnings("ignore", category=UserWarning)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from proiect_licenta.paths import (
-    DOCTOR_V3_DIR, DOCTOR_V3_ICD_RESOLVER_DIR, DIAGNOSIS_CSV, TRIAGE_V1_DIR,
+    ARTIFACTS_DIR, DOCTOR_V3_DIR, DOCTOR_V3_ICD_RESOLVER_DIR, DIAGNOSIS_CSV,
+    TRIAGE_V1_DIR,
 )
-from proiect_licenta.preprocessing import normalize_complaint_text
+from proiect_licenta.preprocessing import (
+    normalize_complaint_text, clinicalize_complaint,
+)
 from proiect_licenta.case_generation import load_cases, load_feature_cache, VITAL_COLS
 from proiect_licenta import icd_resolution as icdr
 from proiect_licenta.tools.doctor_tool_v3_base import DEPARTMENT_NAMES  # noqa: F401
@@ -303,7 +306,12 @@ def run_tool_direct_lookup(case) -> dict:
 # prior-admission count — are kept from the case, exactly as in the E2E run, so
 # only the free-text-parsed fields vary. Gemini is never run here (it always
 # drives the full agentic crew); this is MedGemma's evaluation path.
-_PARSE_PROMPT = """You are a clinical intake parser. Read the patient's free-text \
+# Two prompt variants so the clinical-term steering (Track 1) can be measured in
+# isolation: `--plain-prompt` selects _PARSE_PROMPT_PLAIN (reproduces the
+# documented n150 baseline); the default _PARSE_PROMPT adds the lay->clinical
+# steering. Combined with `--clinicalize`, this gives a clean 2x2 attribution
+# (prompt on/off x deterministic map on/off).
+_PARSE_PROMPT_PLAIN = """You are a clinical intake parser. Read the patient's free-text \
 description and extract ONLY what is stated. Respond with a single JSON object and \
 nothing else, using exactly these keys:
   "chief_complaints": short comma-separated string of the presenting complaint(s)
@@ -316,6 +324,31 @@ unless the patient explicitly says they were brought by ambulance or helicopter 
 Do not invent vitals, diagnoses, or history. Patient description:
 {narrative}"""
 
+_PARSE_PROMPT = """You are a clinical intake parser. Read the patient's free-text \
+description and extract ONLY what is stated. Respond with a single JSON object and \
+nothing else, using exactly these keys:
+  "chief_complaints": short comma-separated string of the presenting complaint(s), \
+using STANDARD emergency-department terminology rather than the patient's lay \
+wording (this is how the complaint is charted at triage). Map everyday \
+descriptions to the clinical term, e.g. "really bad stomach pain" -> "abdominal \
+pain"; "can't catch my breath"/"winded" -> "dyspnea"; "throwing up" -> "nausea, \
+vomiting"; "passed out" -> "syncope"; "brain bleed" -> "intracranial hemorrhage"; \
+"bright red blood in my stool" -> "BRBPR"; "blood in my urine" -> "hematuria"; \
+"I'm suicidal" -> "suicidal ideation". Keep EVERY distinct complaint the patient \
+mentions (e.g. "chest pain, dyspnea").
+  "age": integer years, or null if not stated
+  "gender": "m" or "f", or null if not stated
+  "arrival_transport": one of "ambulance", "helicopter", or "walk_in". Use "walk_in" \
+unless the patient explicitly says they were brought by ambulance or helicopter \
+(walk-in is the default; there is no "unknown").
+  "pain_score": integer 0-10 if a pain level is stated, else -1
+Do not invent vitals, diagnoses, or history. Patient description:
+{narrative}"""
+
+# The prompt actually used for parsing (and for the cache key). main() may swap
+# this to the plain variant via --plain-prompt.
+_ACTIVE_PARSE_PROMPT = _PARSE_PROMPT
+
 
 def _coerce_int(v):
     try:
@@ -324,9 +357,61 @@ def _coerce_int(v):
         return None
 
 
+# --- Parse cache -----------------------------------------------------------
+# The LLM parse of a narrative is deterministic (temperature=0) and depends only
+# on the prompt + narrative, so we cache it keyed by (prompt hash, narrative).
+# This lets system-side iterations (e.g. toggling the lay->clinical clinicalize
+# map, which is applied AFTER the parse) re-run with ZERO LLM calls. A prompt
+# change alters the key automatically, so the cache self-invalidates per prompt
+# revision. Cache file is per backend.
+import hashlib
+
+_PARSE_CACHE: dict = {}
+_PARSE_CACHE_PATH = None
+_PARSE_CACHE_DIRTY = False
+_PARSE_CACHE_HITS = 0
+_PARSE_CACHE_MISSES = 0
+
+
+def _parse_cache_key(narrative: str) -> str:
+    h = hashlib.sha1()
+    h.update(_ACTIVE_PARSE_PROMPT.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(str(narrative).encode("utf-8"))
+    return h.hexdigest()
+
+
+def load_parse_cache(backend: str) -> None:
+    global _PARSE_CACHE, _PARSE_CACHE_PATH
+    _PARSE_CACHE_PATH = ARTIFACTS_DIR / "benchmarks" / f"parse_cache_{backend}.json"
+    if _PARSE_CACHE_PATH.exists():
+        try:
+            _PARSE_CACHE = json.loads(_PARSE_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            _PARSE_CACHE = {}
+    else:
+        _PARSE_CACHE = {}
+
+
+def save_parse_cache() -> None:
+    if _PARSE_CACHE_PATH is None or not _PARSE_CACHE_DIRTY:
+        return
+    _PARSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _PARSE_CACHE_PATH.write_text(json.dumps(_PARSE_CACHE, indent=0), encoding="utf-8")
+
+
 def _llm_parse_triage(narrative: str, llm) -> dict:
-    """One direct LLM completion -> structured triage fields (best-effort)."""
-    raw = llm.call(_PARSE_PROMPT.format(narrative=narrative))
+    """One direct LLM completion -> structured triage fields (best-effort).
+
+    Cached by (prompt, narrative); a cache hit makes no LLM call.
+    """
+    global _PARSE_CACHE_DIRTY, _PARSE_CACHE_HITS, _PARSE_CACHE_MISSES
+    key = _parse_cache_key(narrative)
+    if key in _PARSE_CACHE:
+        _PARSE_CACHE_HITS += 1
+        return _PARSE_CACHE[key]
+    _PARSE_CACHE_MISSES += 1
+    raw = llm.call(_ACTIVE_PARSE_PROMPT.format(narrative=narrative))
     s = str(raw).strip()
     s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.I | re.S).strip()
     m = re.search(r"\{.*\}", s, flags=re.S)
@@ -336,22 +421,33 @@ def _llm_parse_triage(narrative: str, llm) -> dict:
             obj = json.loads(m.group(0))
         except json.JSONDecodeError:
             obj = {}
+    if obj:  # only cache successful parses, so failures can be retried later
+        _PARSE_CACHE[key] = obj
+        _PARSE_CACHE_DIRTY = True
     return obj
 
 
-def run_parser_llm_bypass(case: dict, llm) -> dict:
+def run_parser_llm_bypass(case: dict, llm, clinicalize: bool = False) -> dict:
     """Parse the narrative with a direct LLM call, then score via tool-direct.
     Overrides only the free-text-parsed triage fields; everything else (EMS
     vitals, PMH, prior-admission count, all nurse inputs) is kept from the case,
-    matching how the E2E crew sources them from interactive (monkeypatched) tools."""
+    matching how the E2E crew sources them from interactive (monkeypatched) tools.
+
+    When ``clinicalize`` is True, the parsed chief complaint is passed through the
+    deterministic lay->clinical map (``clinicalize_complaint``) before it reaches
+    the tools. This is the only difference from the baseline parser-llm run, so
+    the accuracy delta isolates the map's value. The map is applied ONLY to the
+    parsed free text here — never to the tabular complaint in ``tool_direct`` —
+    so the reference modes stay clean."""
     parsed = _llm_parse_triage(case["narrative"], llm)
     ti = dict(case["triage_inputs"])
 
     cc = parsed.get("chief_complaints")
     if isinstance(cc, list):
         cc = ", ".join(str(x) for x in cc)
-    if isinstance(cc, str) and cc.strip():
-        ti["chief_complaints"] = cc.strip()
+    cc_raw = cc.strip() if isinstance(cc, str) else ""
+    if cc_raw:
+        ti["chief_complaints"] = clinicalize_complaint(cc_raw) if clinicalize else cc_raw
 
     age = _coerce_int(parsed.get("age"))
     if age is not None:
@@ -379,8 +475,11 @@ def run_parser_llm_bypass(case: dict, llm) -> dict:
     pmh_json, med_json = _lookup_blocks(case)
     out = run_tool_direct(case2, pmh_lookup_json=pmh_json, med_lookup_json=med_json)
     # Surface parser output for the NL-fidelity report (same shape as E2E).
+    # `complaints` is what the tools saw (clinicalized when enabled); `complaints_raw`
+    # is the verbatim LLM parse, so the report can measure the map's coverage.
     out["parser"] = {
         "complaints": [ti["chief_complaints"]],
+        "complaints_raw": [cc_raw] if cc_raw else [ti["chief_complaints"]],
         "age": ti["age"], "gender": ti["gender"],
         "arrival_transport": ti["arrival_transport"], "pain": ti["pain_score"],
     }
@@ -758,7 +857,9 @@ def print_nl_fidelity(cases, mode_preds):
     (the E2E crew or the MedGemma parser-llm bypass). Orchestration-independent,
     so it is the fair Flash-vs-MedGemma anchor."""
     age_ok = gen_ok = trans_ok = 0
-    comp_jacc = []
+    comp_jacc = []        # Jaccard on what the tools saw (clinicalized when on)
+    comp_jacc_raw = []    # Jaccard on the verbatim LLM parse (map off)
+    map_rewrote = 0       # cases where clinicalize changed the parsed complaint
     n = 0
     for c in cases:
         pr = mode_preds.get(c["stay_id"])
@@ -776,18 +877,30 @@ def print_nl_fidelity(cases, mode_preds):
             ", ".join(ps.get("complaints", []))).split())
         if truth_tok or got_tok:
             comp_jacc.append(len(truth_tok & got_tok) / len(truth_tok | got_tok))
+        raw_norm = normalize_complaint_text(", ".join(ps.get("complaints_raw", [])))
+        got_norm = normalize_complaint_text(", ".join(ps.get("complaints", [])))
+        raw_tok = set(raw_norm.split())
+        if truth_tok or raw_tok:
+            comp_jacc_raw.append(len(truth_tok & raw_tok) / len(truth_tok | raw_tok))
+        if raw_norm != got_norm:
+            map_rewrote += 1
     jacc = float(np.mean(comp_jacc)) if comp_jacc else float("nan")
+    jacc_raw = float(np.mean(comp_jacc_raw)) if comp_jacc_raw else float("nan")
     if n:
         print(f"  cases with parser output:        {n}")
         print(f"  age extracted correctly:         {age_ok}/{n}")
         print(f"  gender extracted correctly:      {gen_ok}/{n}")
         print(f"  arrival transport correct:       {trans_ok}/{n}")
-        print(f"  mean complaint token Jaccard:    {jacc:.3f}"
-              if comp_jacc else "  mean complaint token Jaccard:    n/a")
+        print(f"  complaint Jaccard (raw parse):   {jacc_raw:.3f}"
+              if comp_jacc_raw else "  complaint Jaccard (raw parse):   n/a")
+        print(f"  complaint Jaccard (-> tools):    {jacc:.3f}"
+              if comp_jacc else "  complaint Jaccard (-> tools):    n/a")
+        print(f"  lay->clinical map rewrote:       {map_rewrote}/{n} complaints")
     else:
         print("  (no parser output captured)")
     return {"n": n, "age_ok": age_ok, "gender_ok": gen_ok,
-            "transport_ok": trans_ok, "complaint_jaccard_mean": jacc}
+            "transport_ok": trans_ok, "complaint_jaccard_mean": jacc,
+            "complaint_jaccard_raw_mean": jacc_raw, "map_rewrote": map_rewrote}
 
 
 # ===========================================================================
@@ -805,6 +918,15 @@ def main():
                         help="Add the MedGemma-only parser-llm bypass mode (one "
                              "direct LLM parse -> deterministic tool-direct). Use "
                              "when MedGemma can't drive the agentic crew.")
+    parser.add_argument("--clinicalize", action="store_true",
+                        help="Apply the deterministic lay->clinical chief-complaint "
+                             "map (preprocessing.clinicalize_complaint) to the "
+                             "parser-llm output before scoring. Re-runs from the "
+                             "parse cache, so this costs no extra LLM calls.")
+    parser.add_argument("--plain-prompt", action="store_true",
+                        help="Use the original parser prompt (no clinical-term "
+                             "steering) — reproduces the documented baseline. Omit "
+                             "to use the clinical-term prompt (Track 1).")
     parser.add_argument("--dump-json", default=None,
                         help="Write the scored metrics + backend tag to this JSON "
                              "path (for comparing flash vs medgemma runs).")
@@ -922,16 +1044,27 @@ def main():
     # compared in the SAME mode — isolating parser quality from agentic tool-calling.
     if args.parser_llm:
         from proiect_licenta.llm_config import get_parse_llm
+        global _ACTIVE_PARSE_PROMPT
+        _ACTIVE_PARSE_PROMPT = _PARSE_PROMPT_PLAIN if args.plain_prompt else _PARSE_PROMPT
         llm = get_parse_llm()
-        print_section("MODE: parser-llm (direct LLM parse -> tool-direct, no agentic tool-calling)")
+        load_parse_cache(backend)
+        label = "parser-llm (direct LLM parse -> tool-direct, no agentic tool-calling)"
+        label += "  [plain prompt]" if args.plain_prompt else "  [clinical-term prompt]"
+        if args.clinicalize:
+            label += "  [+lay->clinical map]"
+        print_section(f"MODE: {label}")
         preds["parser_llm"] = {}
         modes.append("parser_llm")
         for i, c in enumerate(cases, 1):
             try:
-                preds["parser_llm"][c["stay_id"]] = run_parser_llm_bypass(c, llm)
+                preds["parser_llm"][c["stay_id"]] = run_parser_llm_bypass(
+                    c, llm, clinicalize=args.clinicalize)
                 print(f"  [{i}/{len(cases)}] stay {c['stay_id']}: ok")
             except Exception as e:
                 print(f"  [{i}/{len(cases)}] stay {c['stay_id']}: ERROR {type(e).__name__}: {e}")
+        save_parse_cache()
+        print(f"  parse cache: {_PARSE_CACHE_HITS} hits / {_PARSE_CACHE_MISSES} "
+              f"LLM calls -> {_PARSE_CACHE_PATH}")
 
     # E2E (last — heaviest, runs the LLM crew)
     if not args.skip_e2e:
@@ -1025,7 +1158,9 @@ def main():
     if args.dump_json:
         Path(args.dump_json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.dump_json).write_text(json.dumps(
-            {"llm_backend": backend, "modes": modes, "metrics": rows,
+            {"llm_backend": backend, "clinicalize": bool(args.clinicalize),
+             "parse_prompt": "plain" if args.plain_prompt else "clinical",
+             "modes": modes, "metrics": rows,
              "nl_fidelity": nl_fidelity, "n_cases": len(cases)}, indent=2), encoding="utf-8")
         print(f"\n  Metrics dumped -> {args.dump_json}")
 

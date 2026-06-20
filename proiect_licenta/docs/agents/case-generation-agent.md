@@ -80,10 +80,19 @@ facts" rule. It rejects (→ regenerate, up to 3 attempts, then flag):
 - any **fabricated clinical measurement** in the opening narrative
   (blood-pressure-like `NNN/NN`, `bpm`, `mmHg`, temperature/O2 tokens) — those
   belong to the nurse stage, not the patient's opening description.
+- **(added 2026-06-20) clinical-jargon leakage** — the narrative must stay lay
+  (no `dyspnea`/`syncope`/`hematuria`/`n/v`/`s/p`/…); guards the risk that a
+  medical-domain generator (MedGemma) pre-clinicalizes the input and unfairly
+  inflates parser accuracy (the §7 anti-pattern in `../llm-backend.md`);
+- **(added 2026-06-20) completeness** — every comma-separated complaint must be
+  voiced (no dropped secondary complaints). Uses a separate `_COMPLETENESS_ANCHORS`
+  set, **deliberately independent of the parser-side `clinicalize_complaint` map**,
+  so generation isn't biased toward the eval-time vocabulary. Conservative: only
+  common families, 0/150 false positives on the existing set.
 
-It deliberately does **not** score complaint wording: faithful re-extraction of
-the complaint from the paraphrased narrative is exactly what the E2E benchmark
-measures, so penalizing paraphrase here would defeat the purpose.
+It deliberately does **not** score complaint *wording* (lay paraphrase is the
+point — faithful re-extraction is what the E2E benchmark measures); it only
+enforces that no complaint is *dropped* and no clinical jargon leaks in.
 
 ---
 

@@ -28,10 +28,19 @@ case_generator:
       pipeline — never put them in this opening description.
     - You MAY paraphrase clinical shorthand into everyday words (e.g. "abd pain" ->
       "bad stomach pain", "SOB" -> "trouble breathing", "n/v" -> "nausea and
-      vomiting"), but you must NOT add a complaint that isn't in the list or drop one
-      that is.
+      vomiting"), but you must NOT add a complaint that isn't in the list.
+    - COMPLETENESS: voice EVERY complaint in the list — do not drop any, including
+      secondary ones. If there are several (e.g. "abd pain, n/v"), a real patient
+      would mention all of them, so weave each into the description ("my stomach is
+      killing me and I keep throwing up"). It is better to use an extra sentence
+      than to leave a complaint out.
     - If a pain score is given, you may mention how much it hurts, but any number you
       state must match it exactly. If age is given, any age you state must match
       exactly. Prefer weaving these in naturally rather than reciting them.
-    - Keep it to 1-3 sentences. Warm, plain language. No clinical jargon, no JSON
-      keys spoken aloud, no measurements.
+    - Keep it short and natural — 1-3 sentences for a single complaint, up to 4 if
+      that is what it takes to mention every complaint. Warm, plain, everyday
+      language as the patient would actually speak.
+    - STAY LAY: use ONLY words a layperson would say. Do NOT use clinical terms or
+      abbreviations (e.g. NOT "dyspnea", "syncope", "hematuria", "epistaxis",
+      "BRBPR", "n/v", "s/p"); say "trouble breathing", "passed out", "blood in my
+      urine", "nosebleed", etc. No JSON keys spoken aloud, no measurements.

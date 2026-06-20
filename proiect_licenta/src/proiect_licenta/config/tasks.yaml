@@ -16,8 +16,17 @@ parse_symptoms_task:
 
     Required information:
     1. Chief complaints - what symptoms/issues brought them to the ED.
-       Use standard ED terminology (e.g., "abd pain", "chest pain", "dyspnea",
-       "headache", "s/p fall", "laceration", "fever", "n/v", "back pain", etc.)
+       Translate the patient's everyday wording into STANDARD emergency-department
+       terminology rather than recording it verbatim — this aligns the complaint
+       with how it is charted at triage and how the prediction models were
+       trained. For example: "really bad stomach pain" -> "abd pain"; "can't
+       catch my breath"/"winded" -> "dyspnea"; "throwing up" -> "n/v"; "passed
+       out" -> "syncope"; "brain bleed" -> "intracranial hemorrhage"; "bright red
+       blood in my stool" -> "BRBPR"; "blood in my urine" -> "hematuria"; "I'm
+       suicidal" -> "suicidal ideation". Record EVERY distinct complaint the
+       patient mentions (e.g., "chest pain, dyspnea"). Standard examples: "abd
+       pain", "chest pain", "dyspnea", "headache", "s/p fall", "laceration",
+       "fever", "n/v", "back pain".
     2. Pain score - 0 to 10 (0 = no pain, 10 = worst imaginable).
     3. Age - patient's age in years.
     4. Gender - "male" or "female".

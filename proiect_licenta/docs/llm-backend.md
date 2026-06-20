@@ -117,7 +117,10 @@ scores each against MIMIC truth. Modes relevant to the backend comparison:
 | `e2e` | yes | the **full agentic crew** on the narrative. Flash only — MedGemma can't (tool-calling). |
 
 CLI flags: `--llm-backend {flash,medgemma}`, `--parser-llm`, `--skip-e2e`,
-`--dump-json <path>` (writes per-mode metrics **and** the NL-fidelity block).
+`--dump-json <path>` (writes per-mode metrics **and** the NL-fidelity block),
+`--plain-prompt` (original parser prompt vs the clinical-term default — §5c Track 1),
+`--clinicalize` (apply the lay→clinical map to parser output — §5c Track 2; re-runs free
+from the parse cache). The dump records `parse_prompt` + `clinicalize` for auditability.
 
 ### The fair cross-backend anchors
 1. **Same-mode `parser_llm`** — identical deterministic downstream, differing only in which
@@ -236,11 +239,12 @@ Flash-vs-MedGemma delta above is unaffected by it. `feature_vector` *ungated* (.
 fair comparator for the gated `parser_llm`; `feature_vector_gated` (.500) is.
 
 Roadmap for *shrinking* this gap (system-side, not by changing the benchmark — see §7): (1) prompt
-the LLM to emit the **clinical** chief-complaint term, not a verbatim paraphrase; (2) a deterministic
-lay→clinical synonym map in `normalize_complaint_text`; (3) semantic complaint embeddings
-(re-openable: the prior Bio_ClinicalBERT revert was on *exact* complaints, never under paraphrase);
-(4) paraphrase data-augmentation at training time. (1)+(2) are an afternoon and are exactly where a
-medical-domain model could extend its edge.
+the LLM to emit the **clinical** chief-complaint term, not a verbatim paraphrase — **DONE, §5c**;
+(2) a deterministic lay→clinical map — **DONE (`clinicalize_complaint`), §5c**; (3) semantic
+complaint embeddings (re-openable: the prior Bio_ClinicalBERT revert was on *exact* complaints,
+never under paraphrase); (4) paraphrase data-augmentation at training time. (1)+(2) each recover
+~10–12pp of the diagnosis@1 gap on Flash (§5c) — and are exactly where a medical model's
+instruction-following may change the balance (MedGemma pass pending).
 
 ### Benchmark bug found and fixed during interpretation
 The parser prompt offered an `"unknown"` arrival-transport option the **live** parser
@@ -252,6 +256,85 @@ artifact rewarding default-guessing, not a parser-quality difference. Aligning t
 the live 3-value contract (walk-in default, no "unknown") brought **both to 19/20** (the single
 genuine `unknown`-truth PICC case is an inherent miss for both). This is why the bypass must
 replicate the live parser's contract exactly.
+
+---
+
+## 5c. Shrinking the NL-parse gap — clinical-term prompt + lay→clinical map (2026-06-20)
+
+§5b isolated the ~10–13pp diagnosis@1 NL-parse cost to the **chief-complaint being parsed
+from lay free text**. Two system-side levers attack it directly (both fair — the lay→clinical
+bridge stays *inside* the system-under-test; we do **not** clinicalize the narrative input):
+
+- **Track 1 — clinical-term parser prompt.** The parser is steered to emit the **standard
+  ED complaint term** instead of a verbatim paraphrase ("brain bleed" → "intracranial
+  hemorrhage", "bright red blood in my stool" → "BRBPR"). Applied symmetrically to the
+  benchmark `_PARSE_PROMPT` and the live `tasks.yaml` `parse_symptoms_task`. The benchmark
+  keeps both a `--plain-prompt` variant (reproduces the documented baseline) and the
+  clinical-term default, so the prompt's effect is measurable in isolation.
+- **Track 2 — deterministic lay→clinical map.** `preprocessing.clinicalize_complaint()`
+  (`LAY_TO_CLINICAL`) rewrites lay phrases to the clinical terms the models were trained on.
+  **Applied to parser output ONLY** — never to the tabular complaint, never at training.
+
+**Design note — why `clinicalize_complaint` is separate from `normalize_complaint_text`.**
+The obvious approach (edit `normalize_complaint_text` in place) would change the **shared
+TF-IDF vocabulary and force retraining** every dependent model, because MIMIC triage staff
+already chart many semi-lay terms (`difficulty breathing` ×268, `dizzy` ×734, `lightheaded`
+×2016, `weak` ×271, `chest tightness` ×145, `allergic reaction` ×2554, `head injury` ×3265,
+`vaginal bleeding` ×2540, `migraine` ×207, `passed out` ×65, …). Keeping the map as a
+**parser-output-only** step leaves the vectorizer and all trained models **byte-identical**
+(verified: `clinicalize_complaint` is a 0-mismatch no-op on the top clinical complaints), and
+leaves the benchmark's `tool_direct`/`feature_vector` reference modes uncontaminated — so the
+accuracy delta from enabling it cleanly isolates the map's value. Map targets are anchored to
+the MIMIC training `chiefcomplaint` vocabulary; lay keys come from general/consumer-health
+wording + the inverse of the case-generator's documented paraphrase rules — **not** from
+inspecting eval cases (non-circular). A useful by-product finding: the chart vocabulary is
+already semi-lay, so the gap is **not purely vocabulary**.
+
+**Cost infra.** The benchmark now caches each LLM parse keyed by (prompt, narrative) under
+`artifacts/benchmarks/parse_cache_{backend}.json`. The deterministic map is applied *after*
+the parse, so toggling `--clinicalize` re-runs from cache with **zero LLM calls**; a prompt
+change alters the key and self-invalidates. This makes the 2×2 below cost only the two
+prompt variants' parses.
+
+### Flash 2×2 quick-read (existing 150 cases, `feature_vector_gated` ceiling = .500 diag@1)
+Audit artifact: `artifacts/benchmarks/clinicalize_2x2_flash_n150.json` (+ the four raw dumps
+under `artifacts/benchmarks/quickread/`).
+
+| target | ceiling | base (plain) | +map | +prompt | +both |
+|---|---|---|---|---|---|
+| diagnosis @1 | .500 | .367 | .469 | **.490** | .490 |
+| diagnosis @3 | .714 | .520 | .602 | .633 | .633 |
+| department @1 | .622 | .541 | **.582** | .561 | .561 |
+| ICD exact @5 | .327 | .255 | .316 | .347 | .347 |
+| ICD union | .541 | .418 | .469 | .490 | .490 |
+| ESI acuity | .720 | .653 | .647 | .660 | .653 |
+| disposition | .873 | .740 | .773 | .793 | .793 |
+| complaint Jaccard | — | .420 | .531 (map rewrote 41/150) | **.621** | .621 (map rewrote 2/150) |
+
+**Findings.**
+- **The map alone recovers +10.2pp diag@1 (.367→.469, ~77% of the 13.3pp gap) at zero LLM
+  cost and zero retraining**, and wins department@1 (.582 vs .561) — not strictly dominated.
+- **The clinical-term prompt alone recovers +12.2pp (.367→.490, ~92%)** and lifts raw
+  complaint Jaccard .420→.621 (the LLM emits clinical terms directly).
+- **The two levers are redundant, not additive** (`+both` == `+prompt`; on top of the prompt
+  the map finds only 2/150 complaints to rewrite) — both fix the same lay→clinical alignment.
+- **Hypothesis for the MedGemma pass:** the map is the deterministic safety net for when the
+  LLM does *not* follow the clinical-term instruction, so it should help a less
+  instruction-compliant 4B model **more** than it helped Flash (where it was redundant).
+- ESI acuity is unaffected (±1 case) — it is not complaint-dominated.
+
+**Caveats.** Quick read on the existing 150 (no dev/test split). The clean headline still
+needs the 250-case completeness regen + stratified dev/test split (§7), and the MedGemma pass.
+
+### Track 3 — case completeness + stay-lay guard (fair)
+The case-gen prompt (`case_generation_{agents,tasks}.yaml`) now requires **every** complaint
+to be voiced in lay words (no dropped secondary complaints; sentence cap relaxed to fit
+them). `case_generation.validate_grounding` gained two checks, both **independent of the
+Track-2 eval map** (so generation isn't biased toward it): a **clinical-jargon leakage
+guard** (keeps narratives lay — guards the medical-model over-clinicalization risk in §7) and
+a **completeness check** using a separate `_COMPLETENESS_ANCHORS` set (flags dropped
+complaints for common families; conservative, 0/150 false positives on the existing set,
+fires on 22/43 multi-complaint cases when a complaint is dropped).
 
 ---
 
@@ -277,7 +360,11 @@ uv run python benchmarks/compare_case_generation.py
   (`PYTHONUTF8=1`) so the `≥`/`κ` prints don't crash under cp1252 when stdout is redirected.
 - **Run Experiment B** (case-generation grounding quality, MedGemma vs Flash) — still pending;
   needs a live MedGemma tunnel for a ~50-min run.
-- **Make the generated narratives more complaint-faithful (Experiment-B-adjacent), carefully.**
+- ~~**Make the generated narratives more complaint-faithful (Experiment-B-adjacent), carefully.**~~
+  **DONE (2026-06-20, §5c Track 3)** — the case-gen prompt now requires every complaint voiced in
+  lay words, and `validate_grounding` gained a completeness check + a stay-lay clinical-jargon
+  guard (both independent of the eval map). The clean headline still needs the 250-case regen.
+  Original rationale retained for the record:
   The ~10–13pp NL gap is partly that narratives use lay paraphrase and sometimes drop secondary
   tabular terms. **Fair to fix:** ensure the narrative *completely and faithfully* conveys what a
   patient could plausibly state, in natural lay language (removes the dropped-info artifact;
@@ -299,6 +386,8 @@ uv run python benchmarks/compare_case_generation.py
 | Path | Role |
 |---|---|
 | `src/proiect_licenta/llm_config.py` | `get_llm()` / `get_parse_llm()` backend selection |
+| `src/proiect_licenta/preprocessing.py` | `clinicalize_complaint()` + `LAY_TO_CLINICAL` (§5c Track 2, parser-output only) |
+| `artifacts/benchmarks/clinicalize_2x2_flash_n150.json` | curated audit of the §5c Flash 2×2 (+ raw dumps in `artifacts/benchmarks/quickread/`) |
 | `src/proiect_licenta/crew.py` | `llm=get_llm()` on the 4 live agents |
 | `src/proiect_licenta/case_generation.py` | `llm=get_llm()` on case generator; `out_dir` param |
 | `src/proiect_licenta/main.py` | `generate_cases --backend` |

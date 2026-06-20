@@ -17,14 +17,19 @@ generate_case_task:
       "other", "unknown").
     - pain_score: 0-10, or "unknown".
 
-    Write ONE realistic first-person sentence or two (max three) describing, in a
-    layperson's own words, why they came to the emergency department. Voice ONLY
-    the facts above. Paraphrase clinical shorthand into everyday language, but do
-    not add, drop, or alter any complaint. Do NOT mention vital signs, medications,
-    past medical history, lab values, or diagnoses — those are collected later.
-    Any age or pain number you state must match the data exactly; prefer to weave
-    them in naturally (e.g. mention arriving by ambulance only if arrival_transport
-    says so).
+    Write a realistic first-person description, in a layperson's own words, of why
+    they came to the emergency department. Voice ONLY the facts above. Paraphrase
+    clinical shorthand into everyday language, but do not add or alter any complaint
+    — and do NOT drop any: mention EVERY complaint in chief_complaints, including
+    secondary ones (e.g. for "abd pain, n/v" say something like "my stomach really
+    hurts and I keep throwing up"). Keep it natural and short: 1-3 sentences for a
+    single complaint, up to 4 only if needed to include every complaint. Use only
+    everyday words a patient would actually say — no clinical terms or abbreviations
+    (say "trouble breathing", not "dyspnea"; "passed out", not "syncope"). Do NOT
+    mention vital signs, medications, past medical history, lab values, or diagnoses
+    — those are collected later. Any age or pain number you state must match the
+    data exactly; prefer to weave them in naturally (e.g. mention arriving by
+    ambulance only if arrival_transport says so).
 
     Respond with ONLY valid JSON, nothing else:
     {{

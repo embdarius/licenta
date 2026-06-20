@@ -326,13 +326,104 @@ _PAIN_PAT = re.compile(r"\b(\d{1,2})\s*(?:/\s*10|out of 10)\b", re.I)
 _BP_PAT = re.compile(r"\b\d{2,3}\s*/\s*\d{2,3}\b")          # blood-pressure-like
 _VITAL_NUM_PAT = re.compile(r"\b(?:bpm|mmhg|°|℉|spo2|o2 sat|sat of|temp(?:erature)? of)\b", re.I)
 
+# Clinical jargon a layperson would not say. Flagged so the "stay lay" rule is
+# enforced — important because a medical-domain generator (e.g. MedGemma) may
+# leak clinical vocabulary into the patient voice, which would unfairly inflate
+# downstream parser accuracy (pre-clinicalizing the input; see docs/llm-backend
+# §7). Deliberately only clearly-technical terms/abbreviations to avoid false
+# positives on borderline words a patient might genuinely use.
+_CLINICAL_JARGON_PAT = re.compile(
+    r"\b(?:dyspnea|dyspnoea|syncope|syncopal|hematuria|haematuria|epistaxis|brbpr|"
+    r"melena|haematemesis|hematemesis|emesis|h[ae]morrhage|myocardial|infarction|"
+    r"intracranial|subdural|subarachnoid|tachycardi[ac]|bradycardi[ac]|dysuria|"
+    r"diaphoresis|cephalgia|paresthesia|paraesthesia|ischemi[ac]|cerebrovascular|"
+    r"febrile|afebrile|edema|oedema|n/?v|s/?p|etoh|sob)\b",
+    re.I,
+)
+
+# Generation-only completeness anchors — DELIBERATELY SEPARATE from
+# preprocessing.LAY_TO_CLINICAL (the eval-time lay->clinical map). This detects
+# whether a *lay narrative* covers a complaint, and is intentionally broader, so
+# enforcing completeness here does NOT bias the generator toward the eval map's
+# exact vocabulary (which would quietly inflate the benchmark). Each entry is
+# (clinical trigger tokens that identify the concept from the tabular complaint,
+#  lay/clinical anchor substrings that count as "the patient mentioned it").
+# Conservative by design: complaints whose concept is not listed are never
+# flagged, so the check only enforces completeness for common, well-understood
+# families (which are exactly the multi-complaint combos that get dropped).
+_COMPLETENESS_ANCHORS = [
+    ({"abdominal", "abd", "epigastric", "ruq", "rlq", "luq", "llq"},
+     ("stomach", "belly", "abdom", "tummy", "gut", "epigastr")),
+    ({"chest"}, ("chest",)),
+    ({"dyspnea", "sob", "breath", "breathing"},
+     ("breath", "breathe", "winded", "out of air", "catch my")),
+    ({"n", "v", "nausea", "vomiting", "emesis"},
+     ("nausea", "nause", "vomit", "throw", "threw", "puk", "sick to", "queasy")),
+    ({"headache", "ha", "cephalgia"}, ("head", "migraine")),
+    ({"back"}, ("back",)),
+    ({"fever", "febrile"}, ("fever", "feverish", "temperature", "burning up", "chills", "hot")),
+    ({"dizziness", "dizzy", "vertigo"},
+     ("dizz", "lighthead", "light headed", "spinning", "vertigo", "woozy")),
+    ({"syncope"}, ("passed out", "pass out", "faint", "blacked out", "collapse", "unconscious")),
+    ({"cough"}, ("cough",)),
+    ({"weakness", "weak"}, ("weak", "strength")),
+    ({"fall", "fell"}, ("fell", "fall", "slipped", "tripped")),
+    ({"laceration", "lac", "cut"}, ("cut", "lacerat", "gash", "wound", "slice")),
+    ({"rash"}, ("rash", "hives", "skin", "itch", "breaking out")),
+    ({"seizure", "sz"}, ("seizure", "convuls", "fit", "shaking")),
+    ({"brbpr", "hematuria", "epistaxis", "bld", "bleeding", "hemorrhage"},
+     ("blood", "bleed")),
+    ({"palpitations"}, ("palpitat", "heart rac", "racing heart", "pounding", "flutter", "skip")),
+    ({"sore", "throat"}, ("throat",)),
+    ({"diarrhea", "diarrhoea"}, ("diarr", "loose stool", "watery", "the runs")),
+    ({"dysuria"}, ("pee", "urinat", "bladder")),
+    ({"si", "suicidal"}, ("suicid", "kill myself", "hurt myself", "end my life", "end it")),
+    ({"anxiety"}, ("anxi", "panic", "nervous")),
+    ({"hyperglycemia", "hypoglycemia"}, ("sugar", "glucose", "diabet")),
+    ({"constipation"}, ("constipat", "bowel", "can't poop", "cant poop", "haven't gone")),
+    ({"pain"}, ("pain", "hurt", "ache", "sore", "killing")),  # generic "X pain" fallback
+]
+
+
+def _alpha_tokens(s: str) -> set:
+    return set(re.findall(r"[a-z]+", str(s).lower()))
+
+
+def _dropped_complaints(complaint_str: str, narrative: str) -> list:
+    """Complaints from the tabular row that appear to be MISSING from the lay
+    narrative. Conservative: only checks complaint concepts we have anchors for;
+    unknown concepts are skipped (never flagged). Independent of the eval-time
+    lay->clinical map by construction (uses _COMPLETENESS_ANCHORS)."""
+    nt = " " + str(narrative).lower() + " "
+    dropped = []
+    for comp in (c.strip() for c in str(complaint_str).split(",") if c.strip()):
+        toks = _alpha_tokens(comp)
+        if not toks:
+            continue
+        triggered = [anch for (trig, anch) in _COMPLETENESS_ANCHORS if toks & trig]
+        if not triggered:
+            continue  # no anchor knowledge for this concept -> don't flag
+        covered = any(a in nt for anch in triggered for a in anch) or any(
+            len(tok) > 3 and tok in nt for tok in toks
+        )
+        if not covered:
+            dropped.append(comp)
+    return dropped
+
 
 def validate_grounding(narrative: str, fields: dict) -> tuple:
-    """Return (ok, reasons). Focuses on *invention*: any stated age/pain must
-    match the row, and the opening narrative must not contain fabricated
-    clinical measurements (BP/HR/temp/O2 — those belong to the nurse stage).
-    Complaint wording is intentionally NOT scored here: faithful re-extraction
-    of the complaint is exactly what the E2E test measures."""
+    """Return (ok, reasons). Checks three things:
+
+    1. *Invention* — any stated age/pain must match the row, and the opening
+       narrative must not contain fabricated clinical measurements (BP/HR/temp/O2,
+       which belong to the nurse stage).
+    2. *Clinical leakage* — the narrative must stay in lay language (no clinical
+       jargon/abbreviations), so a medical-domain generator can't pre-clinicalize
+       the input and unfairly inflate parser accuracy.
+    3. *Completeness* — every tabular complaint should be voiced; a dropped
+       complaint is flagged (conservatively, for common concepts) so the retry
+       loop regenerates. Faithful lay *wording* is still NOT scored — that
+       paraphrase is exactly what the E2E test measures."""
     reasons = []
     if not narrative or not narrative.strip():
         return False, ["empty narrative"]
@@ -357,6 +448,16 @@ def validate_grounding(narrative: str, fields: dict) -> tuple:
         reasons.append("narrative contains a blood-pressure-like number (vitals are nurse-stage)")
     if _VITAL_NUM_PAT.search(text):
         reasons.append("narrative contains a clinical-measurement token (bpm/mmHg/temp/O2)")
+
+    # Clinical-jargon leakage (narrative must stay lay)
+    jargon = sorted({m.group(0).lower() for m in _CLINICAL_JARGON_PAT.finditer(text)})
+    if jargon:
+        reasons.append(f"narrative uses clinical jargon (should be lay): {', '.join(jargon)}")
+
+    # Completeness — flag dropped complaints
+    dropped = _dropped_complaints(t["chief_complaints"], text)
+    if dropped:
+        reasons.append(f"narrative omits complaint(s): {', '.join(dropped)}")
 
     return (len(reasons) == 0), reasons
 
