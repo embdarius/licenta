@@ -178,6 +178,70 @@ backends' dumps, confirming only the parser LLM varied.
 - **Headline.** A 4B open medical model matches a strong proprietary general model at clinical
   NL parsing in this pipeline — with the honest caveat that n=20 is small.
 
+## 5b. Scaled to 150 cases — the headline result (2026-06-17)
+
+The n=20 pilot couldn't separate the models. We scaled to **150 cases (98 admitted / 52
+discharged)** — 1 case now ≈ 1.0pp on diagnosis/department/ICD (~0.67pp on acuity/dispo).
+Both backends ran the **identical lookup-enabled `parser_llm` bypass** (one direct LLM parse →
+deterministic gated tool-direct, with the prior-encounter PMH + reconciled-med EHR lookup fed
+to the tools). **Methodology check passed** — the four LLM-free modes are byte-identical across
+both dumps. Machine-readable results: `artifacts/benchmarks/comparison_n150.json` (+ the raw
+`parser_flash_n150.json` / `parser_medgemma_n150.json`).
+
+| target | `feature_vector_gated` (ceiling) | **Flash** parse | **MedGemma** parse | Δ (MG−Flash) |
+|---|---|---|---|---|
+| ESI acuity | .720 | **.660** | .620 | **−4.0pp** |
+| disposition | .873 | .747 | **.760** | +1.3pp |
+| diagnosis @1 | .500 | .367 | **.398** | **+3.1pp** |
+| diagnosis @3 | .714 | .520 | **.561** | **+4.1pp** |
+| department @1 | .622 | .541 | **.551** | +1.0pp |
+| department @3 | .806 | .653 | .653 | 0.0pp |
+| ICD exact @5 | .327 | .255 | **.276** | +2.1pp |
+| ICD union | .541 | .418 | **.439** | +2.1pp |
+| complaint Jaccard | — | **.425** | .413 | −1.2pp |
+
+**Finding.** MedGemma-4B has a **small but directionally consistent edge on every
+clinical-content target** (diagnosis, department, disposition, ICD) — *despite* a marginally
+lower complaint-token Jaccard. It paraphrases the complaint into more **clinically-aligned
+terminology** (better TF-IDF→model signal) even when it overlaps the raw tabular tokens slightly
+less. Flash wins **ESI acuity** (+4.0pp). Each delta is 1–4 cases (within the per-metric ~±7–10pp
+95% CI), so the signal is the *consistency of direction across five clinical targets*, not any
+single number — a meaningful sharpening of the n=20 tie, but still "modest, consistent edge for
+the medical model," not a decisive win. MedGemma produced parseable JSON for all 150 parses
+(0 errors), confirming it is a competent **parser** even though it can't drive the agentic crew.
+
+### Why the LLM parse costs ~10–13pp, and how to read it fairly
+
+The four LLM-free columns are designed to separate three losses, so the parser gap is isolated
+cleanly. For diagnosis@1 (n=150):
+
+| stage | diag@1 | loss isolated |
+|---|---|---|
+| `feature_vector` (ungated) | .633 | — model on exact features, **upper bound** (= the tabular `ceiling.json` 64.1%) |
+| `feature_vector_gated` | .500 | **−13.3pp disposition gate** (admit-only diagnosis; dispo sensitivity ~76.5% discards true admits) |
+| `tool_direct_lookup` | .500 | **~0 runtime feature-degradation** — the input-matched runtime path equals the model-path ceiling |
+| `parser_llm` (Flash / MedGemma) | .367 / .398 | **−13.3 / −10.2pp NL parse** — the only remaining gap is the LLM-parsed complaint |
+
+So with **equal features and equal gating**, the residual is attributable *solely* to the chief
+complaint being parsed from free text rather than read exactly from the chart. The mechanism is a
+**clinical-shorthand ↔ lay-language gap**: the synthetic patient says "really bad **stomach**
+pain" for the tabular `Abd pain`, "**brain bleed**" for `SDH`, "bright red blood in my stool" for
+`BRBPR`. These are semantic paraphrases that abbreviation-expansion can't bridge, so the
+complaint's TF-IDF vector shifts and the (complaint-dominated) diagnosis/department/ICD models
+move with it. Complaint Jaccard vs the tabular `chief_complaint` is only ~0.42 — and the parser
+is *not* at fault (it extracts ~0.42 vs a raw-narrative ceiling of ~0.06, and parses age/gender/
+transport near-perfectly: 150/137/144). It is the irreducible cost of free-text intake vs a
+perfectly-charted complaint, and it is **equal in structure for both backends**, so the
+Flash-vs-MedGemma delta above is unaffected by it. `feature_vector` *ungated* (.633) is **not** the
+fair comparator for the gated `parser_llm`; `feature_vector_gated` (.500) is.
+
+Roadmap for *shrinking* this gap (system-side, not by changing the benchmark — see §7): (1) prompt
+the LLM to emit the **clinical** chief-complaint term, not a verbatim paraphrase; (2) a deterministic
+lay→clinical synonym map in `normalize_complaint_text`; (3) semantic complaint embeddings
+(re-openable: the prior Bio_ClinicalBERT revert was on *exact* complaints, never under paraphrase);
+(4) paraphrase data-augmentation at training time. (1)+(2) are an afternoon and are exactly where a
+medical-domain model could extend its edge.
+
 ### Benchmark bug found and fixed during interpretation
 The parser prompt offered an `"unknown"` arrival-transport option the **live** parser
 (`tasks.yaml`: `ambulance`/`helicopter`/`walk_in`, walk-in default) does not have. Of 20 cases,
@@ -206,9 +270,25 @@ uv run python benchmarks/compare_case_generation.py
 ---
 
 ## 7. Future work
-- **Scale 20 → ~100 cases** for tighter confidence intervals
-  (`generate_cases --backend flash --n-admitted 65 --n-discharged 35`, then re-run Experiment A).
-- **Run Experiment B.**
+- ~~**Scale 20 → ~100 cases**~~ **DONE (2026-06-17)** — scaled to **150** (`generate_cases
+  --backend flash --n-admitted 98 --n-discharged 52`); see §5b. Required a memory fix to
+  `case_generation.py` (`sample_and_extract` freed the 418K disposition frame before the nurse
+  loader — two full MIMIC frames at once OOM'd a 14 GB machine) and forcing UTF-8 I/O
+  (`PYTHONUTF8=1`) so the `≥`/`κ` prints don't crash under cp1252 when stdout is redirected.
+- **Run Experiment B** (case-generation grounding quality, MedGemma vs Flash) — still pending;
+  needs a live MedGemma tunnel for a ~50-min run.
+- **Make the generated narratives more complaint-faithful (Experiment-B-adjacent), carefully.**
+  The ~10–13pp NL gap is partly that narratives use lay paraphrase and sometimes drop secondary
+  tabular terms. **Fair to fix:** ensure the narrative *completely and faithfully* conveys what a
+  patient could plausibly state, in natural lay language (removes the dropped-info artifact;
+  improves realism). **NOT fair:** make the narrative use the tabular *clinical* terminology
+  (`subdural hematoma` instead of `brain bleed`) so tokens match — that is "teaching to the test":
+  real patients speak lay language, so pre-clinicalizing the input moves the lay→clinical bridge
+  *out* of the system-under-test and inflates the parser numbers vs deployment. `feature_vector`
+  with the exact clinical complaint is an **upper bound by design**; the gap is the real cost of
+  free-text intake and should be closed on the **system** side (§5b roadmap), not the input side.
+  A clearly-labeled *clinical-phrasing* narrative variant is fine as an **upper-bound diagnostic**
+  (decomposing vocabulary-vs-information loss) — just never as the headline number.
 - **MedGemma 27B** (A100 + 4-bit AWQ) for a stronger comparison point.
 - **Optional agentic retry** with vLLM `--enable-auto-tool-choice --tool-call-parser pythonic`
   — expected to stay unreliable for a non-function-tuned 4B model (a reportable finding either way).

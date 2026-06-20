@@ -370,7 +370,14 @@ def run_parser_llm_bypass(case: dict, llm) -> dict:
 
     case2 = dict(case)
     case2["triage_inputs"] = ti
-    out = run_tool_direct(case2)
+    # Feed the SAME EHR lookup (prior-encounter PMH + reconciled home meds) that
+    # the feature_vector path's build_features draws on, so the ONLY feature that
+    # differs between this mode and feature_vector is the LLM-parsed chief
+    # complaint — a fair like-for-like parser comparison (equal feature sets).
+    # The lookup uses the original case (its same-complaint-as-prior signal stays
+    # on the tabular complaint, keeping PMH/med parity exact with feature_vector).
+    pmh_json, med_json = _lookup_blocks(case)
+    out = run_tool_direct(case2, pmh_lookup_json=pmh_json, med_lookup_json=med_json)
     # Surface parser output for the NL-fidelity report (same shape as E2E).
     out["parser"] = {
         "complaints": [ti["chief_complaints"]],

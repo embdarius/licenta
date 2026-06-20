@@ -1,6 +1,7 @@
 .env
 __pycache__/
 .DS_Store
+*.log
 
 # Dataset files (raw MIMIC-IV CSVs — too large for git)
 *.csv
@@ -8,6 +9,7 @@ __pycache__/
 data/
 src/proiect_licenta/datasets/
 thesis_article/
+cssc_thesis_competition/
 
 # Trained model artifacts (regeneratable via `uv run train_*`)
 artifacts/

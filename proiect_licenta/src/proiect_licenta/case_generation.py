@@ -477,6 +477,7 @@ def sample_and_extract(
     pre-built feature rows the feature-vector baseline needs.
     """
     # Lazy imports — heavy modules with import-time cost.
+    import gc
     from proiect_licenta.training import train_doctor_disposition as dispo
     from proiect_licenta.training import train_nurse_v3 as nurse_v3
     from proiect_licenta.training import train_doctor_v3 as doctor_v3
@@ -514,9 +515,16 @@ def sample_and_extract(
         idx, test_size=0.2, random_state=42, stratify=y_adm,
     )
     test_idx = np.sort(test_idx)
-    df_test = df_d.iloc[test_idx]
+    admit_rate = float(y_adm.iloc[test_idx].mean())
+    # Keep only the 83K-row test slice and free the full 418K frame BEFORE the
+    # nurse loader runs. Everything downstream (intime map, df_d_sub features) is
+    # a subset of the test split, so this is behaviour-preserving — and it avoids
+    # holding two full MIMIC frames in memory at once, which OOMs on ~14 GB RAM.
+    df_test = df_d.iloc[test_idx].copy()
+    del df_d, y_adm, idx
+    gc.collect()
     print(f"  disposition test split: {len(test_idx):,} rows "
-          f"(admit rate {y_adm.iloc[test_idx].mean():.3f})")
+          f"(admit rate {admit_rate:.3f})")
 
     # ── Nurse v3 loader (admitted, diagnosis/department ground truth) ──
     print("\n[2/4] Loading doctor v3 nurse dataset (admitted, diag/dept labels)...")
@@ -562,14 +570,14 @@ def sample_and_extract(
     # ── Targeted raw pulls (med names, rhythm, vital trajectory) ──
     print("\n[4/4] Pulling raw medication names + cardiac rhythm + vital trajectory...")
     med_names = pull_medrecon_names(chosen)
-    intime_by_stay = dict(zip(df_d["stay_id"].astype(int), df_d["intime"]))
+    intime_by_stay = dict(zip(df_test["stay_id"].astype(int), df_test["intime"]))
     rhythm_readings = pull_rhythm_readings({s: intime_by_stay[s] for s in chosen})
     vital_traj = pull_vital_trajectory({s: intime_by_stay[s] for s in chosen})
 
     # ── Build features ONLY for the sampled rows (memory-safe) ──
     print("\n  Building features for the sampled rows only "
           "(sub-frame transform — memory-safe)...")
-    df_d_sub = df_d[df_d["stay_id"].astype(int).isin(chosen_set)].copy().reset_index(drop=True)
+    df_d_sub = df_test[df_test["stay_id"].astype(int).isin(chosen_set)].copy().reset_index(drop=True)
     feats_d_sub = dispo.build_features(df_d_sub).reset_index(drop=True)
     dsub_row_by_stay = {int(s): i for i, s in enumerate(df_d_sub["stay_id"].astype(int))}
 
