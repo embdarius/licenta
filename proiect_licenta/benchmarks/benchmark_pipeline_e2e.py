@@ -394,10 +394,15 @@ def load_parse_cache(backend: str) -> None:
 
 
 def save_parse_cache() -> None:
+    global _PARSE_CACHE_DIRTY
     if _PARSE_CACHE_PATH is None or not _PARSE_CACHE_DIRTY:
         return
     _PARSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PARSE_CACHE_PATH.write_text(json.dumps(_PARSE_CACHE, indent=0), encoding="utf-8")
+    # Atomic write so a kill mid-write can't corrupt the cache.
+    tmp = _PARSE_CACHE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(_PARSE_CACHE, indent=0), encoding="utf-8")
+    tmp.replace(_PARSE_CACHE_PATH)
+    _PARSE_CACHE_DIRTY = False
 
 
 def _llm_parse_triage(narrative: str, llm) -> dict:
@@ -424,6 +429,10 @@ def _llm_parse_triage(narrative: str, llm) -> dict:
     if obj:  # only cache successful parses, so failures can be retried later
         _PARSE_CACHE[key] = obj
         _PARSE_CACHE_DIRTY = True
+        # Flush incrementally so a killed run (e.g. machine sleep) loses at most
+        # a few parses; the next run resumes cheaply from the cache.
+        if _PARSE_CACHE_MISSES % 20 == 0:
+            save_parse_cache()
     return obj
 
 

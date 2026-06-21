@@ -243,8 +243,8 @@ the LLM to emit the **clinical** chief-complaint term, not a verbatim paraphrase
 (2) a deterministic lay→clinical map — **DONE (`clinicalize_complaint`), §5c**; (3) semantic
 complaint embeddings (re-openable: the prior Bio_ClinicalBERT revert was on *exact* complaints,
 never under paraphrase); (4) paraphrase data-augmentation at training time. (1)+(2) each recover
-~10–12pp of the diagnosis@1 gap on Flash (§5c) — and are exactly where a medical model's
-instruction-following may change the balance (MedGemma pass pending).
+~4–6pp of the diagnosis@1 gap on the frozen 250-case Flash headline (§5c) — about half the gap,
+and exactly where a medical model's instruction-following may change the balance (MedGemma pending).
 
 ### Benchmark bug found and fixed during interpretation
 The parser prompt offered an `"unknown"` arrival-transport option the **live** parser
@@ -296,35 +296,105 @@ the parse, so toggling `--clinicalize` re-runs from cache with **zero LLM calls*
 change alters the key and self-invalidates. This makes the 2×2 below cost only the two
 prompt variants' parses.
 
-### Flash 2×2 quick-read (existing 150 cases, `feature_vector_gated` ceiling = .500 diag@1)
-Audit artifact: `artifacts/benchmarks/clinicalize_2x2_flash_n150.json` (+ the four raw dumps
-under `artifacts/benchmarks/quickread/`).
+### Flash 2×2 — HEADLINE (fresh 250-case completeness cohort, 2026-06-21)
+Cohort: `data/derived/synthetic_cases/cases.json` regenerated with the Track-3 completeness +
+stay-lay prompt (Flash, seed 20260620, 163 admitted / 87 discharged, **250/250 grounding-clean**,
+81 multi-complaint cases). The whole 250 is the frozen test — the map/prompt are non-circular
+(built from training vocab + general knowledge, never tuned on these cases). **Methodology check
+PASS**: the LLM-free `tool_direct` / `tool_direct_lookup` modes are byte-identical across all four
+cells, so only the parser column varied. Audit: `artifacts/benchmarks/clinicalize_2x2_flash_n250.json`
+(+ raw dumps `artifacts/benchmarks/headline_n250/`).
 
-| target | ceiling | base (plain) | +map | +prompt | +both |
-|---|---|---|---|---|---|
-| diagnosis @1 | .500 | .367 | .469 | **.490** | .490 |
-| diagnosis @3 | .714 | .520 | .602 | .633 | .633 |
-| department @1 | .622 | .541 | **.582** | .561 | .561 |
-| ICD exact @5 | .327 | .255 | .316 | .347 | .347 |
-| ICD union | .541 | .418 | .469 | .490 | .490 |
-| ESI acuity | .720 | .653 | .647 | .660 | .653 |
-| disposition | .873 | .740 | .773 | .793 | .793 |
-| complaint Jaccard | — | .420 | .531 (map rewrote 41/150) | **.621** | .621 (map rewrote 2/150) |
+Full table (all targets; Δ = pp vs base):
 
-**Findings.**
-- **The map alone recovers +10.2pp diag@1 (.367→.469, ~77% of the 13.3pp gap) at zero LLM
-  cost and zero retraining**, and wins department@1 (.582 vs .561) — not strictly dominated.
-- **The clinical-term prompt alone recovers +12.2pp (.367→.490, ~92%)** and lifts raw
-  complaint Jaccard .420→.621 (the LLM emits clinical terms directly).
-- **The two levers are redundant, not additive** (`+both` == `+prompt`; on top of the prompt
-  the map finds only 2/150 complaints to rewrite) — both fix the same lay→clinical alignment.
-- **Hypothesis for the MedGemma pass:** the map is the deterministic safety net for when the
-  LLM does *not* follow the clinical-term instruction, so it should help a less
-  instruction-compliant 4B model **more** than it helped Flash (where it was redundant).
-- ESI acuity is unaffected (±1 case) — it is not complaint-dominated.
+| target | ceiling | base | +map | +prompt | +both | map Δ | prompt Δ |
+|---|---|---|---|---|---|---|---|
+| ESI acuity | .684 | .628 | .628 | .648 | .644 | +0.0 | +2.0 |
+| disposition | .820 | .760 | .776 | .768 | .768 | +1.6 | +0.8 |
+| diagnosis @1 | .472 | .356 | .399 | **.417** | .417 | +4.3 | **+6.1** |
+| diagnosis @3 | .663 | .564 | .595 | .601 | .601 | +3.1 | +3.7 |
+| department @1 | .589 | .503 | **.528** | .478 | .478 | +2.4 | **−2.5** |
+| department @3 | .736 | .669 | .687 | .669 | .669 | +1.8 | +0.0 |
+| ICD exact @1 | .233 | .092 | .166 | .178 | .178 | +7.4 | +8.6 |
+| ICD exact @5 | .393 | .252 | .301 | .307 | .301 | +4.9 | +5.5 |
+| ICD flat @10 | .448 | .350 | .368 | .387 | .380 | +1.8 | +3.7 |
+| ICD union | .534 | .472 | .491 | .497 | .491 | +1.8 | +2.5 |
+| complaint Jaccard | — | .393 | .523 (rewrote 76/250) | **.607** | .612 (rewrote 11/250) |  |  |
 
-**Caveats.** Quick read on the existing 150 (no dev/test split). The clean headline still
-needs the 250-case completeness regen + stratified dev/test split (§7), and the MedGemma pass.
+**Flash findings.**
+- **Both levers give real but modest gains** — diag@1: map **+4.3pp**, prompt **+6.1pp**; ICD@1
+  +7.4/+8.6, ICD@5 +4.9/+5.5. They close roughly **half** of the ~11.6pp base→ceiling diag@1 gap.
+  Consistent with the "chart vocab is already semi-lay → gap not *purely* vocabulary" finding.
+- **Prompt vs map diverge on department.** The clinical-term prompt is best for diagnosis/ICD
+  (and helps acuity +2.0) but **slightly regresses department (−2.5pp)**; the deterministic map is
+  the **more balanced** lever (helps diagnosis *and* department +2.4). Department deltas are ~4
+  cases at n=163 admitted (near the noise floor), so the robust signal is **diagnosis@1 + ICD**.
+- **Largely redundant, with a real trade-off.** `+both` == `+prompt` (the clinical prompt already
+  emits clinical terms → the map rewrites only 11/250 on top). Choosing the prompt forgoes the
+  map's department gain; the map alone keeps it but recovers a bit less on diagnosis.
+
+**n150 quick-read (older/easier cohort, for the record).** The first read on the *pre-completeness*
+150-case set (`clinicalize_2x2_flash_n150.json`, ceiling .500) showed **larger, optimistic** gains —
+map +10.2pp, prompt +12.2pp diag@1. The smaller, easier, pre-completeness cohort overstated the
+effect; the frozen 250 above is the headline. (This is itself a lesson: validate on the larger,
+deployment-realistic cohort, not a quick read.)
+
+### MedGemma-4B vs Flash 2.5 — same frozen 250 cohort (2026-06-21)
+Same 2×2, only the parser LLM differs (downstream deterministic + frozen models identical; ceiling
+is LLM-free and shared). MedGemma parses were produced via the self-hosted vLLM tunnel.
+Audit: `clinicalize_2x2_medgemma_n250.json`; combined `comparison_flash_vs_medgemma_n250.json`.
+
+| target | base | +map | +prompt | +both | map Δ | prompt Δ |
+|---|---|---|---|---|---|---|
+| ESI acuity | .572 | .552 | .576 | .580 | −2.0 | +0.4 |
+| disposition | .740 | .756 | .768 | .768 | +1.6 | +2.8 |
+| diagnosis @1 | .344 | .399 | **.423** | .423 | +5.5 | **+8.0** |
+| diagnosis @3 | .534 | .583 | .595 | .595 | +4.9 | +6.1 |
+| department @1 | .448 | .466 | **.503** | .503 | +1.8 | **+5.5** |
+| department @3 | .620 | .650 | .650 | .650 | +3.1 | +3.1 |
+| ICD exact @1 | .080 | .141 | .172 | .172 | +6.1 | +9.2 |
+| ICD exact @5 | .239 | .294 | .325 | .319 | +5.5 | +8.6 |
+| ICD flat @10 | .337 | .368 | .374 | .368 | +3.1 | +3.7 |
+| ICD union | .466 | .491 | .491 | .485 | +2.5 | +2.5 |
+| complaint Jaccard | .394 | — | .529 | — |  |  |
+
+**MedGemma findings (hypotheses confirmed, with a sharper story).**
+- **Weaker on *plain* parsing, but responds better to clinical steering.** MedGemma's plain base is
+  behind Flash on every clinical target (diag@1 .344 vs .356; dept@1 .448 vs .503; acuity .572 vs
+  .628), yet the clinical-term prompt lifts it **more** (diag@1 +8.0 vs Flash +6.1; ICD@5 +8.6 vs
+  +5.5), so at the best config it ends **level-or-ahead** (diag@1 .423 vs .417 — tie within noise;
+  dept@1 .503 vs .478 and ICD@5 .325 vs .307 — MedGemma ahead). The documented "small medical-domain
+  edge" thus **materializes through the clinical-term prompt**, not plain parsing, on this cohort.
+- **The prompt's department regression is Flash-specific.** Flash's clinical prompt *hurts*
+  department (−2.5pp); MedGemma's *helps* it (**+5.5pp**). So clinicalizing isn't inherently a
+  diagnosis-vs-department trade-off — that was a Flash artifact; the medical model handles the
+  clinical-term instruction more coherently. ✓ (the original hypothesis)
+- **The map helps MedGemma slightly more** (+5.5 vs +4.3 diag@1) ✓, and despite a **lower**
+  clinical-term Jaccard (.529 vs Flash .607) MedGemma's downstream accuracy is higher — it
+  paraphrases into terms the TF-IDF models recognize even when raw token-overlap is lower (same
+  dynamic as the n150 finding).
+- **Redundancy holds for both** (`+both` ≈ `+prompt`); for MedGemma the map on top of the clinical
+  prompt even slightly dents ICD (.319 vs .325 @5).
+- **Flash still wins ESI acuity decisively** (.648 vs .576 at +prompt, ~18 cases on n=250 — robust),
+  matching §5b. So the net picture: **Flash → acuity; MedGemma → department + ICD; diagnosis a
+  tie** (all at the best, clinical-term config).
+
+### Run mechanics & robustness findings (lessons for re-running)
+- **OOM, not sleep, killed the long heavy runs.** Full-benchmark runs doing 250 *fresh* parses while
+  holding models + features + prediction dicts hard-died (no traceback) on the 14 GB machine after
+  ~60–145 parses. Fix: **decouple** the tunnel work into (A) a lightweight clinical **cache-fill**
+  (parse-only, minimal memory, per-case `try/except`, incremental save) then (B) **tunnel-free
+  scoring** from the cache. (Cache-hit cells like `base`/`+map` never OOM'd — only fresh-parse loops.)
+- **Incremental + atomic parse-cache flush** (every 20 parses, temp-file rename) added so a killed
+  run loses ≤20 parses and the next resumes from cache. This is what made the repeated MedGemma
+  tunnel/OOM interruptions cheap to recover from.
+- **Self-hosted tunnel reality:** Cloudflare quick-tunnels crash (`530 origin unregistered`) and
+  hand out a **new URL per session** — update `MEDGEMMA_BASE_URL` and re-probe `/v1/models` before
+  each run. The per-backend cache (`parse_cache_medgemma.json`) survives across tunnel restarts.
+- **Validator false-positives caught on the 250 regen:** 6 narratives were flagged for "dropped"
+  SI/palpitations complaints, but the narratives were correct ("harming myself", "heart feels like
+  it's racing") — the `_COMPLETENESS_ANCHORS` were too narrow. Broadening them → **250/250 clean**,
+  backup-150 still 0 false-positives. (Generation QA only; independent of the eval map.)
 
 ### Track 3 — case completeness + stay-lay guard (fair)
 The case-gen prompt (`case_generation_{agents,tasks}.yaml`) now requires **every** complaint
@@ -333,8 +403,10 @@ them). `case_generation.validate_grounding` gained two checks, both **independen
 Track-2 eval map** (so generation isn't biased toward it): a **clinical-jargon leakage
 guard** (keeps narratives lay — guards the medical-model over-clinicalization risk in §7) and
 a **completeness check** using a separate `_COMPLETENESS_ANCHORS` set (flags dropped
-complaints for common families; conservative, 0/150 false positives on the existing set,
-fires on 22/43 multi-complaint cases when a complaint is dropped).
+complaints for common families; conservative). On the 250-case regen the cohort is **250/250
+grounding-clean** after a one-time broadening of the SI/palpitations anchors — the initial 6
+flags were validator false-positives on correct lay phrasings ("harming myself", "heart feels
+like it's racing"), not bad narratives; the backup-150 stays at 0 false-positives.
 
 ---
 
@@ -358,8 +430,14 @@ uv run python benchmarks/compare_case_generation.py
   `case_generation.py` (`sample_and_extract` freed the 418K disposition frame before the nurse
   loader — two full MIMIC frames at once OOM'd a 14 GB machine) and forcing UTF-8 I/O
   (`PYTHONUTF8=1`) so the `≥`/`κ` prints don't crash under cp1252 when stdout is redirected.
-- **Run Experiment B** (case-generation grounding quality, MedGemma vs Flash) — still pending;
-  needs a live MedGemma tunnel for a ~50-min run.
+- ~~**250-case completeness regen + Flash & MedGemma 2×2 headline**~~ **DONE (2026-06-21, §5c).**
+  Frozen 250-case cohort (seed 20260620); both backends' full 2×2 (clinical-term prompt × map).
+  Each backend closes ~half the diag@1 gap; the prompt's department regression is Flash-specific
+  (MedGemma gains there); Flash wins acuity, MedGemma edges department/ICD, diagnosis a tie. This is
+  Experiment-A-style (parser comparison on a shared, Flash-generated cohort).
+- **Run Experiment B** (case-generation *grounding quality* — regenerate narratives with MedGemma
+  and compare validator pass rates via `compare_case_generation.py`) — **still pending**; distinct
+  from the parser comparison above. Needs a live MedGemma tunnel for a ~50-min generation run.
 - ~~**Make the generated narratives more complaint-faithful (Experiment-B-adjacent), carefully.**~~
   **DONE (2026-06-20, §5c Track 3)** — the case-gen prompt now requires every complaint voiced in
   lay words, and `validate_grounding` gained a completeness check + a stay-lay clinical-jargon
@@ -387,7 +465,10 @@ uv run python benchmarks/compare_case_generation.py
 |---|---|
 | `src/proiect_licenta/llm_config.py` | `get_llm()` / `get_parse_llm()` backend selection |
 | `src/proiect_licenta/preprocessing.py` | `clinicalize_complaint()` + `LAY_TO_CLINICAL` (§5c Track 2, parser-output only) |
-| `artifacts/benchmarks/clinicalize_2x2_flash_n150.json` | curated audit of the §5c Flash 2×2 (+ raw dumps in `artifacts/benchmarks/quickread/`) |
+| `artifacts/benchmarks/clinicalize_2x2_flash_n250.json` | curated audit of the §5c Flash 2×2 **headline** (+ raw dumps in `artifacts/benchmarks/headline_n250/`) |
+| `artifacts/benchmarks/clinicalize_2x2_medgemma_n250.json` | curated audit of the §5c MedGemma 2×2 (+ raw dumps in `artifacts/benchmarks/headline_n250_medgemma/`) |
+| `artifacts/benchmarks/comparison_flash_vs_medgemma_n250.json` | combined Flash-vs-MedGemma 2×2 (all targets, both backends, ceiling, deltas) |
+| `artifacts/benchmarks/clinicalize_2x2_flash_n150.json` | the earlier n150 quick-read (+ raw dumps in `artifacts/benchmarks/quickread/`) |
 | `src/proiect_licenta/crew.py` | `llm=get_llm()` on the 4 live agents |
 | `src/proiect_licenta/case_generation.py` | `llm=get_llm()` on case generator; `out_dir` param |
 | `src/proiect_licenta/main.py` | `generate_cases --backend` |
