@@ -379,6 +379,21 @@ Audit: `clinicalize_2x2_medgemma_n250.json`; combined `comparison_flash_vs_medge
   matching §5b. So the net picture: **Flash → acuity; MedGemma → department + ICD; diagnosis a
   tie** (all at the best, clinical-term config).
 
+**Cross-cutting reads (both backends).**
+- **Best department config overall is Flash + map (.528 dept@1)** — it beats every other cell incl.
+  MedGemma's best (+prompt, .503). Because the map and prompt are redundant, you can't combine Flash's
+  prompt-driven diagnosis gain with its map-driven department gain; if department routing is the
+  priority, Flash+map is the pick.
+- **ICD is the most complaint-sensitive target — largest *relative* lift.** ICD exact@1 ~doubles from
+  base (Flash .092→.178, MedGemma .080→.172); exact code retrieval leans hardest on the complaint
+  terms, so the levers help most here proportionally (absolute values stay low).
+- **Disposition is the most parse-robust stage** — it barely moves under any parse change (both
+  backends converge to .768) because the calibrated admit/discharge model leans on vitals/PMH/acuity,
+  not the complaint wording.
+- **Acuity is not complaint-dominated** (driven by pain/age/arrival/vitals), so Flash's acuity lead is
+  a structural parsing-precision edge on those fields rather than a complaint-vocabulary effect — which
+  is why the clinical-term levers barely touch it.
+
 ### Run mechanics & robustness findings (lessons for re-running)
 - **OOM, not sleep, killed the long heavy runs.** Full-benchmark runs doing 250 *fresh* parses while
   holding models + features + prediction dicts hard-died (no traceback) on the 14 GB machine after
