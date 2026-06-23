@@ -10,6 +10,7 @@ data/
 src/proiect_licenta/datasets/
 thesis_article/
 cssc_thesis_competition/
+webapp/frontend/node_modules/
 
 # Trained model artifacts (regeneratable via `uv run train_*`)
 artifacts/

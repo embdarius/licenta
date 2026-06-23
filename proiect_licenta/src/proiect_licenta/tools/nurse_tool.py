@@ -103,6 +103,74 @@ def _collect_reading_round(idx: int) -> dict:
     }
 
 
+def build_nurse_payload(
+    rounds: list[dict],
+    meds_raw: str | None,
+    prior_history_raw: str | None,
+    n_prior_admissions: int,
+) -> dict:
+    """Assemble the canonical nurse-output dict from one or more reading rounds.
+
+    This is the SINGLE SOURCE OF TRUTH for the nurse payload shape: the stdin
+    tool (``NurseDataCollectionTool._run``) and the web backend both call it so
+    they produce a byte-identical structure (`vital_signs`, `vital_trajectory`,
+    `rhythm`, `medications_raw`, `prior_history`, `n_prior_admissions`).
+
+    `rounds` is a list of dicts each holding the 6 vitals + `rhythm` + `ts`
+    (float sort-key or None), exactly as ``_collect_reading_round`` builds. The
+    FIRST entered round is the primary/arrival snapshot; if every round carries a
+    timestamp the trajectory is ordered by it, otherwise entry order is the
+    chronological proxy. Skip-equivalent meds/PMH should already be normalized to
+    None by the caller; ``n_prior_admissions`` is -1 when not collected.
+    """
+    if not rounds:
+        rounds = [{
+            "temperature": None, "heartrate": None, "resprate": None,
+            "o2sat": None, "sbp": None, "dbp": None, "rhythm": None, "ts": None,
+        }]
+
+    # Order the rounds chronologically. If EVERY round carries a timestamp,
+    # sort by it (so readings can be entered out of order); otherwise keep entry
+    # order as the chronological proxy. All-or-nothing avoids interleaving.
+    if len(rounds) > 1 and all(r.get("ts") is not None for r in rounds):
+        ordered = sorted(rounds, key=lambda r: r["ts"])
+    else:
+        ordered = rounds
+
+    # The first ENTERED set is the primary/arrival snapshot.
+    primary = rounds[0]
+    temp = primary["temperature"]; hr = primary["heartrate"]
+    rr = primary["resprate"]; o2 = primary["o2sat"]
+    sbp = primary["sbp"]; dbp = primary["dbp"]
+    rhythm_raw = primary["rhythm"]
+
+    # Chronological trajectory per vital (dropping skipped values) + rhythm seq.
+    vital_trajectory = {}
+    for _vname in _VITAL_FIELDS:
+        _seq = [float(r[_vname]) for r in ordered if r.get(_vname) is not None]
+        if _seq:
+            vital_trajectory[_vname] = _seq
+    _rhythm_readings = [r["rhythm"] for r in ordered if r.get("rhythm")]
+    if _rhythm_readings:
+        vital_trajectory["rhythm"] = _rhythm_readings
+
+    return {
+        "vital_signs": {
+            "temperature": temp,
+            "heartrate": hr,
+            "resprate": rr,
+            "o2sat": o2,
+            "sbp": sbp,
+            "dbp": dbp,
+        },
+        "vital_trajectory": vital_trajectory,
+        "rhythm": rhythm_raw,
+        "medications_raw": meds_raw,
+        "prior_history": prior_history_raw,
+        "n_prior_admissions": n_prior_admissions,
+    }
+
+
 class NurseCollectionInput(BaseModel):
     """Input schema for the Nurse Data Collection Tool."""
     patient_context: str = Field(
@@ -154,38 +222,6 @@ class NurseDataCollectionTool(BaseTool):
                 break
             rounds.append(_collect_reading_round(len(rounds) + 1))
 
-        # Order the rounds chronologically. If EVERY round carries a timestamp,
-        # sort by it (so readings can be entered out of order); otherwise keep
-        # entry order as the chronological proxy — the no-timestamp fallback.
-        # All-or-nothing avoids interleaving timestamped + untimestamped sets.
-        if len(rounds) > 1 and all(r["ts"] is not None for r in rounds):
-            ordered = sorted(rounds, key=lambda r: r["ts"])
-        else:
-            ordered = rounds
-
-        # The first ENTERED set is the primary/arrival snapshot — it populates
-        # `vital_signs` (the v2 tool + the doctor tools' single-snapshot cascade
-        # and longitudinal fallback). The trajectory below carries the full
-        # ordered series, from which the doctor tools build min/max/last/delta.
-        primary = rounds[0]
-        temp = primary["temperature"]; hr = primary["heartrate"]
-        rr = primary["resprate"]; o2 = primary["o2sat"]
-        sbp = primary["sbp"]; dbp = primary["dbp"]
-        rhythm_raw = primary["rhythm"]
-
-        # Build the chronological trajectory per vital (dropping skipped values),
-        # plus the rhythm reading sequence, from the ordered rounds. Same wire
-        # format as before ({vital: [floats], "rhythm": [strs]}), so the doctor
-        # tools / aggregator are unchanged.
-        vital_trajectory = {}
-        for _vname in _VITAL_FIELDS:
-            _seq = [float(r[_vname]) for r in ordered if r[_vname] is not None]
-            if _seq:
-                vital_trajectory[_vname] = _seq
-        _rhythm_readings = [r["rhythm"] for r in ordered if r["rhythm"]]
-        if _rhythm_readings:
-            vital_trajectory["rhythm"] = _rhythm_readings
-
         # Medications
         print("\n  [Nurse]: Are you currently taking any medications?")
         print("           (List them separated by commas, or 'none')")
@@ -216,28 +252,15 @@ class NurseDataCollectionTool(BaseTool):
         else:
             n_prior_admissions = int(_parse_numeric(prior_adm_raw) or -1)
 
-        # Build result. The `rhythm`, `prior_history`, and
-        # `n_prior_admissions` fields are new in v3; the v2 tool ignores
-        # them, so the same nurse output drives both pipelines.
-        result = {
-            "vital_signs": {
-                "temperature": temp,
-                "heartrate": hr,
-                "resprate": rr,
-                "o2sat": o2,
-                "sbp": sbp,
-                "dbp": dbp,
-            },
-            # Multi-reading trajectory (first + optional second readings). The
-            # doctor disposition + v3 tools accept this as `vital_trajectory_json`
-            # and build real min/max/last/delta features from it; empty -> the
-            # tools fall back to the single snapshot. The v2 tool ignores it.
-            "vital_trajectory": vital_trajectory,
-            "rhythm": rhythm_raw,
-            "medications_raw": meds_raw,
-            "prior_history": prior_history_raw,
-            "n_prior_admissions": n_prior_admissions,
-        }
+        # Build the result via the shared assembler so the stdin tool and the
+        # web backend produce a byte-identical payload. The `rhythm`,
+        # `prior_history`, and `n_prior_admissions` fields are new in v3; the v2
+        # tool ignores them, so the same nurse output drives both pipelines.
+        result = build_nurse_payload(
+            rounds, meds_raw, prior_history_raw, n_prior_admissions,
+        )
+        rhythm_raw = result["rhythm"]
+        _rhythm_readings = result["vital_trajectory"].get("rhythm", [])
 
         available = sum(1 for v in result["vital_signs"].values() if v is not None)
         _n_sets = len(rounds)

@@ -13,6 +13,15 @@ dependencies = [
     "xgboost>=2.0.0",
 ]
 
+[project.optional-dependencies]
+# Web demo backend (FastAPI). Install with `uv sync --extra web`. Kept optional
+# so the core training/benchmark workflow has no extra deps. The frontend is a
+# separate Node/Vite app under webapp/frontend.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
 [project.scripts]
 proiect_licenta = "proiect_licenta.main:run"
 run_crew = "proiect_licenta.main:run"
