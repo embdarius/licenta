@@ -12,15 +12,19 @@ export function fmtPct(v: string | number | undefined | null, digits = 1): strin
   return `${pct(v).toFixed(digits)}%`;
 }
 
-/** ESI level → palette (text/bg/border/ring) using standard triage colors. */
-export const ESI_COLORS: Record<number, { name: string; hex: string; text: string }> = {
-  1: { name: "Resuscitation", hex: "#ef4444", text: "text-red-300" },
-  2: { name: "Emergent", hex: "#f97316", text: "text-orange-300" },
-  3: { name: "Urgent", hex: "#eab308", text: "text-yellow-300" },
-  4: { name: "Less urgent", hex: "#22c55e", text: "text-green-300" },
-  5: { name: "Non-urgent", hex: "#38bdf8", text: "text-sky-300" },
+// ESI level → standard triage palette, in solid tones with adequate contrast on
+// a light surface (not neon). `bg`/`border` are light fills for level tags.
+export const ESI_COLORS: Record<
+  number,
+  { name: string; hex: string; bg: string; border: string; text: string }
+> = {
+  1: { name: "Resuscitation", hex: "#b42318", bg: "#fef3f2", border: "#fecdca", text: "text-red-700" },
+  2: { name: "Emergent", hex: "#c2410c", bg: "#fff4ed", border: "#fed7aa", text: "text-orange-700" },
+  3: { name: "Urgent", hex: "#b7791f", bg: "#fefbeb", border: "#fde68a", text: "text-yellow-700" },
+  4: { name: "Less urgent", hex: "#2f855a", bg: "#f0fdf4", border: "#bbf7d0", text: "text-emerald-700" },
+  5: { name: "Non-urgent", hex: "#2b6cb0", bg: "#eff6ff", border: "#bfdbfe", text: "text-blue-700" },
 };
 
 export function esiColor(level: number): string {
-  return ESI_COLORS[level]?.hex ?? "#94a3b8";
+  return ESI_COLORS[level]?.hex ?? "#64748b";
 }

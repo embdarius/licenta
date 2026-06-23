@@ -4,25 +4,21 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: {
-          900: "#0b1220",
-          800: "#0f1729",
-          700: "#16203a",
-          600: "#1e2b4a",
+        // Restrained medical-blue primary used across actions and headers.
+        clinical: {
+          DEFAULT: "#1b5e9b",
+          dark: "#164d80",
+          light: "#e8eff6",
         },
       },
       keyframes: {
-        "fade-up": {
-          "0%": { opacity: "0", transform: "translateY(8px)" },
+        "fade-in": {
+          "0%": { opacity: "0", transform: "translateY(4px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
-        },
-        grow: {
-          "0%": { width: "0%" },
         },
       },
       animation: {
-        "fade-up": "fade-up 0.4s ease-out both",
-        grow: "grow 0.7s ease-out both",
+        "fade-in": "fade-in 0.25s ease-out both",
       },
     },
   },

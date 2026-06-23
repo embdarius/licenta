@@ -61,17 +61,17 @@ export default function NurseForm({
   return (
     <div className="space-y-4">
       {readings.map((r, idx) => (
-        <div key={idx} className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+        <div key={idx} className="rounded-md border border-slate-200 bg-slate-50 p-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="label">
-              {idx === 0 ? "Arrival reading" : `Reading #${idx + 1}`}
+              {idx === 0 ? "Arrival reading" : `Reading ${idx + 1}`}
             </span>
             {readings.length > 1 && (
               <button
-                className="text-xs text-rose-300 hover:underline"
+                className="text-xs font-medium text-red-700 hover:underline"
                 onClick={() => setReadings((rs) => rs.filter((_, i) => i !== idx))}
               >
-                remove
+                Remove
               </button>
             )}
           </div>
@@ -115,7 +115,7 @@ export default function NurseForm({
         className="btn-ghost w-full"
         onClick={() => setReadings((rs) => [...rs, emptyReading()])}
       >
-        + Add another reading (capture the vital trend)
+        Add another reading (captures the vital-sign trend)
       </button>
 
       <div className="grid gap-2 sm:grid-cols-2">
@@ -137,7 +137,7 @@ export default function NurseForm({
       </label>
 
       <button className="btn-primary w-full" disabled={busy} onClick={submit}>
-        {busy ? "Refining disposition…" : "Submit nurse data → refine disposition"}
+        {busy ? "Refining disposition…" : "Submit and refine disposition"}
       </button>
     </div>
   );

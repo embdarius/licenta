@@ -1,12 +1,12 @@
 import type { StageKey } from "../types";
 
 const STAGES: { key: StageKey; label: string; sub: string }[] = [
-  { key: "intake", label: "Intake", sub: "LLM · NLP parse" },
+  { key: "intake", label: "Intake", sub: "NLP parse" },
   { key: "triage", label: "Triage", sub: "ESI acuity + disposition" },
-  { key: "initial", label: "Initial Dx", sub: "Doctor v3_base" },
-  { key: "nurse", label: "Nurse", sub: "Vitals · meds · PMH" },
-  { key: "disposition", label: "Disposition", sub: "Calibrated refine" },
-  { key: "reassessment", label: "Reassessment", sub: "Doctor v3 + ICD" },
+  { key: "initial", label: "Initial assessment", sub: "Diagnosis v3-base" },
+  { key: "nurse", label: "Nurse data", sub: "Vitals, medications, history" },
+  { key: "disposition", label: "Disposition", sub: "Calibrated admit/discharge" },
+  { key: "reassessment", label: "Reassessment", sub: "Diagnosis v3 + ICD" },
 ];
 
 export default function ProgressRail({ done, active }: {
@@ -14,37 +14,42 @@ export default function ProgressRail({ done, active }: {
   active: StageKey;
 }) {
   return (
-    <nav className="space-y-1">
-      {STAGES.map((s, i) => {
-        const isDone = done.has(s.key);
-        const isActive = s.key === active;
-        return (
-          <div key={s.key} className="flex items-start gap-3">
-            <div className="flex flex-col items-center">
-              <div
-                className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-bold transition ${
-                  isDone
-                    ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-300"
-                    : isActive
-                      ? "border-sky-400 bg-sky-500/20 text-sky-200"
-                      : "border-white/15 bg-white/5 text-slate-500"
-                }`}
-              >
-                {isDone ? "✓" : i + 1}
+    <nav aria-label="Pipeline stages">
+      <div className="label mb-3 px-1">Workflow</div>
+      <ol>
+        {STAGES.map((s, i) => {
+          const isDone = done.has(s.key);
+          const isActive = s.key === active;
+          return (
+            <li key={s.key} className="flex items-stretch gap-3">
+              <div className="flex flex-col items-center">
+                <span
+                  className={`flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold ${
+                    isDone
+                      ? "border-clinical bg-clinical text-white"
+                      : isActive
+                        ? "border-clinical bg-white text-clinical"
+                        : "border-slate-300 bg-white text-slate-400"
+                  }`}
+                >
+                  {isDone ? "✓" : i + 1}
+                </span>
+                {i < STAGES.length - 1 && (
+                  <span className={`my-1 w-px flex-1 ${isDone ? "bg-clinical/40" : "bg-slate-200"}`} />
+                )}
               </div>
-              {i < STAGES.length - 1 && (
-                <div className={`my-0.5 h-6 w-px ${isDone ? "bg-emerald-400/40" : "bg-white/10"}`} />
-              )}
-            </div>
-            <div className="pt-0.5">
-              <div className={`text-sm font-medium ${isActive ? "text-white" : isDone ? "text-slate-200" : "text-slate-500"}`}>
-                {s.label}
+              <div className="pb-4 pt-0.5">
+                <div className={`text-sm leading-tight ${
+                  isActive ? "font-semibold text-slate-900" : isDone ? "text-slate-700" : "text-slate-400"
+                }`}>
+                  {s.label}
+                </div>
+                <div className="text-[11px] text-slate-400">{s.sub}</div>
               </div>
-              <div className="text-[11px] text-slate-500">{s.sub}</div>
-            </div>
-          </div>
-        );
-      })}
+            </li>
+          );
+        })}
+      </ol>
     </nav>
   );
 }

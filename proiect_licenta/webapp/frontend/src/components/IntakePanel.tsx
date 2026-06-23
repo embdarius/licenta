@@ -72,11 +72,12 @@ export default function IntakePanel({
           value={narrative}
           onChange={(e) => setNarrative(e.target.value)}
         />
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-400">Sample presentations:</span>
           {EXAMPLES.map((ex, i) => (
-            <button key={i} className="chip bg-white/5 text-slate-400 hover:bg-white/10"
+            <button key={i} className="chip border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
               onClick={() => setNarrative(ex)}>
-              example {i + 1}
+              {i + 1}
             </button>
           ))}
         </div>
@@ -84,16 +85,16 @@ export default function IntakePanel({
 
       <div className="flex items-center gap-3">
         <button className="btn-primary" onClick={doParse} disabled={parsing || !narrative.trim()}>
-          {parsing ? "Parsing with LLM…" : "✨ Parse with LLM"}
+          {parsing ? "Parsing…" : "Parse description"}
         </button>
         <span className="text-xs text-slate-500">
-          The LLM maps lay wording → ED terminology. Review &amp; correct below.
+          The language model maps lay wording to ED terminology. Review and correct below.
         </span>
       </div>
-      {err && <p className="text-sm text-rose-300">{err}</p>}
+      {err && <p className="text-sm text-red-700">{err}</p>}
 
       {(parsed || form.chief_complaints) && (
-        <div className="animate-fade-up space-y-3 border-t border-white/10 pt-4">
+        <div className="animate-fade-in space-y-3 border-t border-slate-200 pt-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block sm:col-span-2">
               <span className="label">Chief complaints (ED terminology)</span>
@@ -147,7 +148,7 @@ export default function IntakePanel({
           </div>
 
           {isEms && (
-            <div className="rounded-xl border border-sky-400/20 bg-sky-500/5 p-3">
+            <div className="rounded-md border border-clinical/30 bg-clinical-light p-3">
               <span className="label">EMS vitals at handoff (ambulance/helicopter only)</span>
               <div className="mt-1.5 grid grid-cols-3 gap-2 sm:grid-cols-6">
                 {(["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"] as const).map((k) => (
@@ -164,7 +165,7 @@ export default function IntakePanel({
 
           <button className="btn-primary w-full" disabled={busy || !form.chief_complaints}
             onClick={() => onSubmit(form)}>
-            {busy ? "Running triage…" : "Run triage →"}
+            {busy ? "Running triage…" : "Run triage"}
           </button>
         </div>
       )}

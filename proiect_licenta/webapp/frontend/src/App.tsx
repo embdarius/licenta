@@ -77,162 +77,172 @@ export default function App() {
     reassess.payload?.status !== "NOT_ADMITTED";
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8">
-      <header className="mb-8 flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">
-            ED Decision Support
-            <span className="ml-2 text-sky-400">· Live Inference</span>
-          </h1>
-          <p className="mt-1 text-sm text-slate-400">
-            Multi-agent pipeline on MIMIC-IV — NLP parsing (LLM) → triage, diagnosis,
-            disposition &amp; reassessment (XGBoost). Predictions identical to the live crew.
-          </p>
+    <div className="min-h-screen">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded bg-clinical text-sm font-bold text-white">
+              ED
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold leading-tight text-slate-900">
+                Emergency Department Decision Support
+              </h1>
+              <p className="text-xs text-slate-500">
+                Clinical inference pipeline · MIMIC-IV models · research prototype
+              </p>
+            </div>
+          </div>
+          <button className="btn-ghost" onClick={newSession}>New patient</button>
         </div>
-        <button className="btn-ghost" onClick={newSession}>↺ New patient</button>
       </header>
 
-      <div className="grid gap-8 lg:grid-cols-[200px,1fr]">
-        <aside className="lg:sticky lg:top-8 lg:self-start">
-          <ProgressRail done={done} active={active} />
-        </aside>
+      <div className="mx-auto max-w-6xl px-6 py-6">
+        <div className="grid gap-8 lg:grid-cols-[230px,1fr]">
+          <aside className="lg:sticky lg:top-6 lg:self-start">
+            <ProgressRail done={done} active={active} />
+          </aside>
 
-        <main className="space-y-6">
-          {err && (
-            <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-              {err}
-            </div>
-          )}
-
-          {/* Stage 0 — Intake */}
-          {!triage && (
-            <StageCard index={1} title="Patient intake"
-              subtitle="Free text → LLM parses into structured, editable fields">
-              <IntakePanel busy={busy} onSubmit={runTriage} />
-            </StageCard>
-          )}
-
-          {/* Stage 1 — Triage */}
-          {triage && (
-            <StageCard index={2} title="Triage assessment" accent="#f97316"
-              subtitle="ESI acuity + screening disposition (triage v3)">
-              <AcuityGauge acuity={triage.payload.acuity_prediction} />
-              <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
-                <span className="label">Screening disposition</span>
-                <span className={`chip ${triage.triage_admit ? "bg-rose-500/20 text-rose-200" : "bg-emerald-500/20 text-emerald-200"}`}>
-                  {triage.payload.disposition_prediction.prediction} ·{" "}
-                  {triage.payload.disposition_prediction.confidence}
-                </span>
-                {triage.payload.vital_signs?.abnormalities_detected?.length > 0 && (
-                  <span className="chip bg-amber-400/15 text-amber-200">
-                    abnormal: {triage.payload.vital_signs.abnormalities_detected.join(", ")}
-                  </span>
-                )}
-                {triage.payload.prior_history_used?.pmh_categories_fired?.length > 0 && (
-                  <span className="chip bg-violet-500/15 text-violet-200">
-                    PMH fired: {triage.payload.prior_history_used.pmh_categories_fired.join(", ")}
-                  </span>
-                )}
+          <main className="space-y-5">
+            {err && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {err}
               </div>
-            </StageCard>
-          )}
+            )}
 
-          {/* Stage 2 — Initial diagnosis */}
-          {initial && (
-            <StageCard index={3} title="Initial doctor assessment" accent="#22d3ee"
-              subtitle="Preliminary diagnosis + department (v3_base, triage data only)">
-              {admittedInitial ? (
-                <div className="grid gap-6 sm:grid-cols-2">
-                  <div>
-                    <div className="label mb-2">Diagnosis (top 3)</div>
-                    <Top3Bars entries={initial.payload.diagnosis_prediction.top_3_categories}
-                      color="#22d3ee" />
+            {/* Stage 1 — Intake */}
+            {!triage && (
+              <StageCard index={1} title="Patient intake"
+                subtitle="Free-text presentation parsed into structured fields for review">
+                <IntakePanel busy={busy} onSubmit={runTriage} />
+              </StageCard>
+            )}
+
+            {/* Stage 2 — Triage */}
+            {triage && (
+              <StageCard index={2} title="Triage assessment"
+                subtitle="ESI acuity and screening disposition (triage v3)"
+                aside={
+                  <span className={triage.triage_admit ? "status-admit" : "status-discharge"}>
+                    {triage.payload.disposition_prediction.prediction} ·{" "}
+                    {triage.payload.disposition_prediction.confidence}
+                  </span>
+                }>
+                <AcuityGauge acuity={triage.payload.acuity_prediction} />
+                {(triage.payload.vital_signs?.abnormalities_detected?.length > 0 ||
+                  triage.payload.prior_history_used?.pmh_categories_fired?.length > 0) && (
+                  <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3 text-xs">
+                    {triage.payload.vital_signs?.abnormalities_detected?.length > 0 && (
+                      <span className="chip border border-amber-200 bg-amber-50 text-amber-800">
+                        Abnormal vitals: {triage.payload.vital_signs.abnormalities_detected.join(", ")}
+                      </span>
+                    )}
+                    {triage.payload.prior_history_used?.pmh_categories_fired?.length > 0 && (
+                      <span className="chip border border-slate-200 bg-slate-50 text-slate-600">
+                        History recognized: {triage.payload.prior_history_used.pmh_categories_fired.join(", ")}
+                      </span>
+                    )}
                   </div>
-                  <div>
-                    <div className="label mb-2">Department (top 3)</div>
-                    <Top3Bars entries={initial.payload.department_prediction.top_3_departments}
-                      color="#a78bfa" showCode />
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-slate-300">
-                  Triage screened this patient for <b>discharge</b>, so no admission
-                  diagnosis is generated yet. The post-nurse disposition may still upgrade
-                  to admit.
-                </p>
-              )}
-            </StageCard>
-          )}
-
-          {/* Stage 3 — Nurse */}
-          {triage && !nurse && (
-            <StageCard index={4} title="Nurse data collection" accent="#34d399"
-              subtitle="Vital signs (one or more readings), rhythm, medications, PMH">
-              <NurseForm busy={busy} onSubmit={runNurse} />
-            </StageCard>
-          )}
-          {nurse && (
-            <StageCard index={4} title="Nurse data collected" accent="#34d399"
-              subtitle="Vitals, rhythm, meds, PMH recorded">
-              <div className="flex flex-wrap gap-2 text-xs">
-                {Object.entries(nurse.payload.vital_signs)
-                  .filter(([, v]) => v != null)
-                  .map(([k, v]) => (
-                    <span key={k} className="chip bg-white/5 text-slate-300">{k}: {String(v)}</span>
-                  ))}
-                {nurse.payload.vital_trajectory && Object.keys(nurse.payload.vital_trajectory).length > 0 && (
-                  <span className="chip bg-sky-500/15 text-sky-200">
-                    {Math.max(...Object.values(nurse.payload.vital_trajectory).map((a: any) => a.length))} readings · trend captured
-                  </span>
                 )}
-                {nurse.payload.medications_raw && (
-                  <span className="chip bg-white/5 text-slate-300">meds: {nurse.payload.medications_raw}</span>
-                )}
-              </div>
-            </StageCard>
-          )}
+              </StageCard>
+            )}
 
-          {/* Stage 4 — Disposition refinement (hero) */}
-          {dispo && (
-            <StageCard index={5} title="Disposition refinement" accent="#fb7185"
-              subtitle="Calibrated admit/discharge using all post-nurse signals (ECE 0.0036)">
-              <DispositionFlip triageAdmit={!!triage?.triage_admit} refinedAdmit={!!dispo.refined_admit} />
-              <div className="mt-4">
-                <DispositionCard payload={dispo.payload} />
-              </div>
-            </StageCard>
-          )}
-
-          {/* Stage 5 — Reassessment */}
-          {reassess && (
-            <StageCard index={6} title="Enhanced reassessment" accent="#a78bfa"
-              subtitle="Diagnosis + department with nurse data (v3), gated on the refined verdict">
-              {admittedFinal ? (
-                <>
+            {/* Stage 3 — Initial assessment */}
+            {initial && (
+              <StageCard index={3} title="Initial assessment"
+                subtitle="Preliminary diagnosis and department (v3-base, triage data only)">
+                {admittedInitial ? (
                   <div className="grid gap-6 sm:grid-cols-2">
                     <div>
-                      <div className="label mb-2">Diagnosis (top 3)</div>
-                      <Top3Bars entries={reassess.payload.diagnosis_prediction.top_3_categories}
-                        color="#22d3ee" />
+                      <div className="label mb-2">Diagnosis category</div>
+                      <Top3Bars entries={initial.payload.diagnosis_prediction.top_3_categories} />
                     </div>
                     <div>
-                      <div className="label mb-2">Department (top 3)</div>
-                      <Top3Bars entries={reassess.payload.department_prediction.top_3_departments}
-                        color="#a78bfa" showCode />
+                      <div className="label mb-2">Department</div>
+                      <Top3Bars entries={initial.payload.department_prediction.top_3_departments} showCode />
                     </div>
                   </div>
-                  <IcdDifferential exact={reassess.payload.diagnosis_prediction.exact_diagnoses} />
-                  <ComparisonPanel initial={initial?.payload} enhanced={reassess.payload} />
-                </>
-              ) : (
-                <p className="text-sm text-slate-300">
-                  Final disposition is <b>discharge</b>. No admission workup generated.
-                  {triage?.triage_admit && " (The disposition model overrode triage's admit.)"}
-                </p>
-              )}
-            </StageCard>
-          )}
-        </main>
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    Triage screened this patient for <span className="font-medium">discharge</span>;
+                    no admission diagnosis is generated at this stage. The post-nurse disposition
+                    may revise this verdict.
+                  </p>
+                )}
+              </StageCard>
+            )}
+
+            {/* Stage 4 — Nurse */}
+            {triage && !nurse && (
+              <StageCard index={4} title="Nurse data collection"
+                subtitle="Vital signs (one or more readings), cardiac rhythm, medications, history">
+                <NurseForm busy={busy} onSubmit={runNurse} />
+              </StageCard>
+            )}
+            {nurse && (
+              <StageCard index={4} title="Nurse data recorded"
+                subtitle="Vital signs, rhythm, medications and history collected">
+                <div className="flex flex-wrap gap-2 text-xs">
+                  {Object.entries(nurse.payload.vital_signs)
+                    .filter(([, v]) => v != null)
+                    .map(([k, v]) => (
+                      <span key={k} className="chip border border-slate-200 bg-slate-50 text-slate-600">
+                        {k}: {String(v)}
+                      </span>
+                    ))}
+                  {nurse.payload.vital_trajectory && Object.keys(nurse.payload.vital_trajectory).length > 0 && (
+                    <span className="chip border border-clinical/30 bg-clinical-light text-clinical-dark">
+                      {Math.max(...Object.values(nurse.payload.vital_trajectory).map((a: any) => a.length))} readings · trend captured
+                    </span>
+                  )}
+                  {nurse.payload.medications_raw && (
+                    <span className="chip border border-slate-200 bg-slate-50 text-slate-600">
+                      medications: {nurse.payload.medications_raw}
+                    </span>
+                  )}
+                </div>
+              </StageCard>
+            )}
+
+            {/* Stage 5 — Disposition refinement */}
+            {dispo && (
+              <StageCard index={5} title="Disposition refinement"
+                subtitle="Calibrated admit/discharge from all post-nurse signals (ECE 0.0036)">
+                <DispositionFlip triageAdmit={!!triage?.triage_admit} refinedAdmit={!!dispo.refined_admit} />
+                <DispositionCard payload={dispo.payload} />
+              </StageCard>
+            )}
+
+            {/* Stage 6 — Reassessment */}
+            {reassess && (
+              <StageCard index={6} title="Reassessment"
+                subtitle="Diagnosis and department with nurse data (v3), gated on the refined verdict">
+                {admittedFinal ? (
+                  <>
+                    <div className="grid gap-6 sm:grid-cols-2">
+                      <div>
+                        <div className="label mb-2">Diagnosis category</div>
+                        <Top3Bars entries={reassess.payload.diagnosis_prediction.top_3_categories} />
+                      </div>
+                      <div>
+                        <div className="label mb-2">Department</div>
+                        <Top3Bars entries={reassess.payload.department_prediction.top_3_departments} showCode />
+                      </div>
+                    </div>
+                    <IcdDifferential exact={reassess.payload.diagnosis_prediction.exact_diagnoses} />
+                    <ComparisonPanel initial={initial?.payload} enhanced={reassess.payload} />
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    Final disposition is <span className="font-medium">discharge</span>; no admission
+                    workup is generated.
+                    {triage?.triage_admit && " The disposition model revised triage's admit decision."}
+                  </p>
+                )}
+              </StageCard>
+            )}
+          </main>
+        </div>
       </div>
     </div>
   );

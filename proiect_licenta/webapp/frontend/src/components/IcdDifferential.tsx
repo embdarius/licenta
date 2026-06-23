@@ -1,31 +1,25 @@
-// Advisory Stage-2 exact-ICD differential (the retrieval cascade). Clearly
-// labeled experimental; renders nothing when the resolver produced no block.
+// Stage-2 exact-ICD differential (retrieval cascade). Advisory only; renders
+// nothing when the resolver produced no block.
 export default function IcdDifferential({ exact }: { exact: any }) {
   const ranking: any[] = exact?.flat_ranking ?? [];
   if (!ranking.length) return null;
   return (
-    <div className="mt-4 rounded-xl border border-violet-400/25 bg-violet-500/5 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="chip bg-violet-500/20 text-violet-200">Advisory · experimental</span>
-        <span className="text-xs text-slate-400">
-          Likely exact diagnoses within the predicted categories (retrieval cascade)
+    <div className="mt-4 rounded-md border border-slate-200 bg-white">
+      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2">
+        <span className="label">Likely exact diagnoses (advisory)</span>
+        <span className="chip border border-slate-200 bg-slate-50 text-slate-500">
+          Retrieval cascade — does not alter category/department
         </span>
       </div>
-      <ul className="grid gap-1.5 sm:grid-cols-2">
+      <ul className="divide-y divide-slate-100">
         {ranking.slice(0, 6).map((d, i) => (
-          <li key={i} className="flex items-baseline gap-2 text-sm">
-            <span className="rounded bg-violet-500/20 px-1.5 py-0.5 font-mono text-xs text-violet-200">
-              {d.icd_3char}
-            </span>
-            <span className="text-slate-200">{d.title}</span>
-            {d.category && <span className="text-xs text-slate-500">· {d.category}</span>}
+          <li key={i} className="flex items-baseline gap-3 px-4 py-1.5 text-sm">
+            <span className="w-12 font-mono text-xs text-slate-500">{d.icd_3char}</span>
+            <span className="flex-1 text-slate-700">{d.title}</span>
+            {d.category && <span className="text-xs text-slate-400">{d.category}</span>}
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-[11px] text-slate-500">
-        Does not change the category/department predictions — surfaced as a suggested
-        differential only.
-      </p>
     </div>
   );
 }

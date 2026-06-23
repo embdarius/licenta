@@ -1,29 +1,29 @@
 import type { ReactNode } from "react";
 
 export default function StageCard({
-  index, title, subtitle, accent = "#38bdf8", children,
+  index, title, subtitle, children, aside,
 }: {
   index: number;
   title: string;
   subtitle?: string;
-  accent?: string;
   children: ReactNode;
+  aside?: ReactNode;
 }) {
   return (
-    <section className="card animate-fade-up p-5 sm:p-6">
-      <header className="mb-4 flex items-center gap-3">
-        <span
-          className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-bold text-white"
-          style={{ background: accent }}
-        >
-          {index}
-        </span>
-        <div>
-          <h2 className="text-lg font-semibold leading-tight text-white">{title}</h2>
-          {subtitle && <p className="text-xs text-slate-400">{subtitle}</p>}
+    <section className="card animate-fade-in">
+      <header className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-3">
+        <div className="flex items-baseline gap-3">
+          <span className="text-xs font-semibold tabular-nums text-slate-400">
+            {String(index).padStart(2, "0")}
+          </span>
+          <div>
+            <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
+            {subtitle && <p className="text-xs text-slate-500">{subtitle}</p>}
+          </div>
         </div>
+        {aside}
       </header>
-      {children}
+      <div className="px-5 py-4">{children}</div>
     </section>
   );
 }
