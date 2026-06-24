@@ -303,7 +303,10 @@ stay-lay prompt (Flash, seed 20260620, 163 admitted / 87 discharged, **250/250 g
 (built from training vocab + general knowledge, never tuned on these cases). **Methodology check
 PASS**: the LLM-free `tool_direct` / `tool_direct_lookup` modes are byte-identical across all four
 cells, so only the parser column varied. Audit: `artifacts/benchmarks/clinicalize_2x2_flash_n250.json`
-(+ raw dumps `artifacts/benchmarks/headline_n250/`).
+(+ raw dumps `artifacts/benchmarks/headline_n250/`). **Caveat (see "Stale history-index" below):**
+on this run `tool_direct_lookup` ran against a stale index (only 1/250 patients matched), so it ≈
+`tool_direct` and is **not** a valid EHR-lookup number — but it is not a headline column, and the
+reported deltas are unaffected because the breakage is constant across all cells.
 
 Full table (all targets; Δ = pp vs base):
 
@@ -423,6 +426,49 @@ grounding-clean** after a one-time broadening of the SI/palpitations anchors —
 flags were validator false-positives on correct lay phrasings ("harming myself", "heart feels
 like it's racing"), not bad narratives; the backup-150 stays at 0 false-positives.
 
+### Stale history-index on the 250 headline — found & fixed (2026-06-24)
+**What was found.** The EHR `tool_direct_lookup` / `parser_llm` columns query the
+`PatientHistoryLookupTool`, which reads the persisted `artifacts/history/pmh_index.joblib`. That
+index was last built **2026-06-03 over the *old* 20-case cohort** and was **never rebuilt** after
+the 250-case regen (2026-06-20) overwrote `cases.json` in place — a silent staleness (the lookup
+degrades to "unknown patient", no error). Result: the 250 run's own log reads **"EHR lookup found
+prior history for 1/250 patients"**, and `tool_direct_lookup` ≈ `tool_direct` to the digit
+(0.0 delta on every target except −0.6pp icd@5, the single covered case).
+
+**Impact on the headline — none.** The broken lookup is the *same dead constant* in all four 2×2
+cells and in both backends, so it **cancels exactly** in every reported delta (map Δ, prompt Δ,
+Flash-vs-MedGemma). The "LLM-free modes byte-identical across cells" methodology check still holds
+(they were identically *stale*), and the headline table columns are ceiling / base / +map / +prompt
+/ +both — **`tool_direct_lookup` is not among them**. So nothing quoted from the §5c headline moves.
+
+**The ceiling was NOT affected.** `feature_vector` / `feature_vector_gated` read the cached
+`build_features` rows (`sampled_features.pkl`), whose prior-encounter numerics + `pmh_*` flags come
+straight from the MIMIC tables at generation time — **independent of the joblib index**. Verified:
+148/250 cached rows carry real `days_since_last_admission` (<9999), 147/250 ≥1 PMH flag. The ceiling
+had full history throughout.
+
+**Why `tool_direct` is already ≈ the gated ceiling (and the lookup looks valueless at scale).**
+Two reasons, both real: (1) `tool_direct` is *not* history-blind — the self-report path already
+recovers the coarse `pmh_*` flags by round-tripping the patient's stated `prior_history`; the lookup
+*uniquely* adds only the **fine prior-encounter numerics** (`days_since_*`, `n_prior_*`,
+`same_complaint_as_prior`) + the prior-visit med override, a smaller marginal signal. (2) Those
+numerics flip an outcome only on a **borderline disposition gate** (a returning patient sitting at
+the 0.40 threshold whom "recently admitted for the same complaint" pushes across) — a rare
+conjunction. The lookup's effect was always **~1 case**: at n=20 that was 5–7.7pp (looked decisive,
+and the docs flagged it as a *mechanism demonstration*); at n=250 the *same* one case is 0.4pp —
+exactly the `feature_vector_gated − tool_direct` disposition gap (0.820 − 0.816 = 1/250). The gated
+ceiling (which *has* the numerics) is only ~1 case above `tool_direct` on disposition and is even
+*below* it on diagnosis (reconstruction noise), so the numerics' aggregate value on this cohort is
+genuinely ~1 case — the stale index did **not** mask a large effect.
+
+**Fix applied.** Rebuilt the index over the current cohort: `uv run build_history_index --from-cases`
+(249 unique subjects; `adm_by_subject` 217, `ed_by_subject` 249, note-PMH 1,204, med blocks 1,476).
+Post-rebuild the live lookup resolves **250/250 known, 226/250 with prior history** (now-sentinel).
+**Operational gotcha to remember:** regenerating `cases.json` silently invalidates this index —
+rebuilding it must be a step in the `generate_cases` workflow. (A test MRN like `15526881` / stay
+`31580642` is *not* in the current 250 — it belongs to the old `synthetic_cases_n150_plain/` cohort;
+use a current-cohort `subject_id`, or `--all-subjects` to index the full population for arbitrary MRNs.)
+
 ---
 
 ## 6. Experiment B — case-generation quality (designed, not yet run)
@@ -440,6 +486,18 @@ uv run python benchmarks/compare_case_generation.py
 ---
 
 ## 7. Future work
+- **Re-run the `tool_direct_lookup` column at n=250 (OPTIONAL).** On the 2026-06-21 headline this
+  column ran against a stale history-index (1/250 matched) so it ≈ `tool_direct` — see "Stale
+  history-index" in §5c. The index is now rebuilt (`build_history_index --from-cases`, 2026-06-24),
+  so a `--parser-llm --skip-e2e` re-run would finally produce a real EHR-lookup number.
+  **Why it's optional, not blocking:** (a) it is **not a headline column** and the reported deltas
+  (map/prompt, Flash-vs-MedGemma) are unaffected (the breakage cancelled across all cells); (b) the
+  *correct* gated ceiling already bounds it — `feature_vector_gated` (which has the real
+  prior-encounter numerics) sits only ~1 case above `tool_direct` on disposition (0.820 − 0.816 =
+  1/250) and below it on diagnosis, so the predicted lift is ~0.4pp. The re-run is for
+  completeness/correctness of that one column, not to change any conclusion. The lookup's per-case
+  mechanism is real (it flips a borderline returning-patient gate); it just doesn't move a 250-case
+  aggregate — the value shrank from 5–7.7pp at n=20 to 0.4pp at n=250 purely from the denominator.
 - ~~**Scale 20 → ~100 cases**~~ **DONE (2026-06-17)** — scaled to **150** (`generate_cases
   --backend flash --n-admitted 98 --n-discharged 52`); see §5b. Required a memory fix to
   `case_generation.py` (`sample_and_extract` freed the 418K disposition frame before the nurse

@@ -430,6 +430,22 @@ parser's follow-up questions); the chief-complaint text is the lossy channel
    caveat in [doctor-agent.md](doctor-agent.md#whats-next) (the 25–35% ED figure
    is from trauma/acuity triage, not admit/discharge).
 
+> **Operational caveat — the history index must be rebuilt after every `cases.json`
+> regen (found 2026-06-24).** `PatientHistoryLookupTool` reads the persisted
+> `artifacts/history/pmh_index.joblib`, which `build_history_index --from-cases`
+> builds over the subjects *currently* in `cases.json`. Regenerating `cases.json`
+> (which overwrites it in place) **silently invalidates** the index — the lookup
+> degrades to "unknown patient" with **no error**. This bit the 250-case headline:
+> the index was still the 2026-06-03 20-case build, so the benchmark's
+> `tool_direct_lookup` / `parser_llm` columns matched only **1/250** patients and
+> `tool_direct_lookup` collapsed to ≈ `tool_direct` (full analysis + why the headline
+> deltas are unaffected: [`../llm-backend.md`](../llm-backend.md) §5c "Stale
+> history-index"). **Rebuilding the index should be a step in the `generate_cases`
+> workflow.** A live-runtime MRN test only resolves if the `subject_id` is in the
+> built index: use a `subject_id` from the *current* `cases.json` (post-rebuild:
+> 250/250 known, 226/250 with prior history), or build with `--all-subjects` so any
+> real MIMIC `subject_id` resolves.
+
 ## Patient-history lookup for returning patients (EHR integration) — IMPLEMENTED
 
 **Motivation:** the per-case diagnostic above shows the *entire* residual
