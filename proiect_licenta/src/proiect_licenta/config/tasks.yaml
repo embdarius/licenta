@@ -89,12 +89,21 @@ parse_symptoms_task:
     Use "subject_id": -1 for any patient who is new, declines, or doesn't know
     their MRN. For patients with no prior history (or who skipped the questions):
     use "prior_history": "" and "n_prior_admissions": -1.
+
+    FINAL STEP — confirmation. After you have assembled the complete JSON object,
+    call the `confirm_intake` tool ONCE, passing your JSON object as a string in
+    the `intake_json` argument. This shows the parsed details to the
+    patient/clinician so they can correct any extraction error before triage. The
+    tool returns the confirmed (possibly corrected) JSON. Output EXACTLY what the
+    tool returns as your final answer — do not modify it further. (If the tool is
+    unavailable, output your assembled JSON unchanged.)
   expected_output: >
-    A JSON object with all required fields filled in. Includes `subject_id`
-    (integer MRN, -1 if new/unknown). For ambulance/helicopter patients,
-    includes vital sign fields (use -1 for unknown). All patients include
-    `prior_history` (string, "" if skipped) and `n_prior_admissions`
-    (integer, -1 if skipped). No additional text, only valid JSON.
+    A JSON object with all required fields filled in, as returned by the
+    `confirm_intake` tool. Includes `subject_id` (integer MRN, -1 if
+    new/unknown). For ambulance/helicopter patients, includes vital sign fields
+    (use -1 for unknown). All patients include `prior_history` (string, "" if
+    skipped) and `n_prior_admissions` (integer, -1 if skipped). No additional
+    text, only valid JSON.
   agent: nlp_parser
 
 triage_assessment_task:

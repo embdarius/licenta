@@ -1,13 +1,17 @@
 """
 Ask Patient Tool — CrewAI Tool
 
-Allows an agent to ask the patient a follow-up question
-and receive their response via stdin.
+Allows an agent to ask the patient a follow-up question and receive their
+response. At the terminal the answer is read from stdin; behind the web UI a
+``channel`` is injected and the question is routed to the browser instead (see
+``proiect_licenta.interaction``). Behavior with no channel is unchanged.
 """
 
-from typing import Type
+from typing import Any, Type
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from proiect_licenta.interaction import make_ask
 
 
 class AskPatientInput(BaseModel):
@@ -28,9 +32,13 @@ class AskPatientTool(BaseTool):
         "Ask one question at a time. Be friendly and empathetic."
     )
     args_schema: Type[BaseModel] = AskPatientInput
+    # Web session channel (set by the live backend). None -> stdin (terminal).
+    # Excluded from the LLM-facing args_schema; it is a tool-instance field only.
+    channel: Any = None
 
     def _run(self, question: str) -> str:
         """Ask the patient a question and return their answer."""
-        print(f"\n  [Agent]: {question}")
-        answer = input("  [You]:   ")
-        return answer.strip() if answer.strip() else "No answer provided"
+        ask = make_ask(self.channel, default_role="Agent")
+        answer = ask(question, "text")
+        answer = (answer or "").strip()
+        return answer if answer else "No answer provided"

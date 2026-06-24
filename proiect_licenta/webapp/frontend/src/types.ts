@@ -58,6 +58,43 @@ export interface Top3Entry {
   probability_raw?: number;
 }
 
+// --- Live runtime SSE events + transcript model ---
+export interface LiveEvent {
+  seq: number;
+  type:
+    | "started" | "task_started" | "task_completed" | "task_output"
+    | "agent_started" | "agent_message"
+    | "tool_started" | "tool_finished"
+    | "question" | "reasoning" | "final" | "error" | "done";
+  task?: string;
+  agent?: string;
+  text?: string;
+  tool?: string;
+  args?: any;
+  output?: any;
+  kind?: string;
+  prompt?: string;
+  meta?: any;
+  thought?: string;
+  result?: string;
+  message?: string;
+}
+
+export interface ActiveQuestion {
+  seq: number;
+  kind: string;
+  prompt: string;
+  meta: any;
+}
+
+export type TranscriptItem =
+  | { id: number; kind: "task"; task: string }
+  | { id: number; kind: "agent"; agent: string; text: string }
+  | { id: number; kind: "user"; text: string }
+  | { id: number; kind: "tool"; tool: string; agent: string; status: "running" | "done"; args?: any; output?: any }
+  | { id: number; kind: "card"; tool: string; output: any }
+  | { id: number; kind: "final"; text: string };
+
 export type StageKey =
   | "intake"
   | "triage"

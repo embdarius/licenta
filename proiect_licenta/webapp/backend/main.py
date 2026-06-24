@@ -18,12 +18,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from proiect_licenta import pipeline
 from proiect_licenta.tools.nurse_tool import build_nurse_payload
 
+from webapp.backend import live
 from webapp.backend.schemas import (
     NurseRequest, ParseRequest, ParseResponse, SessionResponse,
     StageResponse, TriageRequest,
 )
 
 app = FastAPI(title="ED Decision-Support — Live Inference")
+
+# Live conversational runtime (drives the real agentic crew over SSE). The
+# stage endpoints below remain as a non-interactive test path (pipeline.py).
+app.include_router(live.router)
 
 # Dev CORS: the Vite dev server proxies /api, but allow direct cross-origin too.
 app.add_middleware(
@@ -50,8 +55,10 @@ def _session(session_id: str) -> dict:
 
 @app.on_event("startup")
 def _warm_models() -> None:
-    """Load the joblib model artifacts once at startup so the first request is fast."""
+    """Load the joblib model artifacts once at startup so the first request is fast,
+    and register the live event-bus listeners."""
     pipeline.get_pipeline_tools()
+    live.register_listeners()
 
 
 @app.get("/api/health")

@@ -11,10 +11,12 @@ for v3, so this tool can drive both pipelines without breakage.
 
 import json
 import re
-from typing import Type
+from typing import Any, Type
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from proiect_licenta.interaction import make_ask
 
 SKIP_WORDS = {
     "skip", "idk", "i don't know", "i dont know", "unknown",
@@ -72,31 +74,28 @@ def _parse_timestamp(text: str) -> float | None:
 _VITAL_FIELDS = ("temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp")
 
 
-def _collect_reading_round(idx: int) -> dict:
+def _collect_reading_round(idx: int, ask) -> dict:
     """Interactively collect ONE chronological set of vital readings + cardiac
     rhythm + an optional timestamp. Returns a dict with the 6 vitals, `rhythm`,
-    and `ts` (float sort-key or None). `idx` is 1-based, for display only."""
-    tag = "first set" if idx == 1 else f"set #{idx}"
-    print(f"\n  --- Reading {tag} ---")
-    print("  [Nurse]: Temperature? (Fahrenheit, e.g., 98.6)")
-    temp = _parse_numeric(input("  [You]:   "))
-    print("\n  [Nurse]: Heart rate? (bpm, e.g., 80)")
-    hr = _parse_numeric(input("  [You]:   "))
-    print("\n  [Nurse]: Respiratory rate? (breaths/min, e.g., 16)")
-    rr = _parse_numeric(input("  [You]:   "))
-    print("\n  [Nurse]: Oxygen saturation? (%, e.g., 98)")
-    o2 = _parse_numeric(input("  [You]:   "))
-    print("\n  [Nurse]: Blood pressure? (e.g., 120/80)")
-    sbp, dbp = _parse_bp(input("  [You]:   "))
-    print("\n  [Nurse]: Cardiac rhythm? (e.g., 'sinus', 'atrial fibrillation',")
-    print("           'paced'; skip if no monitor or unknown)")
-    rhythm = input("  [You]:   ").strip()
+    and `ts` (float sort-key or None). `idx` is 1-based, for display only.
+
+    `ask(prompt, kind, meta=...)` does the asking — stdin at the terminal, or the
+    web channel behind the UI. The `kind`/`meta` hints let the web client render
+    the right input widget; the terminal ignores them."""
+    setno = {"meta": {"reading": idx}}
+    temp = _parse_numeric(ask("Temperature? (Fahrenheit, e.g., 98.6)", "number", **setno))
+    hr = _parse_numeric(ask("Heart rate? (bpm, e.g., 80)", "number", **setno))
+    rr = _parse_numeric(ask("Respiratory rate? (breaths/min, e.g., 16)", "number", **setno))
+    o2 = _parse_numeric(ask("Oxygen saturation? (%, e.g., 98)", "number", **setno))
+    sbp, dbp = _parse_bp(ask("Blood pressure? (e.g., 120/80)", "bp", **setno))
+    rhythm = ask(
+        "Cardiac rhythm? (e.g., sinus, atrial fibrillation, paced; "
+        "skip if no monitor or unknown)", "rhythm", **setno).strip()
     if rhythm.lower() in SKIP_WORDS:
         rhythm = None
-    print("\n  [Nurse]: Time of this reading? (clock time like 14:30, OR minutes")
-    print("           since arrival like 15; press Enter / 'skip' to use the")
-    print("           order you enter readings in)")
-    ts = _parse_timestamp(input("  [You]:   "))
+    ts = _parse_timestamp(ask(
+        "Time of this reading? (clock time like 14:30, OR minutes since arrival "
+        "like 15; skip to use entry order)", "text", **setno))
     return {
         "temperature": temp, "heartrate": hr, "resprate": rr,
         "o2sat": o2, "sbp": sbp, "dbp": dbp, "rhythm": rhythm, "ts": ts,
@@ -196,13 +195,17 @@ class NurseDataCollectionTool(BaseTool):
         "tools (v2 and v3). Call this tool with a brief patient context string."
     )
     args_schema: Type[BaseModel] = NurseCollectionInput
+    # Web session channel (set by the live backend). None -> stdin (terminal).
+    channel: Any = None
 
     def _run(self, patient_context: str) -> str:
         """Interactively collect vital signs and medications."""
-        print(f"\n{'='*55}")
-        print("  NURSE: Vital Signs & Medication Assessment")
-        print(f"{'='*55}")
-        print("  (Type 'skip' or press Enter if you don't know)\n")
+        ask = make_ask(self.channel, default_role="Nurse")
+        if self.channel is None:
+            print(f"\n{'='*55}")
+            print("  NURSE: Vital Signs & Medication Assessment")
+            print(f"{'='*55}")
+            print("  (Type 'skip' or press Enter if you don't know)\n")
 
         # Collect ONE OR MORE chronological reading sets. The first set is the
         # primary/arrival snapshot; each additional set lets the doctor models
@@ -210,22 +213,22 @@ class NurseDataCollectionTool(BaseTool):
         # instead of a single snapshot, which materially improves the admit/
         # discharge prediction and brings the runtime closer to the feature-
         # vector benchmark (which aggregates every reading in the 4h window).
-        rounds = [_collect_reading_round(1)]
+        rounds = [_collect_reading_round(1, ask)]
         _MAX_ROUNDS = 24  # safety cap against a runaway interactive loop
         while len(rounds) < _MAX_ROUNDS:
-            print("\n  [Nurse]: Add another set of readings taken later in the visit?")
-            print("           ('y' to add one to capture the vital trend;")
-            print("            anything else to finish)")
-            if input("  [You]:   ").strip().lower() not in (
+            again = ask(
+                "Add another set of readings taken later in the visit? "
+                "(yes to capture the vital trend; no to finish)", "yesno")
+            if again.strip().lower() not in (
                 "y", "yes", "another", "more", "add",
             ):
                 break
-            rounds.append(_collect_reading_round(len(rounds) + 1))
+            rounds.append(_collect_reading_round(len(rounds) + 1, ask))
 
         # Medications
-        print("\n  [Nurse]: Are you currently taking any medications?")
-        print("           (List them separated by commas, or 'none')")
-        meds_raw = input("  [You]:   ").strip()
+        meds_raw = ask(
+            "Are you currently taking any medications? "
+            "(List them separated by commas, or 'none')", "text").strip()
         if meds_raw.lower() in SKIP_WORDS:
             meds_raw = None
 
@@ -233,10 +236,10 @@ class NurseDataCollectionTool(BaseTool):
         # / past medical history; parsed against pmh_vocab at inference. The
         # v2 tool ignores `prior_history` and `n_prior_admissions`, so the
         # same nurse output still drives the v2 pipeline.
-        print("\n  [Nurse]: Do you have any chronic conditions or past medical")
-        print("           history? (e.g., 'CHF, diabetes, prior stroke'; skip")
-        print("           if none or unknown)")
-        prior_history_raw = input("  [You]:   ").strip()
+        prior_history_raw = ask(
+            "Do you have any chronic conditions or past medical history? "
+            "(e.g., CHF, diabetes, prior stroke; skip if none or unknown)",
+            "text").strip()
         if prior_history_raw.lower() in SKIP_WORDS:
             prior_history_raw = None
 
@@ -244,9 +247,9 @@ class NurseDataCollectionTool(BaseTool):
         # not collected; 0 means the patient said zero. Both map to the
         # no_history=1 fallback at the doctor tool unless conditions were
         # listed above.
-        print("\n  [Nurse]: Roughly how many times have you been admitted to")
-        print("           a hospital before? (a number, or skip)")
-        prior_adm_raw = input("  [You]:   ").strip()
+        prior_adm_raw = ask(
+            "Roughly how many times have you been admitted to a hospital "
+            "before? (a number, or skip)", "integer").strip()
         if prior_adm_raw.lower() in SKIP_WORDS:
             n_prior_admissions = -1
         else:
@@ -262,25 +265,26 @@ class NurseDataCollectionTool(BaseTool):
         rhythm_raw = result["rhythm"]
         _rhythm_readings = result["vital_trajectory"].get("rhythm", [])
 
-        available = sum(1 for v in result["vital_signs"].values() if v is not None)
-        _n_sets = len(rounds)
-        _sorted_note = " (timestamp-ordered)" if (
-            _n_sets > 1 and all(r["ts"] is not None for r in rounds)
-        ) else ""
-        print(f"\n  [Nurse]: Thank you! Collected {available}/6 vital signs "
-              f"across {_n_sets} reading set(s){_sorted_note}.")
-        if rhythm_raw:
-            print(f"           Cardiac rhythm: {rhythm_raw}"
-                  + (f" (+{len(_rhythm_readings) - 1} more)"
-                     if len(_rhythm_readings) > 1 else ""))
-        if meds_raw:
-            print(f"           Medications recorded: {meds_raw}")
-        else:
-            print("           No medication data provided.")
-        if prior_history_raw:
-            print(f"           Prior history: {prior_history_raw}")
-        if n_prior_admissions >= 0:
-            print(f"           Prior admissions reported: {n_prior_admissions}")
-        print(f"{'='*55}")
+        if self.channel is None:
+            available = sum(1 for v in result["vital_signs"].values() if v is not None)
+            _n_sets = len(rounds)
+            _sorted_note = " (timestamp-ordered)" if (
+                _n_sets > 1 and all(r["ts"] is not None for r in rounds)
+            ) else ""
+            print(f"\n  [Nurse]: Thank you! Collected {available}/6 vital signs "
+                  f"across {_n_sets} reading set(s){_sorted_note}.")
+            if rhythm_raw:
+                print(f"           Cardiac rhythm: {rhythm_raw}"
+                      + (f" (+{len(_rhythm_readings) - 1} more)"
+                         if len(_rhythm_readings) > 1 else ""))
+            if meds_raw:
+                print(f"           Medications recorded: {meds_raw}")
+            else:
+                print("           No medication data provided.")
+            if prior_history_raw:
+                print(f"           Prior history: {prior_history_raw}")
+            if n_prior_admissions >= 0:
+                print(f"           Prior admissions reported: {n_prior_admissions}")
+            print(f"{'='*55}")
 
         return json.dumps(result, indent=2)

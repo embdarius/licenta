@@ -6,6 +6,7 @@ from typing import List
 from proiect_licenta.tools.triage_tool import TriagePredictionTool
 from proiect_licenta.tools.ask_patient_tool import AskPatientTool
 from proiect_licenta.tools.nurse_tool import NurseDataCollectionTool
+from proiect_licenta.tools.confirm_intake_tool import ConfirmIntakeTool
 
 # Switchable LLM backend (Gemini Flash 2.5 vs self-hosted MedGemma). get_llm()
 # returns None for the default `flash` backend, which is the CrewAI Agent
@@ -46,7 +47,7 @@ class ProiectLicenta():
         """NLP Parser Agent — conducts patient intake interview."""
         return Agent(
             config=self.agents_config['nlp_parser'],  # type: ignore[index]
-            tools=[AskPatientTool()],
+            tools=[AskPatientTool(), ConfirmIntakeTool()],
             llm=get_llm(),
             verbose=True,
         )

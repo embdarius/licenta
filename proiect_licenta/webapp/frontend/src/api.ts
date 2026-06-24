@@ -23,6 +23,15 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  // --- Live conversational runtime (drives the real agentic crew) ---
+  startLive: (narrative: string) =>
+    post<{ session_id: string }>("/live/start", { narrative }),
+  answerLive: (sid: string, text: string) =>
+    post<{ ok: boolean }>(`/live/answer/${sid}`, { text }),
+  cancelLive: (sid: string) => post<{ ok: boolean }>(`/live/cancel/${sid}`),
+  liveStreamUrl: (sid: string) => `${BASE}/live/stream/${sid}`,
+
+  // --- Phase-1 stage endpoints (retained as a non-interactive test path) ---
   session: () => post<{ session_id: string }>("/session"),
   parse: (narrative: string) => post<ParseResponse>("/parse", { narrative }),
   triage: (req: IntakeForm & { session_id: string }) =>

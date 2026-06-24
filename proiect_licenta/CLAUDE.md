@@ -16,6 +16,7 @@
 | [`docs/llm-backend.md`](docs/llm-backend.md) | Switchable LLM backend (Gemini Flash 2.5 ↔ self-hosted MedGemma): `llm_config` design, vLLM/Colab serving, same-mode `parser-llm` benchmark, 20-case Experiment A results |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference (used + inspected-but-unused, leakage notes) |
 | [`docs/future-work.md`](docs/future-work.md) | Why v2 gains were modest, prioritized roadmap, known issues, planned phases 4 + 5 |
+| [`webapp/README.md`](webapp/README.md) | Web interface — live conversational runtime (drives the real crew over SSE; injected interactive-tool channel + event-bus telemetry + intake-confirmation gate) + retained stage/parity test path |
 
 ## Key facts to internalize before changing code
 
