@@ -807,6 +807,29 @@ End-to-end union (v3-nurse, has-PMH): rollup **+0.92pp**, full **+1.59pp**. Key 
 
 **Cumulative Stage-2 progression** (v3-nurse oracle@5 rollup): text+prev 0.6698 → +vitals 0.6832 → +rhythm/delta 0.6913 → +PMH 0.6976 (**0.7269 on has-PMH**). Full code: 0.4919 → 0.5129 → 0.5253 → 0.5367 (**0.5834 on has-PMH**).
 
+### Graded near-miss metrics (evaluation-only, shipped 2026-06-25)
+
+All metrics above are **strict exact-code recall** — the prediction either contains the true code (credit 1) or it doesn't (credit 0), so predicting *hepatitis A* when the truth is *hepatitis B* scores exactly 0, identical to a wildly wrong code. To reward clinically-close misses (a request from the thesis supervisor), `benchmark_icd_resolution.py` additionally reports **three graded metrics**. They are **evaluation-only**: the predictor, the resolver artifact, and training are untouched — the model emits the same ranked code lists, scored three extra ways. Core in `src/proiect_licenta/icd_similarity.py`.
+
+**Graded credit** mirrors recall@k by replacing the 0/1 hit with the **max similarity over the top-k predicted codes**: `graded@k(row) = max_{c∈topk} sim(true_code, c)`, averaged over rows. Both sides compare the code's **representative title** (the resolver index's per-code title), so an exact hit scores cosine 1.0 and the invariant **graded@k ≥ strict recall@k** holds everywhere (self-checked every run: `_meta.invariant_graded_ge_strict_violations` must be 0).
+
+The three `sim(·,·)` engines:
+
+- **`tfidf`** — the supervisor's literal "cosine on ICD titles": cosine of TF-IDF vectors of the two codes' titles (lexical). The token pattern keeps single-char tokens (`\b\w+\b`), so "hepatitis A" vs "B" differ (0.49) rather than collapsing to an identical vector. Zero new deps, fully offline.
+- **`gemini`** — semantic cosine of **Gemini embeddings** (`gemini-embedding-001`, dim 3072) of the titles. Built once via `uv run python benchmarks/build_title_embeddings.py` → cached to `artifacts/doctor/v3/icd_resolver/title_embeddings.joblib` (gitignored, 9,491 vectors), then read **offline under any LLM backend** (decoupled from `LLM_BACKEND`; only needs a Gemini key at build time). Rate-limited (≤2000/min) + 429-retry + incremental save.
+- **`tree`** — hierarchical ICD distance: exact code **1.0** / shared 3-char rollup **0.6** / shared ICD chapter **0.3** / else 0. Chapters are version-aware and unified, so an ICD-9 code and its ICD-10 equivalent land in the same bucket (e.g. `410`/`I21` → "circulatory").
+
+Results (v3-nurse test split, **blend+vitals**; full numbers in `artifacts/benchmarks/icd_resolution_graded.json`):
+
+| metric | strict | tfidf | gemini | tree |
+|---|---|---|---|---|
+| Oracle@5 (rollup) | 0.6913 | 0.7257 | 0.9147 | 0.7837 |
+| Oracle@10 (rollup) | 0.8130 | 0.8404 | 0.9517 | 0.8689 |
+| Oracle@5 (full code) | 0.5253 | 0.6004 | 0.8795 | 0.7002 |
+| E2E union (rollup) | 0.6488 | 0.6927 | 0.9038 | 0.7323 |
+
+Reading them: **tfidf** sits modestly above strict (+3–8pp) — lexical near-miss credit; **tree** higher (chapter-level credit) and the most clinically interpretable "how close in the ICD taxonomy"; **gemini** very high (0.85–0.95) because semantic embeddings have a high similarity *floor* (clinical phrases are all somewhat alike), so its **deltas and ordering** matter more than absolute values. All three preserve the qualitative findings of the strict metrics: the nurse-step lift stays positive on E2E union/flat for every engine, and the PMH gate's no-PMH subset is still *exactly* unchanged (+0.0000) across all graded engines. This partially addresses the [ICD-9/10 split issue](#whats-next) — the `tree` (and to a degree the title) metrics give same-disease cross-version pairs (e.g. `599`/`N39` UTI) chapter-level credit instead of a hard zero.
+
 ### End-to-end on the live runtime (20 NL cases, doctor+nurse, 2026-06-15)
 
 All numbers above are the *tabular* benchmark (`benchmark_icd_resolution.py`, 20,420 test stays). To check the resolver through the **live crew** end-to-end, `benchmarks/benchmark_pipeline_e2e.py` now scores it on the 20 synthetic NL cases (13 admitted) alongside the existing acuity/disposition/category targets, reading the v3 tool's `exact_diagnoses` block for the E2E/tool-direct columns and running the resolver on cached features for feature-vector (`_fv_exact_icd`, reuses `physio_matrix`). The runtime tool resolves over top-5 cats / k_per_cat=5 / k_flat=10 — identical to this benchmark — so the metrics are comparable.

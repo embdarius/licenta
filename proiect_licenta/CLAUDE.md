@@ -10,7 +10,7 @@
 | [`docs/architecture.md`](docs/architecture.md) | Full pipeline diagram, cascading prediction design, on-disk layout |
 | [`docs/agents/nlp-parser-agent.md`](docs/agents/nlp-parser-agent.md) | NLP Parser (LLM): role, I/O contract, `AskPatientTool` |
 | [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage: acuity + disposition models, training evolution v1 → v3b, benchmarks |
-| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor v1/v2/v3 + disposition + Stage-2 ICD: XGBoost models, grouping tables, vital/medication processing, longitudinal vitals + rhythm |
+| [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor v1/v2/v3 + disposition + Stage-2 ICD: XGBoost models, grouping tables, vital/medication processing, longitudinal vitals + rhythm, graded near-miss metrics |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse: interactive collection flow, partial data handling |
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case; 4-way E2E vs tabular benchmark (incl. gate-isolating column) + the runtime multi-reading-vitals fix |
 | [`docs/llm-backend.md`](docs/llm-backend.md) | Switchable LLM backend (Gemini Flash 2.5 ↔ self-hosted MedGemma): `llm_config` design, vLLM/Colab serving, same-mode `parser-llm` benchmark, 20-case Experiment A results |
@@ -38,6 +38,7 @@
 - `src/proiect_licenta/llm_config.py` — switchable LLM backend (`get_llm`, `LLM_BACKEND` flash↔medgemma).
 - `src/proiect_licenta/pmh_features.py`, `pmh_vocab.py` — Past Medical History feature derivation + vocabulary.
 - `src/proiect_licenta/icd_resolution.py`, `vital_trajectory.py` — Stage-2 exact-ICD resolver + longitudinal-vital helpers.
+- `src/proiect_licenta/icd_similarity.py` — evaluation-only graded near-miss metrics for Stage-2 (TF-IDF + Gemini title cosine, ICD-tree distance); used by `benchmark_icd_resolution.py` + `build_title_embeddings.py`.
 - `src/proiect_licenta/config/{agents,tasks}.yaml` — live agent prompts + task definitions; `config/case_generation_{agents,tasks}.yaml` — dedicated offline case-generation crew.
 - `src/proiect_licenta/tools/` — CrewAI BaseTool implementations (live: triage v3, doctor v3_base, doctor disposition, doctor v3, nurse, ask-patient, patient-history-lookup; v1/v2 tools retained as baselines).
 - `src/proiect_licenta/training/` — training pipelines: `train_{triage_v1,triage_v2,triage_v3,doctor,nurse,doctor_v3,nurse_v3,doctor_disposition,icd_resolver}.py`.
