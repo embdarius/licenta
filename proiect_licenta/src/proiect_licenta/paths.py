@@ -61,6 +61,12 @@ DISCHARGE_NOTES_CSV = (
 # out of memory between training runs. Created on first parse.
 DERIVED_DIR = DATA_DIR / "derived"
 
+# Triage-v3 hyperparameter-search feature cache (float32 parquet: the outer
+# train/test feature matrices + targets). Distinct from the doctor's
+# `derived/tune_cache/` so the two sweeps never share a cache. Built by
+# scripts/tune_triage_v3.py on first run; reused in seconds thereafter.
+TRIAGE_TUNE_CACHE_DIR = DERIVED_DIR / "triage_tune_cache"
+
 # ---- Trained model artifacts --------------------------------------------
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
@@ -69,6 +75,12 @@ TRIAGE_V2_DIR = ARTIFACTS_DIR / "triage" / "v2"
 # Triage v3 adds the same 19-feature PMH block used by Doctor v3 nurse
 # (Change 1) on top of the v2 vital-augmented feature set.
 TRIAGE_V3_DIR = ARTIFACTS_DIR / "triage" / "v3"
+# Triage-v3 hyperparameter-search outputs (Optuna SQLite study, per-trial JSON
+# logs, tuned-params + final report). A dedicated subdir so the constrained
+# Group-2 regularization sweep (scripts/tune_triage_v3.py) never overwrites the
+# live triage v3 model joblibs that sit directly in TRIAGE_V3_DIR. Reporting-
+# only: the sweep reads the live models but never writes them.
+TRIAGE_V3_HPO_DIR = TRIAGE_V3_DIR / "hpo"
 DOCTOR_V1_DIR = ARTIFACTS_DIR / "doctor" / "v1"
 DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # v3 tier: catch-all class ("Symptoms, Signs, Ill-Defined") excluded, full
