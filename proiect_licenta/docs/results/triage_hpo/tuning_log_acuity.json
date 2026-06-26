@@ -1,0 +1,199 @@
+{
+  "stage": "acuity",
+  "study_name": "triage_acuity_qwk",
+  "baseline_under_rate": 0.15514096929470506,
+  "baseline_qwk": 0.6424901016852489,
+  "n_complete": 9,
+  "updated_at": "2026-06-25T18:40:59.328101",
+  "trials": [
+    {
+      "number": 2,
+      "value": 0.6424901016852489,
+      "params": {
+        "max_depth": 7,
+        "subsample": 0.9802857225639665,
+        "colsample_bytree": 0.7391963650868432,
+        "colsample_bylevel": 0.7993292420985183,
+        "min_child_weight": 4,
+        "gamma": 0.020511104188433976,
+        "reg_alpha": 0.014347159517201415,
+        "reg_lambda": 6.697167353375242
+      },
+      "qwk": 0.6424901016852489,
+      "exact": 0.674529853200586,
+      "within_1": 0.9805214219511466,
+      "under_rate": 0.15514096929470506,
+      "over_rate": 0.17032917750470894,
+      "best_iteration": 4999,
+      "feasible": true
+    },
+    {
+      "number": 3,
+      "value": 0.6446152136840801,
+      "params": {
+        "max_depth": 9,
+        "subsample": 0.8832290311184181,
+        "colsample_bytree": 0.31235069657748143,
+        "colsample_bylevel": 0.9849549260809971,
+        "min_child_weight": 17,
+        "gamma": 0.0265875439832727,
+        "reg_alpha": 0.030955664602423716,
+        "reg_lambda": 0.8661333735273129
+      },
+      "qwk": 0.6446152136840801,
+      "exact": 0.677504708942506,
+      "within_1": 0.9808204024277215,
+      "under_rate": 0.15336203545908453,
+      "over_rate": 0.16913325559840942,
+      "best_iteration": 4998,
+      "feasible": true
+    },
+    {
+      "number": 4,
+      "value": 0.6416441902460676,
+      "params": {
+        "max_depth": 6,
+        "subsample": 0.8099025726528951,
+        "colsample_bytree": 0.5591670111852695,
+        "colsample_bylevel": 0.645614570099021,
+        "min_child_weight": 13,
+        "gamma": 0.01901024531987036,
+        "reg_alpha": 0.06144543785587471,
+        "reg_lambda": 1.498365454855079
+      },
+      "qwk": 0.6416441902460676,
+      "exact": 0.67388704517595,
+      "within_1": 0.9801327473315993,
+      "under_rate": 0.15449816127006907,
+      "over_rate": 0.17161479355398093,
+      "best_iteration": 4998,
+      "feasible": true
+    },
+    {
+      "number": 5,
+      "value": 0.6447773497563754,
+      "params": {
+        "max_depth": 8,
+        "subsample": 0.9140703845572055,
+        "colsample_bytree": 0.41980426929501585,
+        "colsample_bylevel": 0.7571172192068059,
+        "min_child_weight": 12,
+        "gamma": 0.012385137298860933,
+        "reg_alpha": 0.436259936256056,
+        "reg_lambda": 0.8333491643033208
+      },
+      "qwk": 0.6447773497563754,
+      "exact": 0.6769366460370138,
+      "within_1": 0.9807008102370915,
+      "under_rate": 0.15384040422160433,
+      "over_rate": 0.16922294974138188,
+      "best_iteration": 4999,
+      "feasible": true
+    },
+    {
+      "number": 6,
+      "value": 0.6356623478808947,
+      "params": {
+        "max_depth": 4,
+        "subsample": 0.9795542149013333,
+        "colsample_bytree": 0.8793792198447357,
+        "colsample_bylevel": 0.9041986740582306,
+        "min_child_weight": 7,
+        "gamma": 0.015679933916723017,
+        "reg_alpha": 0.702626320544305,
+        "reg_lambda": 1.8690529340958983
+      },
+      "qwk": 0.6356623478808947,
+      "exact": 0.6692528477890394,
+      "within_1": 0.9794301432116482,
+      "under_rate": 0.15599306365294346,
+      "over_rate": 0.17475408855801716,
+      "best_iteration": 4999,
+      "feasible": false
+    },
+    {
+      "number": 7,
+      "value": 0.6413615528843493,
+      "params": {
+        "max_depth": 5,
+        "subsample": 0.798070764044508,
+        "colsample_bytree": 0.320633112669131,
+        "colsample_bylevel": 0.954660201039391,
+        "min_child_weight": 6,
+        "gamma": 0.21137059440645725,
+        "reg_alpha": 0.06939031266619745,
+        "reg_lambda": 2.374619881840204
+      },
+      "qwk": 0.6413615528843493,
+      "exact": 0.6730947469130266,
+      "within_1": 0.9804317278081741,
+      "under_rate": 0.15439351810326785,
+      "over_rate": 0.17251173498370556,
+      "best_iteration": 4998,
+      "feasible": true
+    },
+    {
+      "number": 8,
+      "value": 0.6444389932133635,
+      "params": {
+        "max_depth": 8,
+        "subsample": 0.6739417822102108,
+        "colsample_bytree": 0.8817507766587351,
+        "colsample_bylevel": 0.8875664116805573,
+        "min_child_weight": 19,
+        "gamma": 0.6161049539380962,
+        "reg_alpha": 0.41087915453240803,
+        "reg_lambda": 7.913270952323784
+      },
+      "qwk": 0.6444389932133635,
+      "exact": 0.6769067479893563,
+      "within_1": 0.9803121356175442,
+      "under_rate": 0.15298830986336592,
+      "over_rate": 0.17010494214727778,
+      "best_iteration": 4998,
+      "feasible": true
+    },
+    {
+      "number": 9,
+      "value": 0.6370851332172565,
+      "params": {
+        "max_depth": 4,
+        "subsample": 0.6783931449676581,
+        "colsample_bytree": 0.32713637334632284,
+        "colsample_bylevel": 0.6626651653816322,
+        "min_child_weight": 8,
+        "gamma": 0.03488976654890366,
+        "reg_alpha": 1.724795771004602,
+        "reg_lambda": 1.455850511621371
+      },
+      "qwk": 0.6370851332172565,
+      "exact": 0.6702992794570515,
+      "within_1": 0.9798188178311956,
+      "under_rate": 0.15506622417556135,
+      "over_rate": 0.1746344963673872,
+      "best_iteration": 4998,
+      "feasible": true
+    },
+    {
+      "number": 10,
+      "value": 0.6426781384999201,
+      "params": {
+        "max_depth": 6,
+        "subsample": 0.8170784332632994,
+        "colsample_bytree": 0.3845545349848576,
+        "colsample_bylevel": 0.9010984903770198,
+        "min_child_weight": 2,
+        "gamma": 0.9413993046829938,
+        "reg_alpha": 1.2141307774357368,
+        "reg_lambda": 0.90678654338917
+      },
+      "qwk": 0.6426781384999201,
+      "exact": 0.6752175082967082,
+      "within_1": 0.9805363709749754,
+      "under_rate": 0.1541094866505217,
+      "over_rate": 0.17067300505277005,
+      "best_iteration": 4998,
+      "feasible": true
+    }
+  ]
+}

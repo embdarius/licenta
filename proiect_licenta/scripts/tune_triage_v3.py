@@ -94,12 +94,30 @@ from proiect_licenta.paths import (
 # Frozen Group-1 config + reusable feature/metric machinery — single source of
 # truth is the training pipeline; we never re-implement it here.
 from proiect_licenta.training.train_triage_v3 import (
-    XGB_DEVICE, XGB_TREE_METHOD,
     load_and_clean_data, build_features,
     neg_quadratic_kappa, ESI_EXTREME_BOOST,
     ACUITY_N_ESTIMATORS, ACUITY_LEARNING_RATE, ACUITY_EARLY_STOPPING_ROUNDS,
     DISP_N_ESTIMATORS, DISP_LEARNING_RATE, DISP_EARLY_STOPPING_ROUNDS,
 )
+
+# Read the GPU device at RUNTIME, not import-time. train_triage_v3 caches its
+# own XGB_DEVICE at first import; in a Colab session where an earlier cell
+# imported that module before `XGB_DEVICE=cuda` was set (e.g. the self-test
+# cell), the cached constant would be stale "cpu" and every later run would
+# silently train on CPU. Reading os.environ here — this file's top level re-runs
+# on every `runpy.run_path` call, and is re-read in main() too — keeps the
+# device correct regardless of cell order.
+XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
+XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
+
+# Early-stopping metric used DURING THE SEARCH only. The custom QWK metric
+# (neg_quadratic_kappa) runs in Python and forces a GPU→host round-trip every
+# boosting round, which made each acuity trial take hours. The native mlogloss
+# is computed on-device and picks essentially the same iteration (the docs note
+# QWK early-stopping is "mostly cosmetic"; the sample-weight boost is the lever).
+# The trial is still SCORED by QWK + under-triage after fit, and the `report`
+# stage re-fits the winner with the real neg_quadratic_kappa at full fidelity.
+SEARCH_EVAL_METRIC = "mlogloss"
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +207,15 @@ def _acuity_sample_weights(y_train: pd.Series) -> pd.Series:
     return base * y_train.map(ESI_EXTREME_BOOST)
 
 
-def train_acuity(X_tr, y_tr, X_val, y_val, group2, gcfg, desc):
+def train_acuity(X_tr, y_tr, X_val, y_val, group2, gcfg, desc, eval_metric=None):
     """Train one acuity model (frozen G1 + given Group-2). y_* are ESI 1-5;
-    shifted to 0-4 for the multi:softprob objective (matches training)."""
+    shifted to 0-4 for the multi:softprob objective (matches training).
+
+    eval_metric controls the early-stopping metric only: the search passes the
+    native SEARCH_EVAL_METRIC ("mlogloss") for speed; report/full-fidelity calls
+    leave it None to use the documented neg_quadratic_kappa. Either way the model
+    is scored by QWK after fit."""
+    metric = eval_metric if eval_metric is not None else neg_quadratic_kappa
     sample_weights = _acuity_sample_weights(y_tr)
     cb = _make_trial_progress_callback(gcfg["acuity_n_estimators"], desc)
     model = XGBClassifier(
@@ -199,7 +223,7 @@ def train_acuity(X_tr, y_tr, X_val, y_val, group2, gcfg, desc):
         learning_rate=gcfg["acuity_learning_rate"],
         early_stopping_rounds=gcfg["acuity_early_stopping_rounds"],
         objective="multi:softprob", num_class=5,
-        eval_metric=neg_quadratic_kappa,
+        eval_metric=metric,
         random_state=42, n_jobs=-1, verbosity=0,
         device=XGB_DEVICE, tree_method=XGB_TREE_METHOD,
         callbacks=[cb] if cb is not None else None,
@@ -351,7 +375,13 @@ def _atomic_write_json(path: Path, payload: dict):
             os.remove(tmp)
 
 
-def make_trial_logger(log_path: Path, stage: str):
+def make_trial_logger(log_path: Path, stage: str, out_dir: Path):
+    """Optuna callback. After every trial it (1) rewrites the human-readable
+    per-trial JSON log and (2) re-writes the best-config block into
+    tuned_params_triage.json. Writing the block every trial (not just at the end
+    of optimize()) makes the chunked/interruptible workflow safe: a Ctrl-C or
+    Colab reclaim mid-chunk still leaves a usable tuned_params for the next
+    stage."""
     def _log(study, trial):
         rows = []
         for t in study.trials:
@@ -377,6 +407,21 @@ def make_trial_logger(log_path: Path, stage: str):
         }
         _atomic_write_json(log_path, payload)
 
+        # Persist the best-config block every trial (interruption-safe).
+        if stage == "acuity":
+            best = best_feasible_trial(study)
+            if best is not None:
+                _update_tuned_params(out_dir, "acuity", _acuity_block(study, best),
+                                     quiet=True)
+        elif stage == "disposition":
+            try:
+                best = study.best_trial
+            except ValueError:
+                best = None
+            if best is not None:
+                _update_tuned_params(out_dir, "disposition",
+                                     _disposition_block(study, best), quiet=True)
+
         if trial.state.name == "COMPLETE":
             ua = trial.user_attrs
             extra = ""
@@ -399,6 +444,36 @@ def best_feasible_trial(study):
     return max(feas, key=lambda t: t.value) if feas else None
 
 
+def _acuity_block(study, best) -> dict:
+    return {
+        "study_name": study.study_name,
+        "best_trial": int(best.number),
+        "objective": "QWK s.t. under_rate <= incumbent",
+        "baseline_under_rate": study.user_attrs.get("baseline_under_rate"),
+        "baseline_qwk": study.user_attrs.get("baseline_qwk"),
+        "best_qwk": float(best.value),
+        "best_under_rate": float(best.user_attrs["under_rate"]),
+        "best_within_1": float(best.user_attrs["within_1"]),
+        "best_exact": float(best.user_attrs["exact"]),
+        "n_trials": len(study.trials),
+        "params": best.params,
+        "written_at": datetime.now().isoformat(),
+    }
+
+
+def _disposition_block(study, best) -> dict:
+    return {
+        "study_name": study.study_name,
+        "best_trial": int(best.number),
+        "objective": "ROC AUC",
+        "best_roc_auc": float(best.value),
+        "best_accuracy": float(best.user_attrs["accuracy"]),
+        "n_trials": len(study.trials),
+        "params": best.params,
+        "written_at": datetime.now().isoformat(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Stage: acuity (constrained QWK)
 # ---------------------------------------------------------------------------
@@ -416,7 +491,8 @@ def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
               f"mcw={group2['min_child_weight']} gamma={group2['gamma']:.3f} "
               f"a={group2['reg_alpha']:.3f} l={group2['reg_lambda']:.3f}", flush=True)
         model = train_acuity(X_in_tr, y_in_tr, X_in_val, y_in_val, group2, gcfg,
-                             f"    trial #{trial.number} acuity")
+                             f"    trial #{trial.number} acuity",
+                             eval_metric=SEARCH_EVAL_METRIC)
         y_pred = model.predict(X_in_val) + 1
         m = acuity_metrics(y_in_val, y_pred)
 
@@ -448,7 +524,7 @@ def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
 
     log_path = out_dir / "tuning_log_acuity.json"
     study.optimize(objective, n_trials=args.n_trials, timeout=args.timeout,
-                   callbacks=[make_trial_logger(log_path, "acuity")],
+                   callbacks=[make_trial_logger(log_path, "acuity", out_dir)],
                    gc_after_trial=True)
 
     best = best_feasible_trial(study)
@@ -461,20 +537,7 @@ def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
           f"(baseline under={study.user_attrs['baseline_under_rate']*100:.2f}%)")
     for k, v in best.params.items():
         print(f"    {k:18s} = {v}")
-    _update_tuned_params(out_dir, "acuity", {
-        "study_name": study.study_name,
-        "best_trial": int(best.number),
-        "objective": "QWK s.t. under_rate <= incumbent",
-        "baseline_under_rate": study.user_attrs["baseline_under_rate"],
-        "baseline_qwk": study.user_attrs["baseline_qwk"],
-        "best_qwk": float(best.value),
-        "best_under_rate": float(best.user_attrs["under_rate"]),
-        "best_within_1": float(best.user_attrs["within_1"]),
-        "best_exact": float(best.user_attrs["exact"]),
-        "n_trials": len(study.trials),
-        "params": best.params,
-        "written_at": datetime.now().isoformat(),
-    })
+    _update_tuned_params(out_dir, "acuity", _acuity_block(study, best))
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +562,8 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_
         X_train, y_acuity, test_size=0.2, random_state=1, stratify=y_acuity,
     )
     acu_model = train_acuity(acu_tr, ya_tr, acu_val, ya_val, acu_params, gcfg,
-                             "    acuity (for cascade)")
+                             "    acuity (for cascade)",
+                             eval_metric=SEARCH_EVAL_METRIC)
     X_disp = X_train.copy()
     X_disp["predicted_acuity"] = acu_model.predict(X_train) + 1
 
@@ -534,7 +598,7 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_
 
     log_path = out_dir / "tuning_log_disposition.json"
     study.optimize(objective, n_trials=args.n_trials, timeout=args.timeout,
-                   callbacks=[make_trial_logger(log_path, "disposition")],
+                   callbacks=[make_trial_logger(log_path, "disposition", out_dir)],
                    gc_after_trial=True)
 
     best = study.best_trial
@@ -543,16 +607,7 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_
           f"acc={best.user_attrs['accuracy']*100:.2f}%")
     for k, v in best.params.items():
         print(f"    {k:18s} = {v}")
-    _update_tuned_params(out_dir, "disposition", {
-        "study_name": study.study_name,
-        "best_trial": int(best.number),
-        "objective": "ROC AUC",
-        "best_roc_auc": float(best.value),
-        "best_accuracy": float(best.user_attrs["accuracy"]),
-        "n_trials": len(study.trials),
-        "params": best.params,
-        "written_at": datetime.now().isoformat(),
-    })
+    _update_tuned_params(out_dir, "disposition", _disposition_block(study, best))
 
 
 # ---------------------------------------------------------------------------
@@ -676,11 +731,12 @@ def _read_tuned_params(out_dir: Path) -> dict | None:
     return json.loads(p.read_text()) if p.exists() else None
 
 
-def _update_tuned_params(out_dir: Path, key: str, block: dict):
+def _update_tuned_params(out_dir: Path, key: str, block: dict, quiet: bool = False):
     data = _read_tuned_params(out_dir) or {}
     data[key] = block
     _atomic_write_json(_tuned_path(out_dir), data)
-    print(f"  Updated {_tuned_path(out_dir)} ['{key}']")
+    if not quiet:
+        print(f"  Updated {_tuned_path(out_dir)} ['{key}']")
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +786,8 @@ def run_selftest():
     study = optuna.create_study(direction="maximize", study_name="selftest",
                                 storage=storage, load_if_exists=True, sampler=sampler)
     study.enqueue_trial(FROZEN_GROUP2)
-    study.optimize(objective, n_trials=1, callbacks=[make_trial_logger(log_path, "acuity")])
+    study.optimize(objective, n_trials=1,
+                   callbacks=[make_trial_logger(log_path, "acuity", tmp)])
 
     assert (tmp / "selftest.db").exists(), "study DB not written"
     assert log_path.exists(), "JSON log not written"
@@ -785,6 +842,11 @@ def main():
                     help="Real-data subsample, throwaway paths, fast trees.")
     ap.add_argument("--selftest", action="store_true",
                     help="Synthetic CPU plumbing test (no data/GPU).")
+    ap.add_argument("--search-tree-cap", type=int, default=None,
+                    help="Cap n_estimators during the acuity/disposition SEARCH "
+                         "(e.g. 2500). QWK plateaus well before 5000 trees, so a "
+                         "cap speeds trials without changing the ranking. The "
+                         "report stage always re-fits the winner at full trees.")
     ap.add_argument("--storage", default=None, help="Optuna storage URL.")
     ap.add_argument("--study-name", default=None)
     ap.add_argument("--cache-dir", default=None)
@@ -793,6 +855,13 @@ def main():
     if args.selftest:
         run_selftest()
         return
+
+    # Re-read the device at call time so the importlib-as-module entry path also
+    # honours an XGB_DEVICE set just before main() (runpy re-runs the module top
+    # level, but a cached-module import would not).
+    global XGB_DEVICE, XGB_TREE_METHOD
+    XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
+    XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
     try:
         import optuna
@@ -812,6 +881,10 @@ def main():
         TRIAGE_TUNE_CACHE_DIR / "smoke" if args.smoke else TRIAGE_TUNE_CACHE_DIR
     )
     gcfg = _make_gcfg(args.smoke)
+    # Tree cap applies to the SEARCH stages only (report re-fits at full trees).
+    if args.search_tree_cap and args.stage in ("acuity", "disposition"):
+        gcfg["acuity_n_estimators"] = min(gcfg["acuity_n_estimators"], args.search_tree_cap)
+        gcfg["disp_n_estimators"] = min(gcfg["disp_n_estimators"], args.search_tree_cap)
 
     print("=" * 60)
     print(f"  Triage v3 HPO — stage={args.stage}{'  [SMOKE]' if args.smoke else ''}")
@@ -820,6 +893,11 @@ def main():
     print(f"  out_dir:   {out_dir}")
     print(f"  cache_dir: {cache_dir}")
     print(f"  device:    {XGB_DEVICE}  tree_method: {XGB_TREE_METHOD}")
+    if args.search_tree_cap and args.stage in ("acuity", "disposition"):
+        print(f"  search tree cap: {args.search_tree_cap}")
+    if XGB_DEVICE == "cpu":
+        print("  WARNING: device is CPU — training will be very slow. Set "
+              "XGB_DEVICE=cuda (and use a GPU runtime) before running.")
     print(f"  REPORTING-ONLY: live models in {TRIAGE_V3_DIR} will NOT be modified.")
     print("=" * 60)
 

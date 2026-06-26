@@ -9,7 +9,7 @@
 | [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) | Overview, benchmarks, design decisions, run commands, status of each phase |
 | [`docs/architecture.md`](docs/architecture.md) | Full pipeline diagram, cascading prediction design, on-disk layout |
 | [`docs/agents/nlp-parser-agent.md`](docs/agents/nlp-parser-agent.md) | NLP Parser (LLM): role, I/O contract, `AskPatientTool` |
-| [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage: acuity + disposition models, training evolution v1 → v3b, benchmarks |
+| [`docs/agents/triage-agent.md`](docs/agents/triage-agent.md) | Triage: acuity + disposition models, training evolution v1 → v3b, benchmarks, constrained Group-2 Optuna HPO (reporting-only) |
 | [`docs/agents/doctor-agent.md`](docs/agents/doctor-agent.md) | Doctor v1/v2/v3 + disposition + Stage-2 ICD: XGBoost models, grouping tables, vital/medication processing, longitudinal vitals + rhythm, graded near-miss metrics |
 | [`docs/agents/nurse-agent.md`](docs/agents/nurse-agent.md) | Nurse: interactive collection flow, partial data handling |
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case; 4-way E2E vs tabular benchmark (incl. gate-isolating column) + the runtime multi-reading-vitals fix |

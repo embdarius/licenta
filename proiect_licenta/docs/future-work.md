@@ -576,9 +576,37 @@ Ordered by expected lift per unit of effort.
 - ~~**Ordinal acuity objective + ESI 1/5 reweighting.**~~ **DONE in triage v3 iter 2** via the `ESI_EXTREME_BOOST` sample-weight multiplier + `neg_quadratic_kappa` early-stopping metric. ESI 5 recall recovered from 14% to 26.8%; ESI 1 and ESI 2 both gained. The QWK eval metric is mostly cosmetic — the sample-weight boost is the dominant lever. Open knob: dial the ESI 5 boost from 2.0× to 1.5× if a future training run wants to recover some headline accuracy without giving up the under-triage win.
 - ~~**Hand-curated red-flag keyword features (section 1.5).**~~ **TRIED AND REVERTED (2026-05-28).** A 44-column block of cardiac/neuro/respiratory/trauma/sepsis red flags was added on top of iter 2 (giving "iter 3"). Result: every headline metric within ±0.04pp noise floor; under-triage rate actually +0.02pp (slightly worse). 31/44 acuity red flags + 26/44 disposition red flags had non-zero gain — the features did engage (rf_palpitations was rank 13 on disposition), but TF-IDF and the ESI extreme-class weights from iter 2 already covered the same signal. See ["Empirical findings — experiments tried and reverted" entry 6](#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor) for the full audit.
 - ~~**Wire v3 into runtime inference.**~~ **DONE (2026-05-29).** `triage_tool.py` now loads `artifacts/triage/v3/` and builds the 2070-feature vector (23 v1 + 28 v2 + 19 PMH + 2000 TF-IDF). The NLP Parser collects `prior_history` (free-text chronic conditions) and `n_prior_admissions` (int) from every patient at intake — both can be skipped, and skip-equivalents zero-fill to the first-time-patient pattern (`no_history=1`) the model saw on 39% of training rows. Same `pmh_vocab` inference parsing as the doctor v3 tool, so the two pipelines share PMH semantics. The tool's result JSON includes a `prior_history_used` block listing which PMH category flags fired, so the Doctor Agent can surface that reasoning in its clinical note.
+- ~~**Systematic hyperparameter search (Group-2 regularization box).**~~ **DONE (2026-06-26) — confirmed near-optimal.** Constrained Optuna sweep over the eight inherited XGBoost regularization knobs (`max_depth`, `subsample`, `colsample_*`, `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`), holding the documented Group-1 config frozen. Acuity objective = QWK subject to under-triage ≤ incumbent; disposition objective = ROC AUC. **No config beat the inherited values**: acuity best QWK 0.6448 (within ~0.002 of the incumbent, no feasible improvement), disposition incumbent config was the outright best (ROC AUC 0.8641). Turns the previously-unjustified regularization box into a defended choice. Engine `scripts/tune_triage_v3.py`, logs in [`docs/results/triage_hpo/`](results/triage_hpo/), full write-up in [`docs/agents/triage-agent.md` → "Hyperparameter search"](agents/triage-agent.md). See also the cross-agent rollout below.
 - Try LightGBM as an alternative to XGBoost.
 - Ensemble methods (stacking multiple models).
 - Neural network with learned embeddings for complaint text.
+
+### Hyperparameter search — extend the constrained Group-2 sweep to the remaining agents (next future work)
+
+The triage sweep above is the **pilot/template** for a reusable, defensible HPO
+pass. The same recipe — freeze the documented Group-1 / clinical-safety config,
+search only the inherited Group-2 regularization box, optimize the agent's *real*
+metric (with a safety constraint where one exists), reporting-only into a
+dedicated `hpo/` subdir, resumable SQLite study on Drive — should be run for the
+other model heads so the whole pipeline carries the same "we systematically
+searched the regularization hyperparameters" defense:
+
+- **Doctor v3 diagnosis + department.** Objective = **macro-F1** across the 13
+  diagnosis classes (and department), not flat accuracy — to protect minority-
+  category recall. A paused Optuna macro-F1 sweep already exists
+  (`scripts/tune_doctor_v3.py`, see ["A1 — Optuna macro-F1 sweep" above](#a1--optuna-macro-f1-sweep-1030-trials-paused-2026-05-22)); finish it to 30–50 trials and report.
+- **Doctor disposition v3.** Objective = **ROC AUC** (threshold-independent); the
+  operating point stays the separately-tuned 0.40. No safety constraint needed at
+  search time since under-triage is set by the threshold, not the model. Note the
+  disposition model is **isotonic-calibrated** — re-fit calibration on the held-out
+  slice after picking the best regularization config.
+- **Nurse v3 diagnosis + department.** Same macro-F1 recipe as doctor v3.
+- **Expected outcome (set expectations):** as with triage, the most likely result
+  is "inherited values confirmed near-optimal." That is still a worthwhile,
+  reportable defensibility result; a feasible improvement would be a bonus.
+- **Reuse note:** `scripts/tune_triage_v3.py` is the cleanest template (constrained
+  objective + best-block-written-every-trial + `--selftest`/`--smoke` pre-flight +
+  `--search-tree-cap`); the doctor/nurse versions can mirror it directly.
 
 ### Doctor models
 - ~~Train on full 157K admitted rows instead of 100K.~~ **DONE in v3** (~102K after catch-all filter, no sub-sample).

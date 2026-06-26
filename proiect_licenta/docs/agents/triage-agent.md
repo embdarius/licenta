@@ -347,6 +347,48 @@ Triage v3 consumes a 19-feature PMH block, but until this change runtime triage 
 - **ESI 5 boost is tunable.** If a future re-train wants to recover some headline accuracy without giving up the under-triage win, dialing the ESI 5 boost from 2.0× to 1.5× (or 1.2×) is the obvious knob. Estimated trade: ~+0.3pp headline accuracy for ~-3pp of the ESI 5 lift. Not recommended for iter 2's documented results, but worth knowing.
 - **QWK eval is mostly cosmetic.** Empirically the sample-weight boost is the dominant lever; the QWK early-stopping picked an iteration very close to what mlogloss would have chosen. The metric is kept because it's a more honest *report* of model quality, not because it changes which model gets saved.
 
+### Hyperparameter search — constrained Optuna over Group-2 (2026-06-26, reporting-only)
+
+The iter-2 hyperparameters split into two groups. **Group 1** (`lr`,
+`n_estimators`, `early_stopping`, `ESI_EXTREME_BOOST`, `neg_quadratic_kappa`) is
+the documented clinical-safety config above. **Group 2** — the eight XGBoost
+regularization knobs (`max_depth`, `subsample`, `colsample_bytree`,
+`colsample_bylevel`, `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`) —
+was inherited unchanged from v1/v2 and had **never been systematically searched**.
+This sweep closes that gap. It is **reporting-only**: it never overwrites the
+live model (everything lands in `artifacts/triage/v3/hpo/`); the goal is a
+defensible answer to "were those regularization values justified?", not a new
+deployment.
+
+- **Engine:** [`scripts/tune_triage_v3.py`](../../scripts/tune_triage_v3.py); **notebook:** [`notebooks/tune_triage_v3.ipynb`](../../notebooks/tune_triage_v3.ipynb); **logs:** [`docs/results/triage_hpo/`](../results/triage_hpo/).
+- **Method:** Optuna TPE, single inner train/val split (`random_state=1`) of the outer-train, native `mlogloss` early-stopping during the search for speed (the trial is still **scored** by QWK), resumable SQLite study on Drive. Mirrors the doctor sweep (`scripts/tune_doctor_v3.py`).
+- **Acuity objective:** maximize QWK **subject to a hard constraint** — under-triage ≤ the in-sample incumbent baseline. The search therefore **cannot trade away the iter-2 under-triage win**; infeasible trials are excluded from selection.
+- **Disposition objective:** maximize ROC AUC (binary head, no ordinal/safety constraint; the operating point is set separately by threshold, as in the doctor disposition story).
+
+**Results (inner-validation, 66,894 rows; full per-trial logs in `docs/results/triage_hpo/`):**
+
+| Head | Trials | Best searched config | Read |
+|---|---|---|---|
+| Acuity | 9 | trial #5 — QWK **0.6448**, under-triage 15.38%, within-1 98.07% | within the noise floor of the incumbent (QWK ≈ 0.6425–0.6449); **no config beats it**. QWK range across all trials 0.6357–0.6448. The constraint correctly marked the one trial that raised under-triage above baseline (#6, under 15.60%) as **infeasible**. |
+| Disposition | 10 | **trial #0 — the incumbent config** — ROC AUC **0.8641** | the deployed Group-2 values are the **outright best**; all searched configs scored ROC AUC 0.8565–0.8641. |
+
+**Conclusion:** the inherited Group-2 regularization is **near-optimal** — exactly
+the most-likely-and-still-reportable outcome. Disposition's hand-tuned config won
+outright; acuity's sits in a flat basin where every feasible config is within
+~0.002 QWK. The previously-unjustified regularization box is now a *defended*
+choice rather than an inherited one. The headline `best_iteration ≈ 4999` on
+every trial reflects `mlogloss` (a soft-probability metric) still falling at the
+tree ceiling — **not** a sign QWK needs more trees; QWK itself plateaus by
+~2,400 trees (see iter-2 `best_iteration = 2405` under the real metric), so this
+is *not* a reason to raise `n_estimators` (a Group-1 knob, out of scope here).
+
+**Honest caveats for the thesis:** (1) these are inner-validation search metrics
+— the definitive incumbent-vs-best comparison on the held-out test split comes
+from `--stage report` (`triage_hpo_results.json`); (2) the acuity study's
+constraint baseline is trial #2 (the enqueued incumbent trial-0 didn't complete
+during the initial CPU run), which doesn't change the conclusion given the tight
+clustering; disposition's trial-0 incumbent completed normally and is the winner.
+
 ### Tried and reverted
 
 - **Iteration 3 — section 1.5, hand-curated red-flag keyword features (2026-05-28, reverted).** A 44-column block of `rf_<name>` binary flags across 9 ED red-flag categories (cardiac, neuro, respiratory, trauma, sepsis, hemorrhage, OB/GYN, anaphylaxis, overdose/self-harm) was added on top of iter 2. Result on the same 83,617-row test split: every headline metric within ±0.04pp noise floor; **under-triage rate +0.02pp** (slightly worse — the metric we kept iter 2 for); ESI 1-5 per-class recall all flat within ≤+0.9pp on 220 samples (noise). The features did engage — **31/44 acuity red flags + 26/44 disposition red flags had non-zero gain, with `rf_palpitations` at rank 13 on disposition** (higher than 3 of 5 top PMH features) — but the signal was already captured by TF-IDF n-grams + iter 2's `ESI_EXTREME_BOOST` weighting, so the gain didn't translate to headline movement. Same structural diagnosis as the doctor v3 Bio_ClinicalBERT experiment: short ED chief-complaint text doesn't carry enough information for hand-curated keyword overlays to beat what TF-IDF on 1-3 grams already extracts. Reverted in commit `cc348e6`; full audit + per-feature ranks in [`docs/future-work.md` entry 6 of "Empirical findings — experiments tried and reverted"](../future-work.md#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor).
