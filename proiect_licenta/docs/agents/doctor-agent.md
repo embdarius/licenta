@@ -883,6 +883,37 @@ The v2 pipeline reproduces the exact v1 sampling / split (`random_state=42`, str
 
 ---
 
+## Hyperparameter search — department + disposition (2026-06-26, reporting-only)
+
+The doctor heads split their hyperparameters into the same two groups as triage.
+**Group 1** is the documented per-head config (objective, learning rate, tree
+count, early stopping, class weighting / `scale_pos_weight`, the diagnosis
+cascade, isotonic calibration). **Group 2** — the eight XGBoost regularization
+knobs (`max_depth`, `subsample`, `colsample_bytree`, `colsample_bylevel`,
+`min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`) — was inherited unchanged
+from v1/v2 and had **never been systematically searched** for the **department**
+or **disposition** heads. (The **diagnosis** head was already swept by the older
+write-mode `scripts/tune_doctor_v3.py` — macro-F1 + class-weight exponent — so it
+is excluded here.) This sweep closes the gap for the two untuned heads. It is
+**reporting-only**: it never overwrites the live joblibs (everything lands in
+`artifacts/doctor/v3/hpo/`); the goal is a defensible answer to "were those
+regularization values justified?", not a new deployment.
+
+- **Engine:** [`scripts/tune_doctor_v3_heads.py`](../../scripts/tune_doctor_v3_heads.py); **notebook:** [`notebooks/tune_doctor_hpo_v3.ipynb`](../../notebooks/tune_doctor_hpo_v3.ipynb) (regenerate with `scripts/build_optuna_doctor_notebook.py`); **outputs:** `artifacts/doctor/v3/hpo/` (SQLite study `optuna_doctor.db`, per-trial `tuning_log_{department,disposition}.json`, `tuned_params_doctor.json`, and `doctor_hpo_results.json` from `--stage report`).
+- **Method:** Optuna TPE, single inner train/val split (`random_state=1`) of the outer-train, native `mlogloss` (department) / `logloss` (disposition) early-stopping during the search, resumable SQLite study on Drive. Per-trial fits are lean (no calibration); calibration is applied only in the `report` stage so incumbent-vs-best is apples-to-apples. Mirrors `scripts/tune_triage_v3.py`.
+- **Frozen Group-1.** Department: `lr=0.02`, `n_estimators=3000`, `early_stopping=100`, `multi:softprob`, sqrt-inverse class weighting (`class_weight_exponent=0.5`), 13-col diagnosis-softmax cascade (built once per run from a diagnosis model and reused across trials; the `report` stage uses the **live** `diagnosis_model.joblib` for the cascade in both arms so the comparison isolates the department Group-2). Disposition: `lr=0.02`, `n_estimators=5000`, `early_stopping=150`, `binary:logistic`, `scale_pos_weight=sqrt(N_neg/N_pos)`, trained on the full 425K with the triage v3 soft cascade.
+- **Department objective:** maximize **macro-F1** across the 11 service classes (matches the diagnosis sweep's "useful across categories" framing). No constraint.
+- **Disposition objective:** maximize **ROC AUC** **subject to a hard constraint** — under-triage rate (admit predicted as discharge, threshold 0.5) ≤ the in-sample incumbent baseline. The hand-tuned config is enqueued as **trial 0** and defines that baseline; infeasible trials (which raise under-triage above the incumbent) are excluded from selection. This is the direct analog of the triage *acuity* under-triage constraint and the strongest clinical-safety story (a missed admission is the dangerous error).
+
+**Status:** scaffolding shipped + plumbing verified locally (`--selftest`, both heads); the GPU sweep + `--stage report` thesis table are pending a Colab run. As with triage, the most-likely-and-still-reportable outcome is that the inherited Group-2 box is near-optimal — a *defended* choice rather than an inherited one, now validated under a clinical-safety constraint for disposition.
+
+### Future work — Group-1 (decided, not in scope here)
+
+- **Doctor Group-1 (optional, lower priority).** Group-1 is frozen by design (it isolates the regularization question and matches the triage methodology). A future study could re-open the doctor's Group-1 — chiefly the `learning_rate × max_depth` interaction (the one real Group-1↔Group-2 coupling) — as an explicitly separate experiment. Low expected payoff: `lr`/`n_estimators` is a cost/fidelity envelope that plateaus under low-lr + early-stopping, and the class-weight exponent was already validated (~0.52) by the diagnosis sweep. Disclose as the conditional-on-`lr` limitation, not a fix.
+- **Triage Group-1 (high priority, different framing — the more rewarding future study).** Triage's Group-1 contains the *clinical-safety levers themselves*, not just a cost envelope: `ESI_EXTREME_BOOST` (the per-class sample-weight boost that produced the iter-2 −2.11pp under-triage / +5pp ESI-5-recall win), the disposition decision threshold / `scale_pos_weight`, and the `neg_quadratic_kappa` early-stop metric. This should **not** be a constrained single-objective sweep like the present studies — it must be a **multi-objective Optuna study** (NSGA-II / multi-objective TPE) over the boost vector and decision threshold, optimizing *(exact accuracy, −under-triage, ESI-5 recall)* jointly and reporting the **Pareto frontier**, with the deployed config located on the curve and clinically justified. Must stay strictly reporting-only; any "winner" needs a clinical rationale, not just a metric delta (re-opening the boost vector can shift the safety profile while improving a headline number). Priority order of triage Group-1 knobs: `ESI_EXTREME_BOOST` (high) > disposition threshold (medium) > `lr × max_depth` (low–medium) > `neg_quadratic_kappa` metric / `n_estimators` (low).
+
+---
+
 ## Open Improvements
 
 See [`../future-work.md`](../future-work.md) for the full roadmap. Doctor-specific headline items:

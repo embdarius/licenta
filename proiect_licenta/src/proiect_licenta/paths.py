@@ -67,6 +67,15 @@ DERIVED_DIR = DATA_DIR / "derived"
 # scripts/tune_triage_v3.py on first run; reused in seconds thereafter.
 TRIAGE_TUNE_CACHE_DIR = DERIVED_DIR / "triage_tune_cache"
 
+# Doctor-disposition hyperparameter-search feature cache (float32 parquet: the
+# full 425K feature matrix X + the binary admit label). Distinct from the
+# doctor diagnosis/department `derived/tune_cache/` because the disposition
+# model uses a different dataset (full 425K, no admitted-only filter) and the
+# triage v3 SOFT cascade. Built by scripts/tune_doctor_v3_heads.py on first run
+# (parses discharge.csv once); reused in seconds thereafter. The department
+# stage of that script reuses the existing `derived/tune_cache/` instead.
+DOCTOR_DISPO_TUNE_CACHE_DIR = DERIVED_DIR / "doctor_dispo_tune_cache"
+
 # ---- Trained model artifacts --------------------------------------------
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
@@ -94,6 +103,15 @@ DOCTOR_V2_DIR = ARTIFACTS_DIR / "doctor" / "v2"
 # nurse step. metadata.json gains a "disposition" sub-block.
 DOCTOR_V3_BASE_DIR = ARTIFACTS_DIR / "doctor" / "v3_base"
 DOCTOR_V3_DIR = ARTIFACTS_DIR / "doctor" / "v3"
+# Doctor-v3 hyperparameter-search outputs (Optuna SQLite study, per-trial JSON
+# logs, tuned-params block + final report) for the department + disposition
+# heads. A dedicated subdir — mirrors TRIAGE_V3_HPO_DIR — so the constrained
+# Group-2 regularization sweep (scripts/tune_doctor_v3_heads.py) never overwrites
+# the live doctor v3 model joblibs that sit directly in DOCTOR_V3_DIR.
+# Reporting-only: the sweep reads the live models but never writes them. (Kept
+# separate from the older write-mode diagnosis sweep's optuna_study.db, which
+# lives directly in DOCTOR_V3_DIR.)
+DOCTOR_V3_HPO_DIR = DOCTOR_V3_DIR / "hpo"
 # Stage-2 exact-ICD resolver (per-category prototype centroids + prevalence
 # priors) built offline by `uv run train_icd_resolver` from the Doctor v3
 # training split. Consumed by benchmarks/benchmark_icd_resolution.py (and,
