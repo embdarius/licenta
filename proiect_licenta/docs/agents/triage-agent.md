@@ -389,6 +389,23 @@ constraint baseline is trial #2 (the enqueued incumbent trial-0 didn't complete
 during the initial CPU run), which doesn't change the conclusion given the tight
 clustering; disposition's trial-0 incumbent completed normally and is the winner.
 
+### Hyperparameter search — Group-1 (multi-objective Pareto, reporting-only)
+
+The Group-1 sweep (the clinical-safety levers themselves) is now **implemented**
+as a sibling study in the same engine + notebook. Because `ESI_EXTREME_BOOST`,
+the disposition decision threshold, and `scale_pos_weight` *are* the safety
+levers, this is a **multi-objective Pareto** search (NSGA-II), not a constrained
+single-objective one — exactly the framing the future-work note below prescribed.
+Group-2 is frozen at the original incumbent (`FROZEN_GROUP2`) so the study
+isolates Group-1; everything lands in parallel `*_g1` files and the live model is
+never touched.
+
+- **Engine:** [`scripts/tune_triage_v3.py`](../../scripts/tune_triage_v3.py) `--group group1`; **notebook:** [`notebooks/tune_triage_v3.ipynb`](../../notebooks/tune_triage_v3.ipynb) Section 5; **results:** [`docs/results/triage_hpo_group1/`](../results/triage_hpo_group1/).
+- **Acuity:** `directions = [maximize exact-accuracy, minimize under-triage, maximize ESI-5 recall]` over the boost vector (`boost_esi1/2/5`, ESI 3/4 pinned at 1.0), `learning_rate`, `n_estimators`. Reports the Pareto frontier; the incumbent is enqueued as trial 0 and sits on the curve.
+- **Disposition:** `directions = [maximize accuracy, minimize under-triage]` over `scale_pos_weight_exponent`, `learning_rate`, `n_estimators`, and the `decision_threshold` (a Pareto dimension here since triage has no prior threshold sweep). Cascades `predicted_acuity` from the incumbent acuity model so it isolates the disposition levers.
+- **Chaining:** after a deployed Pareto point is confirmed (the `selected` block in `tuned_params_triage_g1.json`), the Group-2 sweep can be re-run on top of it with `--group group2 --use-group1-best`.
+- **Status:** RUN PENDING (Colab); results table filled in `docs/results/triage_hpo_group1/`.
+
 ### Tried and reverted
 
 - **Iteration 3 — section 1.5, hand-curated red-flag keyword features (2026-05-28, reverted).** A 44-column block of `rf_<name>` binary flags across 9 ED red-flag categories (cardiac, neuro, respiratory, trauma, sepsis, hemorrhage, OB/GYN, anaphylaxis, overdose/self-harm) was added on top of iter 2. Result on the same 83,617-row test split: every headline metric within ±0.04pp noise floor; **under-triage rate +0.02pp** (slightly worse — the metric we kept iter 2 for); ESI 1-5 per-class recall all flat within ≤+0.9pp on 220 samples (noise). The features did engage — **31/44 acuity red flags + 26/44 disposition red flags had non-zero gain, with `rf_palpitations` at rank 13 on disposition** (higher than 3 of 5 top PMH features) — but the signal was already captured by TF-IDF n-grams + iter 2's `ESI_EXTREME_BOOST` weighting, so the gain didn't translate to headline movement. Same structural diagnosis as the doctor v3 Bio_ClinicalBERT experiment: short ED chief-complaint text doesn't carry enough information for hand-curated keyword overlays to beat what TF-IDF on 1-3 grams already extracts. Reverted in commit `cc348e6`; full audit + per-feature ranks in [`docs/future-work.md` entry 6 of "Empirical findings — experiments tried and reverted"](../future-work.md#6-triage-v3-section-15--hand-curated-red-flag-keyword-features--reverted-lift-within-noise-floor).

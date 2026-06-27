@@ -345,6 +345,150 @@ for f in ('diagnosis_model.joblib', 'department_model.joblib', 'disposition_mode
         print(f'  live {f}: mtime {os.path.getmtime(p)} (unchanged by HPO)')""")
 
 
+md("section5-md", """---
+## Section 5 - Group-1 study (per-head cost/weighting config; SINGLE-OBJECTIVE)
+
+A separate study over the **Group-1** knobs that Sections 3-4 held frozen:
+`learning_rate`, `n_estimators`, and the class-weighting lever
+(`class_weight_exponent` for department, `scale_pos_weight` exponent for
+disposition). Per the doctor Group-1 plan this is **single-objective** (lower
+priority than triage's; mostly a cost/fidelity envelope), keeping the **same
+objectives + constraints** as the Group-2 sweep above:
+
+- **Department:** maximize macro-F1 (unconstrained).
+- **Disposition:** maximize ROC AUC **subject to** under-triage <= incumbent.
+
+Group-2 stays frozen at the incumbent throughout. Everything lands in **separate**
+files (`optuna_doctor_g1.db`, `tuning_log_*_g1.json`, `tuned_params_doctor_g1.json`,
+`doctor_hpo_g1_results.json`) so the Group-2 study above is untouched. Still
+**reporting-only**.
+
+After you confirm a Group-1 best (the `selected` block in
+`tuned_params_doctor_g1.json`), you can optionally re-run the **Group-2** cells
+above with `--use-group1-best` to search the regularization on top of it.""")
+
+
+code("cell-selftest-g1", """# Cell 12: Group-1 self-test - synthetic, CPU, seconds. Exercises the
+# single-objective Group-1 path for both heads and asserts the live models are
+# untouched.
+import runpy, sys
+_saved = sys.argv
+try:
+    sys.argv = ['tune_doctor_v3_heads.py', '--group', 'group1', '--selftest']
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_doctor_v3_heads.py', run_name='__main__')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-tune-dept-g1", """# Cell 13: Department Group-1 (macro-F1 over lr, n_estimators, cw_exponent).
+# Reuses the same cache + cascade as the Group-2 sweep; writes to *_g1 files only.
+N_TRIALS_THIS_SESSION = 10
+TIMEOUT_SECONDS       = None
+REBUILD_FEATURES      = False
+
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+argv = ['tune_doctor_v3_heads.py', '--group', 'group1', '--stage', 'department',
+        '--n-trials', str(N_TRIALS_THIS_SESSION)]
+if TIMEOUT_SECONDS is not None:
+    argv += ['--timeout', str(TIMEOUT_SECONDS)]
+if REBUILD_FEATURES:
+    argv += ['--rebuild-features']
+
+_saved = sys.argv
+try:
+    sys.argv = argv
+    print('running:', ' '.join(argv), '\\n')
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_doctor_v3_heads.py', run_name='__main__')
+except KeyboardInterrupt:
+    print('\\n[stopped by user. Study persists.]')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-tune-disp-g1", """# Cell 14: Disposition Group-1 (constrained ROC AUC over lr, n_estimators,
+# scale_pos_weight exponent). Under-triage <= incumbent enforced as before.
+N_TRIALS_THIS_SESSION = 10
+TIMEOUT_SECONDS       = None
+REBUILD_FEATURES      = False
+
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+argv = ['tune_doctor_v3_heads.py', '--group', 'group1', '--stage', 'disposition',
+        '--n-trials', str(N_TRIALS_THIS_SESSION)]
+if TIMEOUT_SECONDS is not None:
+    argv += ['--timeout', str(TIMEOUT_SECONDS)]
+if REBUILD_FEATURES:
+    argv += ['--rebuild-features']
+
+_saved = sys.argv
+try:
+    sys.argv = argv
+    print('running:', ' '.join(argv), '\\n')
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_doctor_v3_heads.py', run_name='__main__')
+except KeyboardInterrupt:
+    print('\\n[stopped by user. Study persists.]')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-state-g1", """# Cell 15: Inspect the Group-1 studies (read-only; runs no new trials)
+import optuna, json
+from proiect_licenta.paths import DOCTOR_V3_HPO_DIR
+
+storage = f'sqlite:///{DOCTOR_V3_HPO_DIR / "optuna_doctor_g1.db"}'
+
+def show(study_name, constrained):
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except KeyError:
+        print(f'[{study_name}] no study yet'); return
+    complete = [t for t in study.trials if t.state.name == 'COMPLETE']
+    print(f'\\n[{study_name}] trials: {len(study.trials)} (complete {len(complete)})')
+    if not complete:
+        return
+    if constrained:
+        feas = [t for t in complete if t.user_attrs.get('constraint', [1])[0] <= 1e-9]
+        pool = feas or complete
+        best = max(pool, key=lambda t: t.value)
+        print(f'  feasible: {len(feas)}/{len(complete)}  best #{best.number} '
+              f'auc={best.value:.4f} under={best.user_attrs.get("under_rate", 0)*100:.2f}%')
+    else:
+        best = max(complete, key=lambda t: t.value)
+        print(f'  best #{best.number} macro_f1={best.value:.4f} '
+              f'acc={best.user_attrs.get("accuracy", 0)*100:.2f}%')
+    for k, v in best.params.items():
+        print(f'    {k:24s} = {v}')
+
+show('doctor_department_g1', constrained=False)
+show('doctor_disposition_g1', constrained=True)
+
+tp = DOCTOR_V3_HPO_DIR / 'tuned_params_doctor_g1.json'
+print(f'\\ntuned_params_doctor_g1.json present: {tp.exists()}')""")
+
+
+code("cell-report-g1", """# Cell 16: Group-1 report - incumbent vs best on the OUTER test split, plus a
+# disposition operating-point table anchored at the live 0.40 threshold.
+# Writes hpo/doctor_hpo_g1_results.json (the thesis table).
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+_saved = sys.argv
+try:
+    sys.argv = ['tune_doctor_v3_heads.py', '--group', 'group1', '--stage', 'report']
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_doctor_v3_heads.py', run_name='__main__')
+finally:
+    sys.argv = _saved
+
+from proiect_licenta.paths import DOCTOR_V3_HPO_DIR
+print('\\nResults JSON:', DOCTOR_V3_HPO_DIR / 'doctor_hpo_g1_results.json')""")
+
+
 md("done-md", """---
 ## Done
 
@@ -362,7 +506,12 @@ md("done-md", """---
 The live doctor v3 models are untouched. Most likely the search confirms the
 inherited Group-2 values are near-optimal - itself a reportable, honest
 defensibility result, now validated under a clinical-safety constraint for the
-disposition head.""")
+disposition head.
+
+**Section 5 (Group-1)** adds the sibling single-objective study; it writes the
+parallel `*_g1` files (`optuna_doctor_g1.db`, `tuning_log_*_g1.json`,
+`tuned_params_doctor_g1.json` with a `selected` block per head, and
+`doctor_hpo_g1_results.json` including the disposition operating-point table).""")
 
 
 notebook = {

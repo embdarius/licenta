@@ -82,9 +82,21 @@ a validated, clinically-safe choice rather than an inherited one.
   make a materially different verdict unlikely.
 - These **are** held-out outer-test, calibrated numbers (the `report` stage),
   not inner-validation search metrics — so they are directly thesis-citable.
-- Department's two arms share the **live** `diagnosis_model.joblib` for the
-  cascade, so the delta isolates the department Group-2 effect (it is not
-  confounded by a different diagnosis model).
+- Department's two report arms share the **live** `diagnosis_model.joblib` for
+  the cascade, so the reported delta isolates the department Group-2 effect (it
+  is not confounded by a different diagnosis model). The live diagnosis model is
+  on hand-picked defaults (`metadata.json: tuned_params_applied = null`) — the
+  same parameter family as v3_base.
+- **Search/report cascade caveat.** During the *search*, the cascade diagnosis
+  model is trained on the inner-train split with the **tuned** diagnosis params
+  (`artifacts/doctor/v3/tuned_params.json`, present on Drive: `lr≈0.0098`,
+  `max_depth=9`), whereas the *report* and the deployed pipeline cascade from the
+  **hand-picked** live model. So the winning Group-2 config was *selected* under
+  a slightly different cascade than it was *reported* under. The cascade is held
+  constant across all department trials, so this does not bias the Group-2
+  ranking, and the effect is immaterial given the flat basin — but for a faithful
+  future run the search cascade should be built with hand-picked params to match
+  deployment.
 - Both heads remain **frozen on Group-1**. A separate future Group-1 study (e.g.
   the disposition tree ceiling, or a joint `lr × max_depth`) could shift these
   optima — see the "Future work — Group-1" notes in the doctor-agent write-up.

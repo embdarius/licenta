@@ -337,6 +337,144 @@ for f in ('acuity_model.joblib', 'disposition_model.joblib'):
         print(f'  live {f}: mtime {os.path.getmtime(p)} (unchanged by HPO)')""")
 
 
+md("section5-md", """---
+## Section 5 - Group-1 study (the clinical-safety levers; MULTI-OBJECTIVE)
+
+A separate study over the **Group-1** knobs that Sections 3-4 held frozen: the
+`ESI_EXTREME_BOOST` vector, `learning_rate`/`n_estimators`, and the disposition
+`scale_pos_weight` + decision threshold. Because these *are* the clinical-safety
+levers, this is a **multi-objective Pareto** search (NSGA-II), not a constrained
+single-objective one:
+
+- **Acuity:** jointly maximize (exact accuracy, ESI-5 recall) and minimize
+  under-triage. Reports the **Pareto frontier**; the incumbent is enqueued as
+  trial 0 and sits on the curve.
+- **Disposition:** jointly maximize accuracy and minimize under-triage over the
+  `scale_pos_weight` exponent, `lr`/`n_estimators`, and the decision threshold.
+
+Group-2 stays frozen at the incumbent throughout. Everything lands in **separate**
+files (`optuna_triage_g1.db`, `tuning_log_*_g1.json`, `tuned_params_triage_g1.json`,
+`triage_hpo_g1_results.json`) so the Group-2 study above is untouched. Still
+**reporting-only**.
+
+After you inspect the frontier and confirm a deployed point (the `selected`
+block in `tuned_params_triage_g1.json`), you can optionally re-run the **Group-2**
+cells above with `--use-group1-best` to search the regularization on top of the
+confirmed Group-1 config.""")
+
+
+code("cell-selftest-g1", """# Cell 12: Group-1 self-test - synthetic, CPU, seconds. Exercises the
+# multi-objective NSGA-II path (study builds, Pareto front + selection extracted)
+# and asserts the live models are untouched.
+import runpy, sys
+_saved = sys.argv
+try:
+    sys.argv = ['tune_triage_v3.py', '--group', 'group1', '--selftest']
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_triage_v3.py', run_name='__main__')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-tune-acuity-g1", """# Cell 13: Acuity Group-1 (multi-objective Pareto). Run in chunks; safe to ctrl-C.
+# Reuses the same feature cache as the Group-2 sweep; writes to *_g1 files only.
+N_TRIALS_THIS_SESSION = 10    # <- adjust per session (40-60 total recommended)
+TIMEOUT_SECONDS       = None
+
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+argv = ['tune_triage_v3.py', '--group', 'group1', '--stage', 'acuity',
+        '--n-trials', str(N_TRIALS_THIS_SESSION)]
+if TIMEOUT_SECONDS is not None:
+    argv += ['--timeout', str(TIMEOUT_SECONDS)]
+
+_saved = sys.argv
+try:
+    sys.argv = argv
+    print('running:', ' '.join(argv), '\\n')
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_triage_v3.py', run_name='__main__')
+except KeyboardInterrupt:
+    print('\\n[stopped by user. Study persists.]')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-tune-disp-g1", """# Cell 14: Disposition Group-1 (multi-objective Pareto). Independent of the
+# acuity Group-1 run (it cascades predicted_acuity from the INCUMBENT acuity).
+N_TRIALS_THIS_SESSION = 10
+TIMEOUT_SECONDS       = None
+
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+argv = ['tune_triage_v3.py', '--group', 'group1', '--stage', 'disposition',
+        '--n-trials', str(N_TRIALS_THIS_SESSION)]
+if TIMEOUT_SECONDS is not None:
+    argv += ['--timeout', str(TIMEOUT_SECONDS)]
+
+_saved = sys.argv
+try:
+    sys.argv = argv
+    print('running:', ' '.join(argv), '\\n')
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_triage_v3.py', run_name='__main__')
+except KeyboardInterrupt:
+    print('\\n[stopped by user. Study persists.]')
+finally:
+    sys.argv = _saved""")
+
+
+code("cell-state-g1", """# Cell 15: Inspect the Group-1 Pareto fronts (read-only; runs no new trials)
+import optuna, json
+from proiect_licenta.paths import TRIAGE_V3_HPO_DIR
+
+storage = f'sqlite:///{TRIAGE_V3_HPO_DIR / "optuna_triage_g1.db"}'
+
+def show_front(study_name, obj_names):
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except KeyError:
+        print(f'[{study_name}] no study yet'); return
+    complete = [t for t in study.trials if t.state.name == 'COMPLETE']
+    print(f'\\n[{study_name}] trials: {len(study.trials)} (complete {len(complete)})')
+    front = study.best_trials
+    print(f'  Pareto front: {len(front)} trial(s)')
+    for t in sorted(front, key=lambda t: t.number):
+        vals = '  '.join(f'{n}={v:.4f}' for n, v in zip(obj_names, t.values))
+        print(f'    #{t.number:3d} | {vals}')
+
+show_front('triage_acuity_g1', ['exact', 'under_rate', 'esi5_recall'])
+show_front('triage_disposition_g1', ['accuracy', 'under_rate'])
+
+tp = TRIAGE_V3_HPO_DIR / 'tuned_params_triage_g1.json'
+print(f'\\ntuned_params_triage_g1.json present: {tp.exists()}')
+if tp.exists():
+    data = json.loads(tp.read_text())
+    for head in ('acuity', 'disposition'):
+        sel = data.get(head, {}).get('selected')
+        if sel:
+            print(f'  [{head}] chaining default -> trial #{sel[\"trial\"]}: {sel[\"rationale\"]}')""")
+
+
+code("cell-report-g1", """# Cell 16: Group-1 report - Pareto frontier on the OUTER test split.
+# Retrains every frontier point on outer-train (Group-2 frozen), evaluates on the
+# held-out test rows, and writes hpo/triage_hpo_g1_results.json (the thesis table).
+import os, sys, runpy
+os.environ['XGB_DEVICE'] = 'cuda'
+os.environ['XGB_TREE_METHOD'] = 'hist'
+
+_saved = sys.argv
+try:
+    sys.argv = ['tune_triage_v3.py', '--group', 'group1', '--stage', 'report']
+    runpy.run_path(f'{PROJECT_PATH}/scripts/tune_triage_v3.py', run_name='__main__')
+finally:
+    sys.argv = _saved
+
+from proiect_licenta.paths import TRIAGE_V3_HPO_DIR
+print('\\nResults JSON:', TRIAGE_V3_HPO_DIR / 'triage_hpo_g1_results.json')""")
+
+
 md("done-md", """---
 ## Done
 
@@ -353,7 +491,14 @@ md("done-md", """---
 
 The live triage v3 model is untouched. Most likely the search confirms the
 inherited Group-2 values are near-optimal - itself a reportable, honest
-defensibility result. The same recipe then extends to the doctor + nurse heads.""")
+defensibility result. The same recipe then extends to the doctor + nurse heads.
+
+**Section 5 (Group-1)** adds the sibling multi-objective study; it writes the
+parallel `*_g1` files (`optuna_triage_g1.db`, `tuning_log_*_g1.json`,
+`tuned_params_triage_g1.json` with a `pareto_front` + `selected` block per head,
+and `triage_hpo_g1_results.json`). Use the acuity frontier to plot **exact
+accuracy vs under-triage vs ESI-5 recall** - the clinical trade-off the deployed
+point must be justified against.""")
 
 
 notebook = {
