@@ -93,8 +93,33 @@ if not getattr(_w, "_optuna_compat_patched", False):
             return _patched_warn(message, category=category, stacklevel=stacklevel,
                                  source=source)
 
+    _compatible_warn._kwargs_tolerant = True
     _w.warn = _compatible_warn
     _w._optuna_compat_patched = True
+
+
+def _ensure_warn_shim():
+    """Re-wrap ``warnings.warn`` so it tolerates Optuna's py3.12
+    ``skip_file_prefixes`` kwarg. The top-level shim runs at import time, but
+    building the feature caches imports the training modules, which pull in
+    crewai/pydantic — and pydantic RE-patches ``warnings.warn`` with a wrapper
+    that rejects unknown kwargs, clobbering our shim. Calling this right before
+    any ``optuna.create_study`` re-installs a tolerant wrapper around whatever
+    ``warnings.warn`` is current. Idempotent (marked via ``_kwargs_tolerant``)."""
+    cur = _w.warn
+    if getattr(cur, "_kwargs_tolerant", False):
+        return
+
+    def _tolerant(message, category=Warning, stacklevel=1, source=None, **kwargs):
+        try:
+            return cur(message, category=category, stacklevel=stacklevel,
+                       source=source, **kwargs)
+        except TypeError:
+            return cur(message, category=category, stacklevel=stacklevel,
+                       source=source)
+
+    _tolerant._kwargs_tolerant = True
+    _w.warn = _tolerant
 
 
 import numpy as np
@@ -696,6 +721,7 @@ def run_department_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
         trial.set_user_attr("best_iteration", int(model.best_iteration))
         return m["macro_f1"]
 
+    _ensure_warn_shim()  # crewai (imported during cache build) clobbers the shim
     study = optuna.create_study(
         direction="maximize", study_name=args.study_name or DEPT_STUDY_NAME,
         storage=args.storage, load_if_exists=True,
@@ -766,6 +792,7 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
     def constraints_func(trial):
         return trial.user_attrs.get("constraint", [0.0])
 
+    _ensure_warn_shim()  # crewai (imported during cache build) clobbers the shim
     study = optuna.create_study(
         direction="maximize", study_name=args.study_name or DISP_STUDY_NAME,
         storage=args.storage, load_if_exists=True,

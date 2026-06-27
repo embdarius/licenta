@@ -905,7 +905,18 @@ regularization values justified?", not a new deployment.
 - **Department objective:** maximize **macro-F1** across the 11 service classes (matches the diagnosis sweep's "useful across categories" framing). No constraint.
 - **Disposition objective:** maximize **ROC AUC** **subject to a hard constraint** — under-triage rate (admit predicted as discharge, threshold 0.5) ≤ the in-sample incumbent baseline. The hand-tuned config is enqueued as **trial 0** and defines that baseline; infeasible trials (which raise under-triage above the incumbent) are excluded from selection. This is the direct analog of the triage *acuity* under-triage constraint and the strongest clinical-safety story (a missed admission is the dangerous error).
 
-**Status:** scaffolding shipped + plumbing verified locally (`--selftest`, both heads); the GPU sweep + `--stage report` thesis table are pending a Colab run. As with triage, the most-likely-and-still-reportable outcome is that the inherited Group-2 box is near-optimal — a *defended* choice rather than an inherited one, now validated under a clinical-safety constraint for disposition.
+**Results (held-out outer-test, calibrated; 10 trials/head, 2026-06-26 Colab run; full logs in [`docs/results/doctor_hpo/`](../results/doctor_hpo/)):** the `report` stage compared the live calibrated incumbents against the best searched Group-2 on the held-out split (department 20,420 rows with the live diagnosis cascade in both arms; disposition 83,617 rows).
+
+| Head | Metric | Incumbent | Best searched | Δ |
+|---|---|---|---|---|
+| Department | accuracy | 70.79% | 70.75% | −0.04pp |
+| Department | macro-F1 | 0.4898 | 0.4967 | +0.70pp |
+| Disposition | ROC AUC | 0.9138 | 0.9172 | +0.0034 |
+| Disposition | accuracy | 83.96% | 84.38% | +0.42pp |
+| Disposition | under-triage | 23.51% | 22.36% | **−1.15pp** (better) |
+| Disposition | Brier / ECE | 0.1128 / 0.0036 | 0.1103 / 0.0048 | −0.0025 / +0.0012 (both excellent) |
+
+**Conclusion — reporting-only, not redeployed.** The inherited Group-2 box is **near-optimal** for both heads. Department is a wash (macro-F1 +0.70pp from a shallower `max_depth=6`, high-`gamma` fit that rebalances minority recall, at flat accuracy −0.04pp — within noise). Disposition's best (`max_depth=8`, `min_child_weight=19`, `reg_lambda≈7.9`) is a genuine but small improvement on every axis — and notably the **constrained** search *lowered* under-triage (the dangerous error) rather than trading it away, while satisfying the feasibility constraint. The gains are below the bar for a redeploy, so the live doctor v3 models are unchanged; this stands as a defensibility result — the previously-unjustified regularization is now a validated, clinically-safe choice. Caveat: 10 trials (TPE exploits ~15–25), though the flat department basin and small disposition deltas make a different verdict unlikely; Group-1 stays frozen (see the future-work notes below).
 
 ### Future work — Group-1 (decided, not in scope here)
 
