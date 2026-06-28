@@ -146,6 +146,7 @@ from proiect_licenta.paths import (
     DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
+from proiect_licenta.loader_cache import disk_cached
 from proiect_licenta.pmh_vocab import PMH_CATEGORIES
 from proiect_licenta.pmh_features import (
     PMH_FEATURE_COLS,
@@ -181,6 +182,10 @@ from proiect_licenta.training.train_doctor import (
 # ---------------------------------------------------------------------------
 # 1. Load & clean — FULL dataset, no admitted-only filter
 # ---------------------------------------------------------------------------
+@disk_cached("doctor_disposition_v3",
+             [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV, MEDRECON_CSV,
+              VITALSIGN_CSV, DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV],
+             version=1)
 def load_and_clean_data() -> pd.DataFrame:
     """Load every ED stay with a usable disposition label.
 

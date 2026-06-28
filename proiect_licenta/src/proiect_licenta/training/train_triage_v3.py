@@ -40,6 +40,7 @@ from xgboost import XGBClassifier
 
 # Shared text normalization (peers with v1, v2)
 from proiect_licenta.preprocessing import normalize_complaint_text, ABBREVIATIONS  # noqa: F401
+from proiect_licenta.loader_cache import disk_cached
 
 # PMH aggregator extracted from train_nurse_v3 — same feature set, same
 # leakage guarantees. Triage v3 reuses it on the FULL ED dataset (not just
@@ -220,6 +221,9 @@ ABNORMALITY_THRESHOLDS = {
 # ---------------------------------------------------------------------------
 # 1. Load & Clean Data
 # ---------------------------------------------------------------------------
+@disk_cached("triage_v3", [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV,
+                           DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
+                           DISCHARGE_NOTES_CSV, DIAGNOSIS_CSV], version=1)
 def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load triage + edstays + patients, clean, merge, process vitals, and
     aggregate PMH features.

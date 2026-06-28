@@ -68,7 +68,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # sibling _metrics
 
+import _metrics as M
 from proiect_licenta.paths import (
     ARTIFACTS_DIR, DOCTOR_V3_DIR, DOCTOR_V3_ICD_RESOLVER_DIR, DIAGNOSIS_CSV,
     TRIAGE_V1_DIR,
@@ -78,6 +80,7 @@ from proiect_licenta.preprocessing import (
 )
 from proiect_licenta.case_generation import load_cases, load_feature_cache, VITAL_COLS
 from proiect_licenta import icd_resolution as icdr
+from proiect_licenta import icd_similarity as icds
 from proiect_licenta.tools.doctor_tool_v3_base import DEPARTMENT_NAMES  # noqa: F401
 
 # Tool classes (patched for E2E capture; instantiated for tool-direct)
@@ -223,7 +226,7 @@ def run_tool_direct(case, pmh_lookup_json: str = "", med_lookup_json: str = "") 
     n = case["nurse_inputs"]
     tools = _direct_tools()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None, "exact_icd": None}
+           "p_admit": None, "diag_top3": None, "dept_top3": None, "exact_icd": None}
 
     # EMS vitals only for ambulance/helicopter (matches live triage).
     ems = t["ems_vitals"] or {v: None for v in VITAL_COLS}
@@ -263,6 +266,7 @@ def run_tool_direct(case, pmh_lookup_json: str = "", med_lookup_json: str = "") 
         med_lookup_json=med_lookup_json,
     ))
     out["refined_admit"] = bool(dispo_j["disposition_prediction"]["is_admitted"])
+    out["p_admit"] = dispo_j["disposition_prediction"].get("p_admit")
 
     # Diagnosis/department reassessment gates on the REFINED verdict.
     if out["refined_admit"]:
@@ -558,7 +562,7 @@ def _fv_exact_icd(m, case, Xn, diag_proba) -> dict:
 def run_feature_vector(case, cache_entry) -> dict:
     m = _fv_models()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None, "exact_icd": None}
+           "p_admit": None, "diag_top3": None, "dept_top3": None, "exact_icd": None}
 
     Xd = cache_entry["dispo_features"]
     # Triage acuity (feature-vector) from the soft-cascade columns build_features
@@ -569,7 +573,8 @@ def run_feature_vector(case, cache_entry) -> dict:
     # so feature_vector_gated is apples-to-apples with the tool/E2E columns.
     # (triage_admit is the raw triage-v3 screening verdict, kept at its own 0.5.)
     out["triage_admit"] = float(Xd["triage_disposition_proba_admit"].iloc[0]) >= 0.5
-    out["refined_admit"] = float(m["dispo"].predict_proba(Xd)[0, 1]) >= DECISION_THRESHOLD
+    out["p_admit"] = float(m["dispo"].predict_proba(Xd)[0, 1])
+    out["refined_admit"] = out["p_admit"] >= DECISION_THRESHOLD
 
     if "nurse_v3_features" in cache_entry:
         Xn = cache_entry["nurse_v3_features"]
@@ -749,7 +754,7 @@ def run_e2e(case: dict) -> dict:
     CURRENT_CASE = case
     CAPTURE.clear()
     out = {"acuity": None, "triage_admit": None, "refined_admit": None,
-           "diag_top3": None, "dept_top3": None, "exact_icd": None,
+           "p_admit": None, "diag_top3": None, "dept_top3": None, "exact_icd": None,
            "parser": {}, "error": None}
 
     buf = io.StringIO()
@@ -774,7 +779,9 @@ def run_e2e(case: dict) -> dict:
             "pain": tj.get("pain_score_used"),
         }
     if CAPTURE.get("dispo"):
-        out["refined_admit"] = bool(CAPTURE["dispo"][-1]["disposition_prediction"]["is_admitted"])
+        _dp = CAPTURE["dispo"][-1]["disposition_prediction"]
+        out["refined_admit"] = bool(_dp["is_admitted"])
+        out["p_admit"] = _dp.get("p_admit")
     # Final diagnosis/department = v3-nurse reassessment if it ran, else None.
     if CAPTURE.get("v3"):
         vj = CAPTURE["v3"][-1]
@@ -913,6 +920,443 @@ def print_nl_fidelity(cases, mode_preds):
 
 
 # ===========================================================================
+# Detailed per-case audit (--out-dir): per-agent CSVs + graded ICD + rich JSON
+# ===========================================================================
+DISPO_THRESHOLDS = [0.15, 0.20, 0.30, 0.40, 0.50]
+LIVE_THRESHOLD = 0.40
+
+
+def true_icd_info(stay_ids) -> dict:
+    """Map stay_id -> {code, version, rollup, title} for the primary diagnosis."""
+    import pandas as pd
+    want = {int(s) for s in stay_ids}
+    diag = pd.read_csv(DIAGNOSIS_CSV,
+                       dtype={"icd_code": str, "icd_version": str, "icd_title": str})
+    diag = diag[(diag["seq_num"] == 1) & (diag["stay_id"].isin(want))]
+    diag = diag.drop_duplicates("stay_id")
+    out = {}
+    for _, r in diag.iterrows():
+        code = str(r["icd_code"] or "").strip().upper()
+        ver = str(r["icd_version"] or "").strip()
+        out[int(r["stay_id"])] = {
+            "code": code, "version": ver,
+            "rollup": icdr.rollup_icd(code, ver),
+            "title": str(r.get("icd_title") or ""),
+        }
+    return out
+
+
+def _rollup_versions() -> dict:
+    """Majority ICD version per 3-char rollup code (for the tree grader's
+    chapter/rollup keys). Falls back to letter-vs-digit inference for unseen
+    candidate codes."""
+    import pandas as pd
+    try:
+        diag = pd.read_csv(DIAGNOSIS_CSV, dtype={"icd_code": str, "icd_version": str})
+    except Exception:
+        return {}
+    diag = diag.dropna(subset=["icd_code"])
+    diag["rollup"] = [icdr.rollup_icd(c, v)
+                      for c, v in zip(diag["icd_code"], diag["icd_version"].fillna(""))]
+    ver = (diag.groupby("rollup")["icd_version"]
+           .agg(lambda s: s.mode().iloc[0] if len(s.mode()) else s.iloc[0])
+           .astype(str).to_dict())
+    return ver
+
+
+def build_case_graders(cases, true_info):
+    """Prepare the 3 graded engines (TF-IDF / Gemini / ICD-tree) over the case
+    order for per-case rollup graded-ICD scoring. Best-effort — returns
+    ``(None, None)`` (graded ICD skipped, strict still works) on any failure."""
+    try:
+        resolver = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
+        gindex = resolver["granularities"]["rollup"]
+    except Exception as e:
+        print(f"  [graded-icd] resolver unavailable ({e}); graded ICD skipped.")
+        return None, None
+    code_titles = {}
+    for entry in gindex.values():
+        for code, title in zip(entry["codes"], entry["titles"]):
+            code_titles.setdefault(str(code), title)
+    ver_by_roll = _rollup_versions()
+
+    def _infer_ver(code):
+        return ver_by_roll.get(code, "10" if (code[:1].isalpha()) else "9")
+    code_versions = {c: _infer_ver(c) for c in code_titles}
+
+    order = [c["stay_id"] for c in cases]
+    sid_pos = {sid: i for i, sid in enumerate(order)}
+    true_titles, true_codes, true_versions = [], [], []
+    for sid in order:
+        info = true_info.get(sid, {})
+        tc = info.get("rollup", "")
+        true_codes.append(tc)
+        true_versions.append(info.get("version") or _infer_ver(tc))
+        true_titles.append(code_titles.get(tc, info.get("title", "")))
+    distinct = set(code_titles.values()) | set(true_titles)
+
+    tfidf_titles = icds.fit_title_tfidf(distinct)
+    gem_cache = icds.build_or_load_title_embeddings(
+        distinct, DOCTOR_V3_ICD_RESOLVER_DIR / "title_embeddings.joblib")
+    graders = [
+        icds.TitleGrader("tfidf", lambda ts: icds.tfidf_vectors(ts, tfidf_titles)),
+        icds.TitleGrader("gemini", lambda ts: icds.gemini_vectors(ts, gem_cache)),
+        icds.IcdTreeGrader(),
+    ]
+    active = [g for g in graders if g.available]
+    ctx = {"code_to_title": code_titles, "code_to_version": code_versions,
+           "true_titles": true_titles, "true_codes": true_codes,
+           "true_versions": true_versions}
+    for g in active:
+        g.prepare(ctx)
+    print(f"  [graded-icd] engines ready: {', '.join(g.name for g in active)}")
+    return active, sid_pos
+
+
+def _complaint_prf(truth_tok, got_tok):
+    """Token precision / recall / F1 of parsed complaints vs the tabular truth."""
+    if not truth_tok and not got_tok:
+        return 1.0, 1.0, 1.0
+    inter = len(truth_tok & got_tok)
+    prec = inter / len(got_tok) if got_tok else 0.0
+    rec = inter / len(truth_tok) if truth_tok else 0.0
+    f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+    return prec, rec, f1
+
+
+def parser_audit_rows(cases, mode_preds):
+    """Per-case parser audit rows for whichever mode carries a ``parser`` block."""
+    rows = []
+    for c in cases:
+        pr = mode_preds.get(c["stay_id"])
+        if not pr or not pr.get("parser"):
+            continue
+        t = c["triage_inputs"]
+        ps = pr["parser"]
+        truth_norm = normalize_complaint_text(t["chief_complaints"])
+        truth_tok = set(truth_norm.split())
+        used_norm = normalize_complaint_text(", ".join(ps.get("complaints", [])))
+        used_tok = set(used_norm.split())
+        raw_norm = normalize_complaint_text(", ".join(ps.get("complaints_raw",
+                                                              ps.get("complaints", []))))
+        raw_tok = set(raw_norm.split())
+        pa = str(ps.get("arrival_transport", "")).lower().replace(" ", "_")
+        prec, rec, f1 = _complaint_prf(truth_tok, used_tok)
+        rows.append({
+            "stay_id": c["stay_id"], "narrative": c["narrative"],
+            "chief_complaints_tabular": t["chief_complaints"],
+            "chief_complaints_norm": truth_norm,
+            "age_true": t["age"], "gender_true": t["gender"],
+            "transport_true": t["arrival_transport"], "pain_true": t["pain_score"],
+            "parser_complaints_raw": ", ".join(ps.get("complaints_raw",
+                                                      ps.get("complaints", []))),
+            "parser_complaints_used": ", ".join(ps.get("complaints", [])),
+            "parser_age": ps.get("age"), "parser_gender": ps.get("gender"),
+            "parser_transport": pa, "parser_pain": ps.get("pain"),
+            "age_ok": int(ps.get("age") == t["age"]),
+            "gender_ok": int(str(ps.get("gender", "")).lower() == t["gender"]),
+            "transport_ok": int(t["arrival_transport"] in pa or pa in t["arrival_transport"]),
+            "pain_ok": int(ps.get("pain") == t["pain_score"]),
+            "complaint_jaccard_raw": M._f(len(truth_tok & raw_tok) / len(truth_tok | raw_tok))
+            if (truth_tok | raw_tok) else 1.0,
+            "complaint_jaccard_used": M._f(len(truth_tok & used_tok) / len(truth_tok | used_tok))
+            if (truth_tok | used_tok) else 1.0,
+            "complaint_precision": M._f(prec), "complaint_recall": M._f(rec),
+            "complaint_f1": M._f(f1),
+            "map_rewrote": int(raw_norm != used_norm),
+        })
+    return rows
+
+
+def _graded_for(graders, sid_pos, sid, codes):
+    """{engine: {best, top1}} graded similarity of the true code vs predicted codes."""
+    out = {}
+    if not graders or sid not in sid_pos:
+        return {g.name: {"best": None, "top1": None} for g in (graders or [])}
+    pos = sid_pos[sid]
+    for g in graders:
+        try:
+            best = g.row_max_sim(pos, list(codes)) if codes else 0.0
+            top1 = g.row_max_sim(pos, list(codes[:1])) if codes else 0.0
+        except Exception:
+            best = top1 = None
+        out[g.name] = {"best": M._f(best), "top1": M._f(top1)}
+    return out
+
+
+def build_long_records(cases, preds, modes, true_roll, true_info, graders, sid_pos):
+    """Long-format (case x mode) rows for each agent CSV + a wide per-case master."""
+    acuity_rows, dispo_rows, diag_rows, dept_rows, icd_rows, master_rows = \
+        [], [], [], [], [], []
+    eng_names = [g.name for g in graders] if graders else []
+    for c in cases:
+        sid = c["stay_id"]
+        gt = c["ground_truth"]
+        t = c["triage_inputs"]
+        info = true_info.get(sid, {})
+        master = {
+            "stay_id": sid, "admitted_true": gt["admitted"],
+            "acuity_true": gt["acuity"], "diagnosis_group_true": gt["diagnosis_group"],
+            "service_group_true": gt["service_group"],
+            "icd_true_code": info.get("code"), "icd_true_rollup": true_roll.get(sid),
+            "icd_true_title": info.get("title"),
+            "age": t["age"], "gender": t["gender"],
+            "arrival_transport": t["arrival_transport"], "pain_score": t["pain_score"],
+            "chief_complaints_tabular": t["chief_complaints"],
+            "narrative": c["narrative"],
+            "grounding_ok": bool((c.get("grounding") or {}).get("ok", True)),
+        }
+        for m in modes:
+            pr = preds[m].get(sid)
+            if pr is None:
+                continue
+            # acuity
+            if pr.get("acuity") is not None:
+                err = int(pr["acuity"]) - int(gt["acuity"])
+                acuity_rows.append({
+                    "stay_id": sid, "mode": m, "acuity_true": gt["acuity"],
+                    "acuity_pred": pr["acuity"], "signed_error": err,
+                    "abs_error": abs(err), "under_triage": int(err > 0),
+                    "over_triage": int(err < 0),
+                })
+            # disposition
+            if pr.get("refined_admit") is not None or pr.get("p_admit") is not None:
+                p = pr.get("p_admit")
+                dispo_rows.append({
+                    "stay_id": sid, "mode": m, "admitted_true": int(gt["admitted"]),
+                    "triage_admit": pr.get("triage_admit"),
+                    "refined_admit": pr.get("refined_admit"),
+                    "p_admit": M._f(p) if p is not None else None,
+                    "correct_at_live": (int(bool(pr.get("refined_admit")) == gt["admitted"])
+                                        if pr.get("refined_admit") is not None else None),
+                })
+            # diagnosis / department (admitted-GT cases)
+            if gt["admitted"] and gt["diagnosis_group"]:
+                d3 = pr.get("diag_top3")
+                drank = (d3.index(gt["diagnosis_group"]) + 1
+                         if d3 and gt["diagnosis_group"] in d3 else None)
+                diag_rows.append({
+                    "stay_id": sid, "mode": m,
+                    "diagnosis_group_true": gt["diagnosis_group"],
+                    "diag_top1": d3[0] if d3 else None,
+                    "diag_top3": "|".join(d3) if d3 else None,
+                    "top1_correct": int(bool(d3) and d3[0] == gt["diagnosis_group"]),
+                    "top3_correct": int(bool(d3) and gt["diagnosis_group"] in d3[:3]),
+                    "rank_of_true": drank, "produced": int(bool(d3)),
+                })
+                p3 = pr.get("dept_top3")
+                prank = (p3.index(gt["service_group"]) + 1
+                         if p3 and gt["service_group"] in p3 else None)
+                dept_rows.append({
+                    "stay_id": sid, "mode": m,
+                    "service_group_true": gt["service_group"],
+                    "dept_top1": p3[0] if p3 else None,
+                    "dept_top3": "|".join(p3) if p3 else None,
+                    "top1_correct": int(bool(p3) and p3[0] == gt["service_group"]),
+                    "top3_correct": int(bool(p3) and gt["service_group"] in p3[:3]),
+                    "rank_of_true": prank, "produced": int(bool(p3)),
+                })
+                # exact ICD
+                tr = true_roll.get(sid)
+                if tr:
+                    ei = pr.get("exact_icd")
+                    flat = ei["flat"] if ei else []
+                    union = ei["union"] if ei else set()
+                    graded = _graded_for(graders, sid_pos, sid, flat)
+                    row = {
+                        "stay_id": sid, "mode": m,
+                        "icd_true_code": info.get("code"), "icd_true_rollup": tr,
+                        "icd_true_title": info.get("title"),
+                        "flat_codes": "|".join(flat) if flat else None,
+                        "icd_top1": flat[0] if flat else None,
+                        "top1_correct": int(bool(flat) and flat[0] == tr),
+                        "in_top5": int(tr in flat[:5]),
+                        "in_top10": int(tr in flat[:10]),
+                        "in_union": int(tr in union),
+                        "rank_of_true": (flat.index(tr) + 1 if tr in flat else None),
+                        "produced": int(bool(ei)),
+                    }
+                    for eng in eng_names:
+                        row[f"graded_{eng}_best"] = graded.get(eng, {}).get("best")
+                        row[f"graded_{eng}_top1"] = graded.get(eng, {}).get("top1")
+                    icd_rows.append(row)
+            # master per-mode summary columns
+            d3 = pr.get("diag_top3")
+            p3 = pr.get("dept_top3")
+            ei = pr.get("exact_icd")
+            flat = ei["flat"] if ei else []
+            tr = true_roll.get(sid)
+            master[f"{m}__acuity"] = pr.get("acuity")
+            master[f"{m}__refined_admit"] = pr.get("refined_admit")
+            master[f"{m}__p_admit"] = M._f(pr["p_admit"]) if pr.get("p_admit") is not None else None
+            master[f"{m}__diag_top1"] = d3[0] if d3 else None
+            master[f"{m}__dept_top1"] = p3[0] if p3 else None
+            master[f"{m}__icd_top1"] = flat[0] if flat else None
+        # headline parser block (parser_llm preferred, else e2e)
+        for fid in ("parser_llm", "e2e"):
+            pr = preds.get(fid, {}).get(sid)
+            if pr and pr.get("parser"):
+                ps = pr["parser"]
+                master["parser_complaints"] = ", ".join(ps.get("complaints", []))
+                master["parser_age"] = ps.get("age")
+                master["parser_gender"] = ps.get("gender")
+                master["parser_transport"] = ps.get("arrival_transport")
+                break
+        master_rows.append(master)
+    return {
+        "triage_acuity": acuity_rows, "disposition": dispo_rows,
+        "doctor_diagnosis": diag_rows, "doctor_department": dept_rows,
+        "exact_icd": icd_rows, "per_case_master": master_rows,
+    }
+
+
+def aggregate_detailed(cases, preds, modes, true_roll, graders, sid_pos):
+    """Per-mode detailed aggregate metrics for the rich JSON."""
+    out = {}
+    eng_names = [g.name for g in graders] if graders else []
+    for m in modes:
+        P = preds[m]
+        # acuity (ordinal, no probs captured in pipeline)
+        ya, yp = [], []
+        # disposition
+        yd, pad = [], []
+        # diagnosis / department over admitted-GT
+        diag_hits1, diag_hits3, diag_elig = [], [], 0
+        dept_hits1, dept_hits3, dept_elig = [], [], 0
+        # exact-ICD
+        icd1, icd5, icd10, icdu, icd_elig = [], [], [], [], 0
+        graded_best = {e: [] for e in eng_names}
+        for c in cases:
+            sid = c["stay_id"]
+            gt = c["ground_truth"]
+            pr = P.get(sid)
+            if pr is None:
+                continue
+            if pr.get("acuity") is not None:
+                ya.append(int(gt["acuity"]))
+                yp.append(int(pr["acuity"]))
+            if pr.get("p_admit") is not None:
+                yd.append(int(gt["admitted"]))
+                pad.append(float(pr["p_admit"]))
+            if gt["admitted"] and gt["diagnosis_group"]:
+                diag_elig += 1
+                dept_elig += 1
+                d3 = pr.get("diag_top3")
+                diag_hits1.append(int(bool(d3) and d3[0] == gt["diagnosis_group"]))
+                diag_hits3.append(int(bool(d3) and gt["diagnosis_group"] in d3[:3]))
+                p3 = pr.get("dept_top3")
+                dept_hits1.append(int(bool(p3) and p3[0] == gt["service_group"]))
+                dept_hits3.append(int(bool(p3) and gt["service_group"] in p3[:3]))
+                tr = true_roll.get(sid)
+                if tr:
+                    icd_elig += 1
+                    ei = pr.get("exact_icd")
+                    flat = ei["flat"] if ei else []
+                    union = ei["union"] if ei else set()
+                    icd1.append(int(bool(flat) and flat[0] == tr))
+                    icd5.append(int(tr in flat[:5]))
+                    icd10.append(int(tr in flat[:10]))
+                    icdu.append(int(tr in union))
+                    g = _graded_for(graders, sid_pos, sid, flat)
+                    for e in eng_names:
+                        graded_best[e].append(g.get(e, {}).get("best") or 0.0)
+        mode_metrics = {}
+        if ya:
+            mode_metrics["acuity"] = M.ordinal_report(np.array(ya), np.array(yp), None)
+        if pad:
+            mode_metrics["disposition"] = M.binary_report(
+                np.array(yd), np.array(pad), thresholds=DISPO_THRESHOLDS)
+        if diag_elig:
+            mode_metrics["diagnosis"] = {
+                "top1": M.accuracy_with_coverage(diag_hits1, diag_elig),
+                "top3": M.accuracy_with_coverage(diag_hits3, diag_elig),
+            }
+            mode_metrics["department"] = {
+                "top1": M.accuracy_with_coverage(dept_hits1, dept_elig),
+                "top3": M.accuracy_with_coverage(dept_hits3, dept_elig),
+            }
+        if icd_elig:
+            mode_metrics["exact_icd"] = {
+                "strict@1": M.accuracy_with_coverage(icd1, icd_elig),
+                "strict@5": M.accuracy_with_coverage(icd5, icd_elig),
+                "flat@10": M.accuracy_with_coverage(icd10, icd_elig),
+                "union": M.accuracy_with_coverage(icdu, icd_elig),
+                "graded_best_mean_over_eligible": {
+                    e: M._f(sum(graded_best[e]) / icd_elig) for e in eng_names},
+            }
+        out[m] = mode_metrics
+    return out
+
+
+def _write_detailed_audit(out_dir, backend, args, cases, preds, modes,
+                          basic_rows, nl_fidelity):
+    """Top-level: build graders + records + aggregate, write per-backend JSON +
+    per-agent CSVs into ``out_dir`` (a per-backend folder)."""
+    import pandas as pd
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print_section(f"WRITING DETAILED AUDIT -> {out_dir}")
+
+    true_roll = true_rollups([c["stay_id"] for c in cases])
+    true_info = true_icd_info([c["stay_id"] for c in cases])
+    graders, sid_pos = build_case_graders(cases, true_info)
+
+    records = build_long_records(cases, preds, modes, true_roll, true_info,
+                                 graders, sid_pos)
+    agg = aggregate_detailed(cases, preds, modes, true_roll, graders, sid_pos)
+    parser_rows = parser_audit_rows(
+        cases, preds.get("parser_llm") or preds.get("e2e") or {})
+
+    # CSVs
+    name_map = {
+        "triage_acuity": "triage_acuity.csv",
+        "disposition": "disposition.csv",
+        "doctor_diagnosis": "doctor_diagnosis.csv",
+        "doctor_department": "doctor_department.csv",
+        "exact_icd": "exact_icd.csv",
+        "per_case_master": "per_case_master.csv",
+    }
+    for key, fname in name_map.items():
+        df = pd.DataFrame(records[key])
+        df.to_csv(out_dir / fname, index=False, encoding="utf-8")
+        print(f"    csv -> {fname}  ({len(df)} rows)")
+    pd.DataFrame(parser_rows).to_csv(out_dir / "parser_audit.csv",
+                                     index=False, encoding="utf-8")
+    print(f"    csv -> parser_audit.csv  ({len(parser_rows)} rows)")
+    # disposition per-threshold aggregate (mode x threshold)
+    thr_rows = []
+    for m in modes:
+        disp = agg.get(m, {}).get("disposition")
+        if not disp:
+            continue
+        for t in disp["thresholds"]:
+            row = {"mode": m, **t}
+            row["is_live"] = (abs(t["threshold"] - LIVE_THRESHOLD) < 1e-9)
+            thr_rows.append(row)
+    pd.DataFrame(thr_rows).to_csv(out_dir / "disposition_thresholds.csv",
+                                  index=False, encoding="utf-8")
+    print(f"    csv -> disposition_thresholds.csv  ({len(thr_rows)} rows)")
+
+    # Rich JSON
+    payload = {
+        "llm_backend": backend,
+        "parse_prompt": "plain" if args.plain_prompt else "clinical",
+        "clinicalize": bool(args.clinicalize),
+        "n_cases": len(cases),
+        "modes": modes,
+        "live_threshold": LIVE_THRESHOLD,
+        "dispo_thresholds": DISPO_THRESHOLDS,
+        "graded_engines": [g.name for g in graders] if graders else [],
+        "metrics_basic": basic_rows,
+        "metrics_detailed": agg,
+        "nl_fidelity": nl_fidelity,
+    }
+    (out_dir / f"e2e_full_{backend}.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"    json -> e2e_full_{backend}.json")
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 def main():
@@ -939,6 +1383,10 @@ def main():
     parser.add_argument("--dump-json", default=None,
                         help="Write the scored metrics + backend tag to this JSON "
                              "path (for comparing flash vs medgemma runs).")
+    parser.add_argument("--out-dir", default=None,
+                        help="Write the DETAILED per-backend audit (rich JSON + "
+                             "per-agent CSVs + per_case_master.csv + graded ICD) to "
+                             "this directory. Use with --parser-llm --skip-e2e.")
     args = parser.parse_args()
 
     # Backend override must be set BEFORE the crew (and its get_llm()) is imported.
@@ -1172,6 +1620,10 @@ def main():
              "modes": modes, "metrics": rows,
              "nl_fidelity": nl_fidelity, "n_cases": len(cases)}, indent=2), encoding="utf-8")
         print(f"\n  Metrics dumped -> {args.dump_json}")
+
+    if args.out_dir:
+        _write_detailed_audit(args.out_dir, backend, args, cases, preds, modes,
+                              rows, nl_fidelity)
 
     print("\n" + "#" * 78)
     print("  BENCHMARK COMPLETE")

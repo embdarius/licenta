@@ -119,6 +119,7 @@ from proiect_licenta.paths import (
     DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
     DERIVED_DIR,
 )
+from proiect_licenta.loader_cache import disk_cached
 
 # ---------------------------------------------------------------------------
 # Reuse from doctor pipeline (single source of truth for label maps)
@@ -458,6 +459,10 @@ LONG_VITAL_FEATURE_COLS = (
 # ---------------------------------------------------------------------------
 # 1. Load & Clean Data — admitted patients + vitals + meds, catch-all dropped
 # ---------------------------------------------------------------------------
+@disk_cached("nurse_v3", [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV,
+                          SERVICES_CSV, MEDRECON_CSV, VITALSIGN_CSV,
+                          DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV],
+             version=1)
 def load_and_clean_data() -> pd.DataFrame:
     """Load admitted patient data with diagnosis, service, vitals, and meds.
 

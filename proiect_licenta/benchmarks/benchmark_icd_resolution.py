@@ -142,7 +142,8 @@ def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx
     clinically-close misses. ``graded@k >= r{k}`` always (sim of a code with
     itself is 1). Strict numbers are byte-identical to the pre-graded version.
     """
-    hit5 = hit10 = scored = 0
+    hit1 = hit3 = hit5 = hit10 = scored = 0
+    rr_sum = 0.0                              # sum of reciprocal ranks of the true code
     graders = graders or []
     gsum = {g.name: [0.0, 0.0] for g in graders}
     true_codes = df_test[code_col].to_numpy()
@@ -161,6 +162,17 @@ def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx
         codes_arr = np.asarray(entry["codes"])
         top5 = codes_arr[order[:, :K_PER_CAT]]
         top10 = codes_arr[order[:, :K_FLAT]]
+        # Additive @1/@3 + MRR of the true code (full ranking). Vectorized over
+        # this category's rows; strict @5/@10 below stay byte-identical to the
+        # original per-row set membership check.
+        ranked = codes_arr[order]
+        tc_col = true_codes[rows]
+        match = ranked == tc_col[:, None]
+        hit1 += int(match[:, :1].any(axis=1).sum())
+        hit3 += int(match[:, :3].any(axis=1).sum())
+        has = match.any(axis=1)
+        pos = match.argmax(axis=1)
+        rr_sum += float(np.where(has, 1.0 / (pos + 1), 0.0).sum())
         for j, r in enumerate(rows):
             tc = true_codes[r]
             scored += 1
@@ -173,10 +185,12 @@ def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx
             gsum[g.name][0] += float(icds.graded_max_over_topk(sim_all, order, K_PER_CAT).sum())
             gsum[g.name][1] += float(icds.graded_max_over_topk(sim_all, order, K_FLAT).sum())
     if scored == 0:
-        return {"r5": 0.0, "r10": 0.0, "scored": 0,
-                "graded": {g.name: (0.0, 0.0) for g in graders}}
+        return {"r1": 0.0, "r3": 0.0, "r5": 0.0, "r10": 0.0, "mrr": 0.0,
+                "scored": 0, "graded": {g.name: (0.0, 0.0) for g in graders}}
     return {
-        "r5": hit5 / scored, "r10": hit10 / scored, "scored": scored,
+        "r1": hit1 / scored, "r3": hit3 / scored,
+        "r5": hit5 / scored, "r10": hit10 / scored,
+        "mrr": rr_sum / scored, "scored": scored,
         "graded": {n: (s[0] / scored, s[1] / scored) for n, s in gsum.items()},
     }
 
@@ -226,6 +240,7 @@ def _end_to_end_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, proba,
     keep = np.ones(n, dtype=bool) if subset_mask is None else subset_mask
     union_hit = flat_hit = tally = 0
     cond_union_hit = cond_total = 0
+    flat_rr_sum = 0.0                         # MRR of the true code over the flat ranking
     g_union = {g.name: 0.0 for g in graders}
     g_flat = {g.name: 0.0 for g in graders}
     g_cond = {g.name: 0.0 for g in graders}
@@ -236,8 +251,17 @@ def _end_to_end_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, proba,
         tc = true_codes[r]
         union_codes = union_sets[r]
         in_union = tc in union_codes
-        flat_top = [c for _, c in sorted(flat_lists[r], reverse=True)[:K_FLAT]]
+        # Full de-duplicated flat ranking (best score per code) for MRR; the
+        # top-K_FLAT slice of it is the strict flat@10 set.
+        ranked_codes, seen = [], set()
+        for _, c in sorted(flat_lists[r], reverse=True):
+            if c not in seen:
+                seen.add(c)
+                ranked_codes.append(c)
+        flat_top = ranked_codes[:K_FLAT]
         in_flat = tc in set(flat_top)
+        if tc in seen:
+            flat_rr_sum += 1.0 / (ranked_codes.index(tc) + 1)
         union_hit += in_union
         flat_hit += in_flat
         if cat_correct[r]:
@@ -252,6 +276,7 @@ def _end_to_end_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, proba,
     return {
         "union": union_hit / tally,
         "flat": flat_hit / tally,
+        "flat_mrr": flat_rr_sum / tally,
         "cond": (cond_union_hit / cond_total if cond_total else 0.0),
         "cat_acc": float(cat_correct[keep].mean()),
         "graded": {
@@ -322,7 +347,12 @@ def _count_invariant_violations(results, tol=1e-9):
     return int(v)
 
 
-def main():
+def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
+    """Run the full Stage-2 exact-ICD benchmark and return the structured results
+    dict (also written to ``out_path``, defaulting to
+    ``artifacts/benchmarks/icd_resolution_graded.json``). Importable so the
+    tabular orchestrator can fold these numbers into one master JSON without a
+    second data load."""
     print("\n" + "#" * 72)
     print("  STAGE-2 EXACT-ICD BENCHMARK — Doctor v3_base (pre-nurse) vs v3 with-nurse")
     print("#" * 72)
@@ -521,7 +551,11 @@ def main():
             lambda nm, gn: _ores(nm, variants[nm])["graded"][gn])
         results["oracle"][g] = {
             name: {
-                "strict": {"oracle@5": omemo[name]["r5"], "oracle@10": omemo[name]["r10"]},
+                "strict": {
+                    "oracle@1": omemo[name]["r1"], "oracle@3": omemo[name]["r3"],
+                    "oracle@5": omemo[name]["r5"], "oracle@10": omemo[name]["r10"],
+                    "mrr": omemo[name]["mrr"],
+                },
                 "graded": _graded_pair(omemo[name]["graded"], ("graded@5", "graded@10")),
             } for name in variants
         }
@@ -572,7 +606,8 @@ def main():
                 "stage1_category_recall": {"top1": float(cat_top1), "top5": float(cat_top5)}})
             mres[g] = {
                 name: {
-                    "strict": {k: ememo[name][k] for k in ("union", "flat", "cond", "cat_acc")},
+                    "strict": {k: ememo[name][k]
+                               for k in ("union", "flat", "flat_mrr", "cond", "cat_acc")},
                     "graded": _graded_pair(ememo[name]["graded"], ("union", "flat", "cond")),
                 } for name in variants
             }
@@ -703,7 +738,9 @@ def main():
 
     # 7. Persist the full, detailed results to JSON for accurate later verification.
     results["_meta"]["invariant_graded_ge_strict_violations"] = _count_invariant_violations(results)
-    out_path = ARTIFACTS_DIR / "benchmarks" / "icd_resolution_graded.json"
+    if out_path is None:
+        out_path = ARTIFACTS_DIR / "benchmarks" / "icd_resolution_graded.json"
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
@@ -715,6 +752,11 @@ def main():
     print("\n" + "#" * 72)
     print("  BENCHMARK COMPLETE")
     print("#" * 72 + "\n")
+    return results
+
+
+def main():
+    run_icd_benchmark()
 
 
 if __name__ == "__main__":
