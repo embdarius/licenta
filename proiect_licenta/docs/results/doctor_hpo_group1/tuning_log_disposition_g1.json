@@ -1,0 +1,160 @@
+{
+  "stage": "disposition",
+  "study_name": "doctor_disposition_g1",
+  "mode": "Group-1",
+  "baseline_under_rate": 0.21918365685915436,
+  "n_complete": 10,
+  "updated_at": "2026-06-27T17:03:06.560485",
+  "trials": [
+    {
+      "number": 0,
+      "value": 0.9123671947303458,
+      "params": {
+        "learning_rate": 0.02,
+        "n_estimators": 5000,
+        "scale_pos_weight_exponent": 0.5
+      },
+      "accuracy": 0.8380572248632164,
+      "roc_auc": 0.9123671947303458,
+      "under_rate": 0.21918365685915436,
+      "over_rate": 0.12870678859195198,
+      "best_iteration": 3670,
+      "feasible": true
+    },
+    {
+      "number": 1,
+      "value": 0.9119880870723145,
+      "params": {
+        "learning_rate": 0.018272261776066247,
+        "n_estimators": 3000,
+        "scale_pos_weight_exponent": 0.40921304830970556
+      },
+      "accuracy": 0.8374144168385804,
+      "roc_auc": 0.9119880870723145,
+      "under_rate": 0.22406706547837058,
+      "over_rate": 0.12688736088466718,
+      "best_iteration": 2992,
+      "feasible": false
+    },
+    {
+      "number": 2,
+      "value": 0.9123572154421575,
+      "params": {
+        "learning_rate": 0.012853916978930137,
+        "n_estimators": 5000,
+        "scale_pos_weight_exponent": 0.7956508044572318
+      },
+      "accuracy": 0.8353664005740425,
+      "roc_auc": 0.9123572154421575,
+      "under_rate": 0.20074878932161316,
+      "over_rate": 0.14366390208170884,
+      "best_iteration": 4999,
+      "feasible": true
+    },
+    {
+      "number": 3,
+      "value": 0.910744206493616,
+      "params": {
+        "learning_rate": 0.010336843570697411,
+        "n_estimators": 3000,
+        "scale_pos_weight_exponent": 0.42727747704497043
+      },
+      "accuracy": 0.8356803300744461,
+      "roc_auc": 0.910744206493616,
+      "under_rate": 0.2223985675334717,
+      "over_rate": 0.1305971030930271,
+      "best_iteration": 2999,
+      "feasible": false
+    },
+    {
+      "number": 4,
+      "value": 0.9125355045895095,
+      "params": {
+        "learning_rate": 0.013433656868034296,
+        "n_estimators": 5000,
+        "scale_pos_weight_exponent": 0.5038603981386294
+      },
+      "accuracy": 0.8377582443866416,
+      "roc_auc": 0.9125355045895095,
+      "under_rate": 0.21828836527896472,
+      "over_rate": 0.12969920370501642,
+      "best_iteration": 4987,
+      "feasible": true
+    },
+    {
+      "number": 5,
+      "value": 0.9122239585779807,
+      "params": {
+        "learning_rate": 0.02677113724214592,
+        "n_estimators": 8000,
+        "scale_pos_weight_exponent": 0.619248988951925
+      },
+      "accuracy": 0.8370705892905194,
+      "roc_auc": 0.9122239585779807,
+      "under_rate": 0.21242827493590527,
+      "over_rate": 0.13418870064506982,
+      "best_iteration": 2832,
+      "feasible": true
+    },
+    {
+      "number": 6,
+      "value": 0.91214124049089,
+      "params": {
+        "learning_rate": 0.03538461259525517,
+        "n_estimators": 8000,
+        "scale_pos_weight_exponent": 0.3325152889039984
+      },
+      "accuracy": 0.8381020719347027,
+      "roc_auc": 0.91214124049089,
+      "under_rate": 0.22866560859479917,
+      "over_rate": 0.1231303608137804,
+      "best_iteration": 2120,
+      "feasible": false
+    },
+    {
+      "number": 7,
+      "value": 0.9122706755511643,
+      "params": {
+        "learning_rate": 0.026586160837889783,
+        "n_estimators": 8000,
+        "scale_pos_weight_exponent": 0.9759424231521916
+      },
+      "accuracy": 0.8343648159775167,
+      "roc_auc": 0.9122706755511643,
+      "under_rate": 0.19822569486835145,
+      "over_rate": 0.14671203421469248,
+      "best_iteration": 3664,
+      "feasible": true
+    },
+    {
+      "number": 8,
+      "value": 0.9117053360862669,
+      "params": {
+        "learning_rate": 0.036732078004620486,
+        "n_estimators": 8000,
+        "scale_pos_weight_exponent": 0.6081067456177209
+      },
+      "accuracy": 0.8371901814811493,
+      "roc_auc": 0.9117053360862669,
+      "under_rate": 0.2130793960851341,
+      "over_rate": 0.13362160629474729,
+      "best_iteration": 2039,
+      "feasible": true
+    },
+    {
+      "number": 9,
+      "value": 0.9127739339007818,
+      "params": {
+        "learning_rate": 0.01217029388373879,
+        "n_estimators": 8000,
+        "scale_pos_weight_exponent": 0.48114598712001183
+      },
+      "accuracy": 0.8385206446019074,
+      "roc_auc": 0.9127739339007818,
+      "under_rate": 0.21954991250559558,
+      "over_rate": 0.12776163134141444,
+      "best_iteration": 6080,
+      "feasible": false
+    }
+  ]
+}

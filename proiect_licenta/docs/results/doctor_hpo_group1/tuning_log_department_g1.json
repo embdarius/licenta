@@ -1,0 +1,130 @@
+{
+  "stage": "department",
+  "study_name": "doctor_department_g1",
+  "mode": "Group-1",
+  "baseline_under_rate": null,
+  "n_complete": 10,
+  "updated_at": "2026-06-27T16:12:35.564481",
+  "trials": [
+    {
+      "number": 0,
+      "value": 0.5046813258529239,
+      "params": {
+        "learning_rate": 0.02,
+        "n_estimators": 3000,
+        "class_weight_exponent": 0.5
+      },
+      "macro_f1": 0.5046813258529239,
+      "accuracy": 0.6963148873653281,
+      "best_iteration": 1388
+    },
+    {
+      "number": 1,
+      "value": 0.5041918962762206,
+      "params": {
+        "learning_rate": 0.018272261776066247,
+        "n_estimators": 2000,
+        "class_weight_exponent": 0.37800932022121825
+      },
+      "macro_f1": 0.5041918962762206,
+      "accuracy": 0.7003550440744368,
+      "best_iteration": 1239
+    },
+    {
+      "number": 2,
+      "value": 0.5117015892740111,
+      "params": {
+        "learning_rate": 0.012853916978930137,
+        "n_estimators": 3000,
+        "class_weight_exponent": 0.6540362888980227
+      },
+      "macro_f1": 0.5117015892740111,
+      "accuracy": 0.6923971596474046,
+      "best_iteration": 2636
+    },
+    {
+      "number": 3,
+      "value": 0.5077509631565355,
+      "params": {
+        "learning_rate": 0.010336843570697411,
+        "n_estimators": 2000,
+        "class_weight_exponent": 0.3909124836035503
+      },
+      "macro_f1": 0.5077509631565355,
+      "accuracy": 0.7004162585700294,
+      "best_iteration": 1999
+    },
+    {
+      "number": 4,
+      "value": 0.5068375756759429,
+      "params": {
+        "learning_rate": 0.013433656868034296,
+        "n_estimators": 3000,
+        "class_weight_exponent": 0.44561457009902095
+      },
+      "macro_f1": 0.5068375756759429,
+      "accuracy": 0.6975391772771793,
+      "best_iteration": 1863
+    },
+    {
+      "number": 5,
+      "value": 0.5089064570580567,
+      "params": {
+        "learning_rate": 0.02677113724214592,
+        "n_estimators": 5000,
+        "class_weight_exponent": 0.5280349921085179
+      },
+      "macro_f1": 0.5089064570580567,
+      "accuracy": 0.6960700293829579,
+      "best_iteration": 1071
+    },
+    {
+      "number": 6,
+      "value": 0.5016728126783224,
+      "params": {
+        "learning_rate": 0.03538461259525517,
+        "n_estimators": 5000,
+        "class_weight_exponent": 0.32322520635999885
+      },
+      "macro_f1": 0.5016728126783224,
+      "accuracy": 0.7012120470127327,
+      "best_iteration": 549
+    },
+    {
+      "number": 7,
+      "value": 0.512592984011852,
+      "params": {
+        "learning_rate": 0.026586160837889783,
+        "n_estimators": 5000,
+        "class_weight_exponent": 0.7828160165372797
+      },
+      "macro_f1": 0.512592984011852,
+      "accuracy": 0.6893364348677767,
+      "best_iteration": 1496
+    },
+    {
+      "number": 8,
+      "value": 0.505327257396056,
+      "params": {
+        "learning_rate": 0.036732078004620486,
+        "n_estimators": 5000,
+        "class_weight_exponent": 0.5200762468698006
+      },
+      "macro_f1": 0.505327257396056,
+      "accuracy": 0.696192458374143,
+      "best_iteration": 766
+    },
+    {
+      "number": 9,
+      "value": 0.5051261618096317,
+      "params": {
+        "learning_rate": 0.01217029388373879,
+        "n_estimators": 5000,
+        "class_weight_exponent": 0.42938999080000845
+      },
+      "macro_f1": 0.5051261618096317,
+      "accuracy": 0.6990083251714005,
+      "best_iteration": 2020
+    }
+  ]
+}

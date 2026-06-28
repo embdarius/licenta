@@ -933,7 +933,19 @@ the live joblibs are never touched.
 - **Department:** macro-F1 over `class_weight_exponent` ∈ [0.3, 0.8] (live 0.5), `learning_rate` ∈ [0.01, 0.05], `n_estimators` ∈ {2000, 3000, 5000}. Live diagnosis cascade reused in both arms.
 - **Disposition:** constrained ROC AUC over `scale_pos_weight_exponent` ∈ [0.3, 1.0] (live sqrt = 0.5), `learning_rate`, `n_estimators`. The decision threshold is **not** an Optuna dimension (AUC is threshold-free; the live 0.40 came from `benchmarks/sweep_disposition_threshold.py`) — the report stage instead emits an operating-point table over {0.30…0.60} anchored at 0.40. Isotonic calibration stays a fixed post-hoc step, never a knob.
 - **Chaining:** after a Group-1 best is confirmed (the `selected` block in `tuned_params_doctor_g1.json`), re-run Group-2 on top of it with `--group group2 --use-group1-best`.
-- **Status:** RUN PENDING (Colab); results table filled in `docs/results/doctor_hpo_group1/`.
+
+**Results (2026-06-27, 10 trials/head, held-out outer-test, calibrated; full numbers + logs in [`docs/results/doctor_hpo_group1/`](../results/doctor_hpo_group1/)):** **reporting-only, not redeployed — the live config is near-optimal for both heads.**
+
+| Head | Metric | Incumbent | Best Group-1 | Δ |
+|---|---|---|---|---|
+| Department | macro-F1 | 0.4898 | 0.4908 | +0.10pp |
+| Department | accuracy | 70.79% | 70.52% | −0.27pp |
+| Disposition | ROC AUC | 0.9138 | 0.9140 | +0.0001 |
+| Disposition | under-triage @0.40 | 18.14% | 18.52% | +0.38pp (worse) |
+
+Department's best inner-val trial (`class_weight_exponent=0.78`) did **not** hold out — net negative on the test split (over-boosts minorities). Disposition's selected `scale_pos_weight_exponent ≈ 0.504` *is* the live sqrt (0.5); the `lr × n_estimators` envelope is flat (raising the cap to 8000 used 6080 trees with no AUC gain — the disposition tree-ceiling plateau). So the live `class_weight_exponent = 0.5` (validated against the older diagnosis sweep's ≈0.52) and the `scale_pos_weight` sqrt are confirmed. Early stopping (`mlogloss`/`logloss`, unchanged) still bounds tree count by `best_iteration`, so overtraining stays penalized.
+
+- **Optional future work (not pursued, low value).** The only movement in the whole doctor HPO program is the **Group-2** disposition config (`doctor_hpo`, trial 7): +0.0034 ROC AUC, +0.42pp accuracy, **−1.15pp under-triage** at threshold 0.5. Kept **documented-only, not redeployed** — below the redeploy bar; if a future iteration specifically wants the under-triage reduction it is the obvious candidate, but **not necessarily worth the compute**. The Group-2 chaining re-run (`--use-group1-best`) is likewise skipped: the department Group-1 `selected` is worse out-of-sample and the disposition `selected` ≈ the incumbent.
 
 ### Future work — Group-1 follow-ups
 
