@@ -307,6 +307,25 @@ Three reasons, in order of weight:
 
 The cost — a 0.46pp headline accuracy drop, a 2.58pp over-triage increase, and a +0.0114 MAE rise — is consistent with the design intent and is documented honestly here for thesis-defense scrutiny.
 
+### Audit re-verification (2026-06-28)
+
+The kept iter-2 numbers were re-confirmed at full detail (see [`docs/results/rebenchmark_v3/`](../results/rebenchmark_v3/); raw `benchmarks/audit/2026-06-28/tabular/`). On the same 83,617-row held-out split they reproduce `ceiling.json` exactly: acuity exact **0.6755**, within-1 **0.9818**, QWK **0.6449**; disposition acc **0.7798**, ROC AUC **0.8644** (all within <1e-4 of the documented values — regression PASS).
+
+Expanded acuity metrics now recorded (`triage_acuity_per_class.csv`, `_confusion_*`, `_by_arrival.csv`):
+
+| metric | value |
+|---|---|
+| top-2 / top-3 | 0.9426 / 0.9922 |
+| MAE / mean signed error | 0.344 / **−0.010** (near-unbiased) |
+| balanced accuracy / macro-AUC (OvR) | 0.574 / 0.886 |
+| log-loss / multiclass Brier / ECE (top-label) | 0.753 / 0.440 / 0.027 |
+| under-triage / over-triage | 0.1556 / 0.1690 |
+| **critical under-triage** (true ESI 1–2 → pred 3–5) | **0.0840 overall / 0.2148 of critical cases** |
+
+Per-class recall (precision): ESI-1 0.603 (0.574), ESI-2 0.708 (0.636), ESI-3 0.672 (0.778), ESI-4 0.617 (0.424), **ESI-5 0.268 (0.178)**. By arrival: ambulance/helicopter exact **0.693** / under-triage 0.099 (real vitals) vs walk-in **0.666** / under-triage 0.190 (vitals masked) — the real-vitals cohort is materially easier, confirming the masking design.
+
+**Disposition is raw/uncalibrated** (ECE **0.0746**, MCE 0.137) — this is *why* the doctor stage re-does disposition with isotonic calibration. The full per-threshold operating-point table {0.15…0.90} is in `triage_disposition_thresholds.csv`; at the 0.5 operating point sens 0.776 / spec 0.782 / under 0.224 / over 0.218.
+
 ### Inference status — wired (2026-05-29)
 
 **v3 (iter 2) is now the runtime model.** `triage_tool.py` loads `artifacts/triage/v3/` and builds the 2070-feature vector including the 19-column PMH block on every call. Two coordinated changes landed together:

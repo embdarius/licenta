@@ -498,7 +498,7 @@ A2 didn't move the diagnosis needle measurably — every per-class delta vs the 
 
 **The +2.18pp top-1 department gain is concentrated almost entirely on MED.** MED is 59% of the test set (12,045 of 20,420), so its +21.8pp recall lift translates to +2,629 additional correct predictions — enough to dominate the top-1 metric. Every other department either ticked up by <1.5pp or regressed; SURG fell −19.6pp and OTHER fell −15.7pp.
 
-This pattern is consistent with what isotonic calibration does on imbalanced multiclass softmax: the per-class isotonic regressors can compress minority-class probabilities downward (because the underlying XGBoost over-confidence on MED gives the calibrator a strong "trust MED more" signal). Cohen's κ on department dropping from 0.5009 to 0.4948 confirms this — the κ statistic penalises non-uniform improvement, and a single-class-dominant shift like this lowers it even when raw top-1 rises.
+This pattern is consistent with what isotonic calibration does on imbalanced multiclass softmax: the per-class isotonic regressors can compress minority-class probabilities downward (because the underlying XGBoost over-confidence on MED gives the calibrator a strong "trust MED more" signal). Cohen's κ on department dropping from 0.5009 to 0.4948 confirms this — the κ statistic penalises non-uniform improvement, and a single-class-dominant shift like this lowers it even when raw top-1 rises. The 2026-06-28 audit quantifies the same effect with two more aggregate metrics: **balanced accuracy *falls* 0.496 → 0.452 (−4.4pp)** even as top-1 rises +10.1pp, while **precision-macro rises +16.8pp** (0.414 → 0.582) — i.e. the nurse data + A4 make the dominant MED prediction more confident/precise rather than uniformly lifting the tail. Quote department top-1 alongside macro-F1 (+4.5pp) and balanced-acc (−4.4pp). Contrast with **diagnosis**, where the nurse lift *is* uniform (macro-F1 +3.7, balanced-acc +2.0 both positive).
 
 ### Why this is shippable anyway
 
@@ -857,6 +857,23 @@ Headline (3-char rollup, n=13, **1 case = 7.7pp** — directional only):
 - **Past-medication rider (optional).** Meds are a (noisier) proxy for PMH; fold the `medrecon` medication-category flags into the gated PMH vector to catch patients whose meds reveal a chronic condition their prior ICDs missed. Low marginal value over PMH; cheap to try once `medrecon` is loaded.
 - **ICD-9 ↔ ICD-10 unification** — the same disease is currently split across code versions (e.g. `599` vs `N39`, both UTI), fragmenting prevalence and candidates. A CCSR-style concept mapping would merge them and is expected to lift the numbers. (Deferred future work.) The 20-case E2E run makes this visible (truth `518` ICD-9 vs E2E `J18` ICD-10, both pneumonia, scored as a miss).
 - **Base-doctor (v3_base) live-E2E exact-ICD** — the v3_base/before-nurse comparison exists only on the *tabular* benchmark; the live base tool (`doctor_tool_v3_base.py`) does **not** wire the resolver, so `benchmark_pipeline_e2e.py` can't score a base E2E column. Mirror `doctor_tool_v3._resolve_exact_diagnoses` into the base tool and the harness picks it up for free via `CAPTURE["base"]`. (Deferred.)
+
+---
+
+## Re-benchmark audit (2026-06-28)
+
+All Doctor v3 heads were re-verified at full detail — see [`docs/results/rebenchmark_v3/`](../results/rebenchmark_v3/); raw artifacts in `benchmarks/audit/2026-06-28/tabular/`. Every headline reproduces `ceiling.json` within **<1e-4** (regression PASS): diagnosis base/nurse top-1 **0.601 / 0.641**, department base/nurse top-1 **0.607 / 0.708**, disposition acc@0.5 **0.8396**, ROC AUC **0.9138**, ECE **0.0036**; ICD oracle@5 rollup blend **0.670** / blend+vitals **0.691**, e2e-union (v3-nurse) **0.649**.
+
+**Disposition — what the audit adds beyond the table above:**
+- Calibration is confirmed excellent: ECE **0.0036**, **MCE 0.0148**, reliability table near-diagonal (max bin gap 1.5pp). The per-threshold table is extended to the more aggressive end — **0.20 → under-triage 0.076 (sens 0.924)**, **0.15 → under-triage 0.054 (sens 0.946)** — so a stricter under-triage target is quantified, not guessed (`doctor_disposition_thresholds.csv`).
+- Feature-group gain (uncalibrated): TF-IDF 84.6%, longitudinal 4.6%, structured 4.1%, PMH 1.9%, soft-cascade 1.9%, snapshot-vitals 1.7%, meds 1.2%; **all 19 PMH and all 6 soft-cascade columns earn non-zero gain** (`triage_disposition_proba_admit` is the single top feature). Subgroup lift over the triage cascade peaks in elderly (+7.7pp acc), prior-admission (+7.4), polypharmacy (+6.8).
+- **Lift caveat:** the honest lift over the triage cascade is threshold-independent — AUC +0.024, accuracy +5.8pp, Brier −0.023, ECE 0.0036 vs 0.075. The fixed-threshold under/over deltas in the raw `lift_vs_triage_at_live` block compare two differently-calibrated scales and should not be read as a regression.
+
+**Diagnosis vs department lift shape:** diagnosis nurse-lift is uniform (macro-F1 +3.7, balanced-acc +2.0); department is majority-concentrated (top-1 +10.1 but balanced-acc −4.4) — see the [MED-dominance caveat](#per-class-department-recall--v3-base--v3-nurse--tier-a--the-med-dominance-caveat).
+
+**ICD — lead with graded near-miss:** strict oracle@5 rollup of 0.691 understates clinical usefulness; the [graded engines](#graded-near-miss-metrics-evaluation-only-shipped-2026-06-25) score the same top-5 at **Gemini 0.915 / ICD-tree 0.784 / TF-IDF 0.726**, i.e. the misses are clinically adjacent. End-to-end, conditional recall (0.699) ≈ oracle (0.691), so the e2e gap is Stage-1 category error, not Stage-2 resolution; nurse-vs-base ICD lift is +1.1pp union / +1.7pp flat, entirely via Stage-1 category recall (top-5 0.906 → 0.928). Full grid: `icd_resolution_summary.csv` / `icd_resolution_full.json`.
+
+A generated-cases (250 NL narratives) end-to-end audit with the **Flash-vs-MedGemma** head-to-head and an NLP-parser-cost decomposition is documented in [`docs/llm-backend.md`](../llm-backend.md) and [`docs/results/rebenchmark_v3/`](../results/rebenchmark_v3/).
 
 ---
 

@@ -1,0 +1,335 @@
+section,model,granularity,variant,metric,value
+oracle,-,rollup,prevalence,oracle@1,0.18344760039177277
+oracle,-,rollup,prevalence,oracle@3,0.43344760039177277
+oracle,-,rollup,prevalence,oracle@5,0.5521547502448579
+oracle,-,rollup,prevalence,oracle@10,0.7046523016650342
+oracle,-,rollup,prevalence,mrr,0.35585933483860516
+oracle,-,rollup,prevalence,graded:tfidf:graded@5,0.5900266589427204
+oracle,-,rollup,prevalence,graded:tfidf:graded@10,0.729634970759318
+oracle,-,rollup,prevalence,graded:gemini:graded@5,0.8677541346087628
+oracle,-,rollup,prevalence,graded:gemini:graded@10,0.9162674592827956
+oracle,-,rollup,prevalence,graded:tree:graded@5,0.6854946289660298
+oracle,-,rollup,prevalence,graded:tree:graded@10,0.7930803319499495
+oracle,-,rollup,cosine,oracle@1,0.15
+oracle,-,rollup,cosine,oracle@3,0.3844270323212537
+oracle,-,rollup,cosine,oracle@5,0.5029872673849167
+oracle,-,rollup,cosine,oracle@10,0.6673359451518119
+oracle,-,rollup,cosine,mrr,0.31622751711243646
+oracle,-,rollup,cosine,graded:tfidf:graded@5,0.5539028926180579
+oracle,-,rollup,cosine,graded:tfidf:graded@10,0.712244563985408
+oracle,-,rollup,cosine,graded:gemini:graded@5,0.8618623402863596
+oracle,-,rollup,cosine,graded:gemini:graded@10,0.9143929192882093
+oracle,-,rollup,cosine,graded:tree:graded@5,0.6512096221953718
+oracle,-,rollup,cosine,graded:tree:graded@10,0.7667972867332407
+oracle,-,rollup,blend,oracle@1,0.29485798237022526
+oracle,-,rollup,blend,oracle@3,0.5621449559255631
+oracle,-,rollup,blend,oracle@5,0.6698334965719882
+oracle,-,rollup,blend,oracle@10,0.798971596474045
+oracle,-,rollup,blend,mrr,0.46607483256547866
+oracle,-,rollup,blend,graded:tfidf:graded@5,0.7058414126703485
+oracle,-,rollup,blend,graded:tfidf:graded@10,0.8265631112482592
+oracle,-,rollup,blend,graded:gemini:graded@5,0.9089140381098494
+oracle,-,rollup,blend,graded:gemini:graded@10,0.9478576495761852
+oracle,-,rollup,blend,graded:tree:graded@5,0.7682370371729806
+oracle,-,rollup,blend,graded:tree:graded@10,0.8590597707541052
+oracle,-,rollup,blend+vitals,oracle@1,0.3311949069539667
+oracle,-,rollup,blend+vitals,oracle@3,0.5860920666013713
+oracle,-,rollup,blend+vitals,oracle@5,0.691332027424094
+oracle,-,rollup,blend+vitals,oracle@10,0.812977473065622
+oracle,-,rollup,blend+vitals,mrr,0.49598214331324697
+oracle,-,rollup,blend+vitals,graded:tfidf:graded@5,0.7257201610419473
+oracle,-,rollup,blend+vitals,graded:tfidf:graded@10,0.8403976261090345
+oracle,-,rollup,blend+vitals,graded:gemini:graded@5,0.9147235268827283
+oracle,-,rollup,blend+vitals,graded:gemini:graded@10,0.9517230924032811
+oracle,-,rollup,blend+vitals,graded:tree:graded@5,0.783653311584652
+oracle,-,rollup,blend+vitals,graded:tree:graded@10,0.8689373378772344
+oracle,-,full,prevalence,oracle@1,0.1518609206660137
+oracle,-,full,prevalence,oracle@3,0.3451518119490695
+oracle,-,full,prevalence,oracle@5,0.4287952987267385
+oracle,-,full,prevalence,oracle@10,0.5507345739471107
+oracle,-,full,prevalence,mrr,0.28710837211537155
+oracle,-,full,prevalence,graded:tfidf:graded@5,0.4837068649277047
+oracle,-,full,prevalence,graded:tfidf:graded@10,0.6060077827894489
+oracle,-,full,prevalence,graded:gemini:graded@5,0.8360656887730702
+oracle,-,full,prevalence,graded:gemini:graded@10,0.8775453588054183
+oracle,-,full,prevalence,graded:tree:graded@5,0.6251028600799232
+oracle,-,full,prevalence,graded:tree:graded@10,0.7115181260664712
+oracle,-,full,cosine,oracle@1,0.04285014691478942
+oracle,-,full,cosine,oracle@3,0.15112634671890304
+oracle,-,full,cosine,oracle@5,0.2479431929480901
+oracle,-,full,cosine,oracle@10,0.41116552399608225
+oracle,-,full,cosine,mrr,0.15142393964336415
+oracle,-,full,cosine,graded:tfidf:graded@5,0.36159908358193754
+oracle,-,full,cosine,graded:tfidf:graded@10,0.5241345367282191
+oracle,-,full,cosine,graded:gemini:graded@5,0.8034311673783648
+oracle,-,full,cosine,graded:gemini:graded@10,0.8599086660596229
+oracle,-,full,cosine,graded:tree:graded@5,0.5208521275982684
+oracle,-,full,cosine,graded:tree:graded@10,0.6372527179475163
+oracle,-,full,blend,oracle@1,0.18707149853085211
+oracle,-,full,blend,oracle@3,0.39980411361410384
+oracle,-,full,blend,oracle@5,0.4917238001958864
+oracle,-,full,blend,oracle@10,0.6073947110675808
+oracle,-,full,blend,mrr,0.32923008413385063
+oracle,-,full,blend,graded:tfidf:graded@5,0.5751273025378191
+oracle,-,full,blend,graded:tfidf:graded@10,0.6875621238955087
+oracle,-,full,blend,graded:gemini:graded@5,0.8716472225955137
+oracle,-,full,blend,graded:gemini:graded@10,0.9082878658283469
+oracle,-,full,blend,graded:tree:graded@5,0.6802008244946934
+oracle,-,full,blend,graded:tree:graded@10,0.7617580895792843
+oracle,-,full,blend+vitals,oracle@1,0.23501469147894222
+oracle,-,full,blend+vitals,oracle@3,0.432615083251714
+oracle,-,full,blend+vitals,oracle@5,0.5252693437806073
+oracle,-,full,blend+vitals,oracle@10,0.6378060724779627
+oracle,-,full,blend+vitals,mrr,0.370698620280354
+oracle,-,full,blend+vitals,graded:tfidf:graded@5,0.6004062065998791
+oracle,-,full,blend+vitals,graded:tfidf:graded@10,0.7130740263786652
+oracle,-,full,blend+vitals,graded:gemini:graded@5,0.879520104657658
+oracle,-,full,blend+vitals,graded:gemini:graded@10,0.9160044147965957
+oracle,-,full,blend+vitals,graded:tree:graded@5,0.7001273563396219
+oracle,-,full,blend+vitals,graded:tree:graded@10,0.7815328584945634
+end_to_end,v3_base (pre-nurse),-,-,stage1_cat_recall:top1,0.6008814887365328
+end_to_end,v3_base (pre-nurse),-,-,stage1_cat_recall:top5,0.9055827619980411
+end_to_end,v3_base (pre-nurse),rollup,prevalence,union,0.5027913809990205
+end_to_end,v3_base (pre-nurse),rollup,prevalence,flat,0.43139079333986285
+end_to_end,v3_base (pre-nurse),rollup,prevalence,flat_mrr,0.20790571537447675
+end_to_end,v3_base (pre-nurse),rollup,prevalence,cond,0.5552130651092364
+end_to_end,v3_base (pre-nurse),rollup,prevalence,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tfidf:union,0.5543496094144202
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tfidf:flat,0.4814336045857484
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tfidf:cond,0.6037760283953603
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:gemini:union,0.8577757009650772
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:gemini:flat,0.830358004225573
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:gemini:cond,0.8755810405400675
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tree:union,0.6227179283697621
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tree:flat,0.5552105827849946
+end_to_end,v3_base (pre-nurse),rollup,prevalence,graded:tree:cond,0.6876433104753701
+end_to_end,v3_base (pre-nurse),rollup,cosine,union,0.4729676787463271
+end_to_end,v3_base (pre-nurse),rollup,cosine,flat,0.41126346718903034
+end_to_end,v3_base (pre-nurse),rollup,cosine,flat_mrr,0.2053745018414036
+end_to_end,v3_base (pre-nurse),rollup,cosine,cond,0.5222799048237076
+end_to_end,v3_base (pre-nurse),rollup,cosine,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tfidf:union,0.537810445980791
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tfidf:flat,0.4638999452185977
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tfidf:cond,0.587208059348327
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:gemini:union,0.8580084634049049
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:gemini:flat,0.8288147603700724
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:gemini:cond,0.8759743782921113
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tree:union,0.602061709341293
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tree:flat,0.534569054850752
+end_to_end,v3_base (pre-nurse),rollup,cosine,graded:tree:cond,0.6648172239204674
+end_to_end,v3_base (pre-nurse),rollup,blend,union,0.6184133202742409
+end_to_end,v3_base (pre-nurse),rollup,blend,flat,0.5414299706170421
+end_to_end,v3_base (pre-nurse),rollup,blend,flat_mrr,0.31474114952345256
+end_to_end,v3_base (pre-nurse),rollup,blend,cond,0.6828898983344149
+end_to_end,v3_base (pre-nurse),rollup,blend,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tfidf:union,0.6649948125976949
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tfidf:flat,0.5841618975164253
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tfidf:cond,0.7260793086725363
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:gemini:union,0.8950646787881851
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:gemini:flat,0.8654197308330648
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:gemini:cond,0.916693656192619
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tree:union,0.7040499544312975
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tree:flat,0.6222331080100445
+end_to_end,v3_base (pre-nurse),rollup,blend,graded:tree:cond,0.777438896251091
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,union,0.6374142997061705
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,flat,0.5521547502448579
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,flat_mrr,0.3220097256802459
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,cond,0.7038719446247026
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tfidf:union,0.681854505771299
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tfidf:flat,0.5950818311008141
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tfidf:cond,0.7443749990137898
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:gemini:union,0.9000043749196289
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:gemini:flat,0.8678698645078237
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:gemini:cond,0.9220136531582133
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tree:union,0.7177032353157629
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tree:flat,0.6234084259459601
+end_to_end,v3_base (pre-nurse),rollup,blend+vitals,graded:tree:cond,0.7925156859796645
+end_to_end,v3_base (pre-nurse),full,prevalence,union,0.390205680705191
+end_to_end,v3_base (pre-nurse),full,prevalence,flat,0.3337904015670911
+end_to_end,v3_base (pre-nurse),full,prevalence,flat_mrr,0.16014497503306616
+end_to_end,v3_base (pre-nurse),full,prevalence,cond,0.4308890330953926
+end_to_end,v3_base (pre-nurse),full,prevalence,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tfidf:union,0.4572360216338009
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tfidf:flat,0.39581923560304594
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tfidf:cond,0.49683652749189816
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:gemini:union,0.8286823293400325
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:gemini:flat,0.8052944963405695
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:gemini:cond,0.8435572862412386
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tree:union,0.5672233175139703
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tree:flat,0.5071204770148443
+end_to_end,v3_base (pre-nurse),full,prevalence,graded:tree:cond,0.6263627592275185
+end_to_end,v3_base (pre-nurse),full,cosine,union,0.2308521057786484
+end_to_end,v3_base (pre-nurse),full,cosine,flat,0.19363369245837414
+end_to_end,v3_base (pre-nurse),full,cosine,flat_mrr,0.0760947278715639
+end_to_end,v3_base (pre-nurse),full,cosine,cond,0.25492104693921697
+end_to_end,v3_base (pre-nurse),full,cosine,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tfidf:union,0.3618749556865271
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tfidf:flat,0.3015131759443836
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tfidf:cond,0.39328145012273585
+end_to_end,v3_base (pre-nurse),full,cosine,graded:gemini:union,0.8057266572342563
+end_to_end,v3_base (pre-nurse),full,cosine,graded:gemini:flat,0.7779652856356016
+end_to_end,v3_base (pre-nurse),full,cosine,graded:gemini:cond,0.8187968441090386
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tree:union,0.47746328110209174
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tree:flat,0.4176052978322508
+end_to_end,v3_base (pre-nurse),full,cosine,graded:tree:cond,0.5272280013028765
+end_to_end,v3_base (pre-nurse),full,blend,union,0.4551909892262488
+end_to_end,v3_base (pre-nurse),full,blend,flat,0.39427032321253674
+end_to_end,v3_base (pre-nurse),full,blend,flat_mrr,0.21677305200480984
+end_to_end,v3_base (pre-nurse),full,blend,cond,0.5026497945057322
+end_to_end,v3_base (pre-nurse),full,blend,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),full,blend,graded:tfidf:union,0.5487438217172605
+end_to_end,v3_base (pre-nurse),full,blend,graded:tfidf:flat,0.476755263621248
+end_to_end,v3_base (pre-nurse),full,blend,graded:tfidf:cond,0.5979085643024337
+end_to_end,v3_base (pre-nurse),full,blend,graded:gemini:union,0.8621922879652225
+end_to_end,v3_base (pre-nurse),full,blend,graded:gemini:flat,0.8343371216423014
+end_to_end,v3_base (pre-nurse),full,blend,graded:gemini:cond,0.8804804494815189
+end_to_end,v3_base (pre-nurse),full,blend,graded:tree:union,0.6232321320446418
+end_to_end,v3_base (pre-nurse),full,blend,graded:tree:flat,0.5458717004413353
+end_to_end,v3_base (pre-nurse),full,blend,graded:tree:cond,0.6881949024626685
+end_to_end,v3_base (pre-nurse),full,blend+vitals,union,0.48452497551420176
+end_to_end,v3_base (pre-nurse),full,blend+vitals,flat,0.41567091087169444
+end_to_end,v3_base (pre-nurse),full,blend+vitals,flat_mrr,0.2293557173149152
+end_to_end,v3_base (pre-nurse),full,blend+vitals,cond,0.5350421804023362
+end_to_end,v3_base (pre-nurse),full,blend+vitals,cat_acc,0.9055827619980411
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tfidf:union,0.5694009116398928
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tfidf:flat,0.4933882884281582
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tfidf:cond,0.6202381945212975
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:gemini:union,0.8686945414478935
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:gemini:flat,0.8394742136779191
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:gemini:cond,0.887389762700571
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tree:union,0.6403868818055404
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tree:flat,0.5517287027619845
+end_to_end,v3_base (pre-nurse),full,blend+vitals,graded:tree:cond,0.7071544520046039
+end_to_end,v3 with-nurse,-,-,stage1_cat_recall:top1,0.6407443682664055
+end_to_end,v3 with-nurse,-,-,stage1_cat_recall:top5,0.9277179236043095
+end_to_end,v3 with-nurse,rollup,prevalence,union,0.514103819784525
+end_to_end,v3 with-nurse,rollup,prevalence,flat,0.4473065621939275
+end_to_end,v3 with-nurse,rollup,prevalence,flat_mrr,0.22113309278765425
+end_to_end,v3 with-nurse,rollup,prevalence,cond,0.5541596283783784
+end_to_end,v3 with-nurse,rollup,prevalence,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tfidf:union,0.5659231422689537
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tfidf:flat,0.49638536864796784
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tfidf:cond,0.6037048182407808
+end_to_end,v3 with-nurse,rollup,prevalence,graded:gemini:union,0.8615491745550182
+end_to_end,v3 with-nurse,rollup,prevalence,graded:gemini:flat,0.8358330207257499
+end_to_end,v3 with-nurse,rollup,prevalence,graded:gemini:cond,0.8751893115538248
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tree:union,0.6373065670895647
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tree:flat,0.5735063713222713
+end_to_end,v3 with-nurse,rollup,prevalence,graded:tree:cond,0.686961576223021
+end_to_end,v3 with-nurse,rollup,cosine,union,0.477228207639569
+end_to_end,v3 with-nurse,rollup,cosine,flat,0.4196865817825661
+end_to_end,v3 with-nurse,rollup,cosine,flat_mrr,0.21218199765392662
+end_to_end,v3 with-nurse,rollup,cosine,cond,0.5144108952702703
+end_to_end,v3 with-nurse,rollup,cosine,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,rollup,cosine,graded:tfidf:union,0.5421119708263422
+end_to_end,v3 with-nurse,rollup,cosine,graded:tfidf:flat,0.47350381603683406
+end_to_end,v3 with-nurse,rollup,cosine,graded:tfidf:cond,0.5793367358680396
+end_to_end,v3 with-nurse,rollup,cosine,graded:gemini:union,0.8595448822833882
+end_to_end,v3 with-nurse,rollup,cosine,graded:gemini:flat,0.8326140994014516
+end_to_end,v3 with-nurse,rollup,cosine,graded:gemini:cond,0.8731505838254265
+end_to_end,v3 with-nurse,rollup,cosine,graded:tree:union,0.611728702700103
+end_to_end,v3 with-nurse,rollup,cosine,graded:tree:flat,0.5482223361555439
+end_to_end,v3 with-nurse,rollup,cosine,graded:tree:cond,0.6593908419096339
+end_to_end,v3 with-nurse,rollup,blend,union,0.6285014691478942
+end_to_end,v3 with-nurse,rollup,blend,flat,0.5545543584720862
+end_to_end,v3 with-nurse,rollup,blend,flat_mrr,0.32761035252709786
+end_to_end,v3 with-nurse,rollup,blend,cond,0.6774704391891891
+end_to_end,v3 with-nurse,rollup,blend,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,rollup,blend,graded:tfidf:union,0.6751283912526546
+end_to_end,v3 with-nurse,rollup,blend,graded:tfidf:flat,0.5979882330137937
+end_to_end,v3 with-nurse,rollup,blend,graded:tfidf:cond,0.7214101643624147
+end_to_end,v3 with-nurse,rollup,blend,graded:gemini:union,0.898627310731502
+end_to_end,v3 with-nurse,rollup,blend,graded:gemini:flat,0.8705054191575111
+end_to_end,v3 with-nurse,rollup,blend,graded:gemini:cond,0.9150526116828661
+end_to_end,v3 with-nurse,rollup,blend,graded:tree:union,0.7177668987478729
+end_to_end,v3 with-nurse,rollup,blend,graded:tree:flat,0.6386043128403347
+end_to_end,v3 with-nurse,rollup,blend,graded:tree:cond,0.7736908822018351
+end_to_end,v3 with-nurse,rollup,blend+vitals,union,0.6487757100881488
+end_to_end,v3 with-nurse,rollup,blend+vitals,flat,0.5690009794319295
+end_to_end,v3 with-nurse,rollup,blend+vitals,flat_mrr,0.33917642697130174
+end_to_end,v3 with-nurse,rollup,blend+vitals,cond,0.6993243243243243
+end_to_end,v3 with-nurse,rollup,blend+vitals,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tfidf:union,0.6926773014420121
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tfidf:flat,0.6113632614203605
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tfidf:cond,0.7401832833039358
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:gemini:union,0.903822069458233
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:gemini:flat,0.8737798315771179
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:gemini:cond,0.9205862507192619
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tree:union,0.7323114626729874
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tree:flat,0.6432223339972837
+end_to_end,v3 with-nurse,rollup,blend+vitals,graded:tree:cond,0.7893686691185812
+end_to_end,v3 with-nurse,full,prevalence,union,0.39926542605288934
+end_to_end,v3 with-nurse,full,prevalence,flat,0.3471596474045054
+end_to_end,v3 with-nurse,full,prevalence,flat_mrr,0.17285365658221635
+end_to_end,v3 with-nurse,full,prevalence,cond,0.4303737331081081
+end_to_end,v3 with-nurse,full,prevalence,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,full,prevalence,graded:tfidf:union,0.4667365407768453
+end_to_end,v3 with-nurse,full,prevalence,graded:tfidf:flat,0.40805196978184183
+end_to_end,v3 with-nurse,full,prevalence,graded:tfidf:cond,0.4971172593343392
+end_to_end,v3 with-nurse,full,prevalence,graded:gemini:union,0.8317467142797708
+end_to_end,v3 with-nurse,full,prevalence,graded:gemini:flat,0.8101373365209105
+end_to_end,v3 with-nurse,full,prevalence,graded:gemini:cond,0.843156668417332
+end_to_end,v3 with-nurse,full,prevalence,graded:tree:union,0.5808227300352028
+end_to_end,v3 with-nurse,full,prevalence,graded:tree:flat,0.5243241990085447
+end_to_end,v3 with-nurse,full,prevalence,graded:tree:cond,0.6260768658846516
+end_to_end,v3 with-nurse,full,cosine,union,0.23256611165523997
+end_to_end,v3 with-nurse,full,cosine,flat,0.19862879529872673
+end_to_end,v3 with-nurse,full,cosine,flat_mrr,0.07768282386155466
+end_to_end,v3 with-nurse,full,cosine,cond,0.2506862331081081
+end_to_end,v3 with-nurse,full,cosine,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,full,cosine,graded:tfidf:union,0.3645885346774682
+end_to_end,v3 with-nurse,full,cosine,graded:tfidf:flat,0.30874539425472997
+end_to_end,v3 with-nurse,full,cosine,graded:tfidf:cond,0.3881758170421661
+end_to_end,v3 with-nurse,full,cosine,graded:gemini:union,0.8065199177423957
+end_to_end,v3 with-nurse,full,cosine,graded:gemini:flat,0.7819896633518781
+end_to_end,v3 with-nurse,full,cosine,graded:gemini:cond,0.8163888295703391
+end_to_end,v3 with-nurse,full,cosine,graded:tree:union,0.48615573975353354
+end_to_end,v3 with-nurse,full,cosine,graded:tree:flat,0.43071009737095567
+end_to_end,v3 with-nurse,full,cosine,graded:tree:cond,0.5240340057942966
+end_to_end,v3 with-nurse,full,blend,union,0.4620959843290891
+end_to_end,v3 with-nurse,full,blend,flat,0.40670910871694416
+end_to_end,v3 with-nurse,full,blend,flat_mrr,0.22563002089189163
+end_to_end,v3 with-nurse,full,blend,cond,0.49809966216216217
+end_to_end,v3 with-nurse,full,blend,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,full,blend,graded:tfidf:union,0.5563578997890763
+end_to_end,v3 with-nurse,full,blend,graded:tfidf:flat,0.489837454755261
+end_to_end,v3 with-nurse,full,blend,graded:tfidf:cond,0.5935648312567562
+end_to_end,v3 with-nurse,full,blend,graded:gemini:union,0.8649656614232133
+end_to_end,v3 with-nurse,full,blend,graded:gemini:flat,0.8394136290971727
+end_to_end,v3 with-nurse,full,blend,graded:gemini:cond,0.8787601747380167
+end_to_end,v3 with-nurse,full,blend,graded:tree:union,0.6354848256949464
+end_to_end,v3 with-nurse,full,blend,graded:tree:flat,0.5633202804641089
+end_to_end,v3 with-nurse,full,blend,graded:tree:cond,0.6849978959401818
+end_to_end,v3 with-nurse,full,blend+vitals,union,0.49333986287952986
+end_to_end,v3 with-nurse,full,blend+vitals,flat,0.4301175318315377
+end_to_end,v3 with-nurse,full,blend+vitals,flat_mrr,0.24360861853199708
+end_to_end,v3 with-nurse,full,blend+vitals,cond,0.5317778716216216
+end_to_end,v3 with-nurse,full,blend+vitals,cat_acc,0.9277179236043095
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tfidf:union,0.5782848615654043
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tfidf:flat,0.507279827333663
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tfidf:cond,0.6169329964992554
+end_to_end,v3 with-nurse,full,blend+vitals,graded:gemini:union,0.8720089141377974
+end_to_end,v3 with-nurse,full,blend+vitals,graded:gemini:flat,0.8446667677946352
+end_to_end,v3 with-nurse,full,blend+vitals,graded:gemini:cond,0.8861532505551303
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tree:union,0.6539177340987147
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tree:flat,0.5703330124276859
+end_to_end,v3 with-nurse,full,blend+vitals,graded:tree:cond,0.7048669832292944
+before_after_nurse,v3_base,rollup,blend+vitals,union,0.6374142997061705
+before_after_nurse,v3_nurse,rollup,blend+vitals,union,0.6487757100881488
+before_after_nurse,delta,rollup,blend+vitals,union,0.011361410381978354
+before_after_nurse,v3_base,rollup,blend+vitals,flat,0.5521547502448579
+before_after_nurse,v3_nurse,rollup,blend+vitals,flat,0.5690009794319295
+before_after_nurse,delta,rollup,blend+vitals,flat,0.01684622918707157
+before_after_nurse,v3_base,rollup,blend+vitals,cond,0.7038719446247026
+before_after_nurse,v3_nurse,rollup,blend+vitals,cond,0.6993243243243243
+before_after_nurse,delta,rollup,blend+vitals,cond,-0.004547620300378252
+before_after_nurse,v3_base,full,blend+vitals,union,0.48452497551420176
+before_after_nurse,v3_nurse,full,blend+vitals,union,0.49333986287952986
+before_after_nurse,delta,full,blend+vitals,union,0.008814887365328095
+before_after_nurse,v3_base,full,blend+vitals,flat,0.41567091087169444
+before_after_nurse,v3_nurse,full,blend+vitals,flat,0.4301175318315377
+before_after_nurse,delta,full,blend+vitals,flat,0.014446620959843282
+before_after_nurse,v3_base,full,blend+vitals,cond,0.5350421804023362
+before_after_nurse,v3_nurse,full,blend+vitals,cond,0.5317778716216216
+before_after_nurse,delta,full,blend+vitals,cond,-0.0032643087807145976

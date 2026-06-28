@@ -12,6 +12,22 @@ thesis_article/
 cssc_thesis_competition/
 webapp/frontend/node_modules/
 
+# v3 re-benchmark audit (benchmarks/audit/) — commit the AGGREGATE results
+# (JSON + aggregate CSVs: confusion / per-class / thresholds / calibration /
+# subgroups / icd summary / backend comparison / parser cost), but NEVER the
+# patient-level per-case CSVs (MIMIC DUA: they carry generated narratives +
+# stay_ids). The global `*.csv` rule above hides every CSV; re-include the safe
+# aggregate ones under the audit tree, then re-exclude the per-case files.
+!benchmarks/audit/**/*.csv
+benchmarks/audit/**/per_case_master.csv
+benchmarks/audit/**/parser_audit.csv
+benchmarks/audit/**/triage_acuity.csv
+benchmarks/audit/**/disposition.csv
+benchmarks/audit/**/doctor_diagnosis.csv
+benchmarks/audit/**/doctor_department.csv
+benchmarks/audit/**/exact_icd.csv
+benchmarks/audit/**/backend_comparison_parser_per_case.csv
+
 # Trained model artifacts (regeneratable via `uv run train_*`)
 artifacts/
 models/

@@ -471,6 +471,65 @@ use a current-cohort `subject_id`, or `--all-subjects` to index the full populat
 
 ---
 
+## 5d. Both-backends audit — Flash vs MedGemma at the live config (2026-06-28)
+
+The 2026-06-28 re-benchmark ran **both** backends together at the live config (clinical-term
+prompt, no clinicalize map, `--parser-llm --skip-e2e`) on the current 250-case cohort with the
+**rebuilt history index** (so `tool_direct_lookup` / the MRN-lookup enrichment is live, unlike the
+§5c stale-index run). Full artifacts: `benchmarks/audit/2026-06-28/generated_cases/{flash,medgemma,comparison}/`;
+write-up in [`docs/results/rebenchmark_v3/`](results/rebenchmark_v3/). This is the first time both
+backends are scored side-by-side on the *same* run rather than separate reads.
+
+**Reference ladder (backend-invariant — no LLM)** and the isolated parser cost
+(`parser_cost.csv`):
+
+| metric (admitted-GT) | feature_vector_gated | tool_direct | **Flash** parser-llm | **MedGemma** parser-llm |
+|---|---|---|---|---|
+| acuity exact | 0.684 | 0.680 | **0.660** | 0.604 |
+| diagnosis top-1 | 0.472 | 0.491 | 0.423 | 0.423 |
+| department top-1 | 0.589 | 0.595 | 0.479 | **0.497** |
+| ICD union | 0.534 | 0.552 | **0.466** | 0.460 |
+
+`tool_direct ≈ feature_vector_gated`, so the disposition-gate and runtime-feature steps cost almost
+nothing — **the NL gap is the LLM parser.** It hits the complaint-sensitive heads hardest:
+department −10 to −12pp, ICD −9 to −12pp, diagnosis −6.8pp (both backends); acuity/disposition far
+more robust (−2 to −8pp). (`tool_direct → parser_llm`.)
+
+**Flash vs MedGemma — what each is better at** (`backend_comparison_metrics.csv`,
+`backend_comparison_parser_per_case.csv`):
+
+| dimension | Flash | MedGemma | winner |
+|---|---|---|---|
+| complaint token Jaccard | **0.598** | 0.529 | **Flash** (+6.9pp) |
+| age / gender extracted ok | 250/250 · 232/250 | 250/250 · 232/250 | tie |
+| arrival transport ok | 242/250 | 241/250 | ~tie |
+| acuity exact / quad-κ | **0.660 / 0.615** | 0.604 / 0.539 | **Flash** |
+| acuity bias (mean signed err) | +0.008 (unbiased) | −0.152 (over-acute) | **Flash** |
+| diagnosis top-1 / top-3 | 0.423 / 0.626 | 0.423 / 0.626 | tie |
+| department top-1 / top-3 | 0.479 / 0.681 | **0.497 / 0.687** | **MedGemma** |
+| disposition ROC AUC / acc@0.40 | **0.888 / 0.792** | 0.873 / 0.784 | **Flash** |
+| acuity under-triage / over-triage | 0.160 / **0.180** | **0.132** / 0.264 | mixed |
+| ICD strict@1 / @5 / union | **0.178 / 0.307 / 0.466** | 0.172 / 0.301 / 0.460 | Flash (marginal) |
+
+- **Flash** maps lay language to the *charted clinical short-form* more faithfully (higher Jaccard),
+  which flows into decisively better **ESI acuity**, better **disposition** (AUC + acc), marginally
+  better **ICD**, and an **unbiased** acuity error. Example (per-case CSV): "pain in my left testicle"
+  → Flash `testicular pain` (matches chart, F1 0.86) vs MedGemma `left testicular pain` (over-specified,
+  F1 0.67).
+- **MedGemma** edges **department top-1** (+1.8pp) and has lower acuity **under-triage** (0.132 vs
+  0.160) — but at the cost of an **over-acute / over-triage bias** (over-triage 0.264; mean signed
+  error −0.152) and weaker acuity agreement (quad-κ 0.539 vs 0.615).
+- **Diagnosis is a dead tie** (0.423 / 0.626) — the parser differences don't move the diagnosis
+  outcome distribution on these 250 cases.
+
+**Net:** Flash is the stronger parser for this pipeline overall (acuity, disposition, ICD, complaint
+fidelity); MedGemma's only clear edge is department. This refines the §5b "MedGemma small edge"
+read — when both are measured on the *same* run at the live config, **Flash leads**, driven by
+acuity and complaint fidelity, with MedGemma's over-acute bias as the main downside. (Per-metric
+deltas remain 1–4 cases at n=163/250, so treat single-head differences as directional.)
+
+---
+
 ## 6. Experiment B — case-generation quality (designed, not yet run)
 
 Separate from Experiment A. Regenerate the narratives with each backend and compare the

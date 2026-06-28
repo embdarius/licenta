@@ -88,6 +88,48 @@ def _mode_metrics(data: dict, mode: str) -> dict:
     return flat
 
 
+def parser_cost_table(fdata, mdata, fb, mb, out_dir,
+                      ref_modes=("feature_vector_gated", "tool_direct"),
+                      parser_mode="parser_llm"):
+    """Write `parser_cost.csv`: the NLP-parser-cost decomposition.
+
+    Columns per metric: the backend-invariant reference ladder
+    (`feature_vector_gated`, `tool_direct` — neither uses the LLM, so they're
+    identical across backends and taken from the Flash run), each backend's
+    `parser_llm`, and the isolated parser cost `parser_llm - tool_direct` per
+    backend (the only step that differs is the LLM-parsed chief complaint).
+    """
+    fmd = fdata.get("metrics_detailed", {})
+    mmd = mdata.get("metrics_detailed", {})
+    if parser_mode not in fmd or parser_mode not in mmd:
+        print("    parser_cost: parser_llm mode missing in a backend; skipped")
+        return
+    refs = {rm: _flatten(fmd[rm], "") for rm in ref_modes if rm in fmd}
+    td, fvg = refs.get("tool_direct", {}), refs.get("feature_vector_gated", {})
+    fpl, mpl = _flatten(fmd[parser_mode], ""), _flatten(mmd[parser_mode], "")
+    # Sanity: reference modes must be backend-invariant.
+    for rm in ref_modes:
+        if rm in fmd and rm in mmd:
+            a, b = _flatten(fmd[rm], ""), _flatten(mmd[rm], "")
+            md = max((abs(a[k] - b[k]) for k in a if k in b), default=0.0)
+            if md > 1e-6:
+                print(f"    parser_cost: WARN '{rm}' differs across backends "
+                      f"(max {md:.2e}) — expected backend-invariant")
+    rows = []
+    for k in sorted(set(fvg) | set(td) | set(fpl) | set(mpl)):
+        f_cost = (fpl[k] - td[k]) if (k in fpl and k in td) else None
+        m_cost = (mpl[k] - td[k]) if (k in mpl and k in td) else None
+        rows.append({
+            "metric": k, "direction": _direction(k),
+            "feature_vector_gated": fvg.get(k), "tool_direct": td.get(k),
+            f"{fb}_parser_llm": fpl.get(k), f"{mb}_parser_llm": mpl.get(k),
+            f"{fb}_parser_cost(pl_minus_td)": f_cost,
+            f"{mb}_parser_cost(pl_minus_td)": m_cost,
+        })
+    pd.DataFrame(rows).to_csv(out_dir / "parser_cost.csv", index=False, encoding="utf-8")
+    print(f"    csv -> parser_cost.csv  ({len(rows)} metrics; references backend-invariant)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--flash-dir", required=True)
@@ -127,6 +169,9 @@ def main():
     metrics_df.to_csv(out_dir / "backend_comparison_metrics.csv",
                       index=False, encoding="utf-8")
     print(f"    csv -> backend_comparison_metrics.csv  ({len(metrics_df)} metrics)")
+
+    # Parser-cost decomposition (reference ladder + isolated NLP-parser cost).
+    parser_cost_table(fdata, mdata, fb, mb, out_dir)
 
     # Per-case parser comparison.
     parser_rows = []

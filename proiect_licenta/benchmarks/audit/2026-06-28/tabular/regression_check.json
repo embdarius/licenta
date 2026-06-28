@@ -1,0 +1,211 @@
+{
+  "status": "PASS",
+  "tolerance": 0.002,
+  "n_checked": 29,
+  "n_failed": 0,
+  "checks": [
+    {
+      "metric": "triage.acuity.exact",
+      "ceiling": 0.6755,
+      "new": 0.675461,
+      "delta": -3.9e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "triage.acuity.within_1",
+      "ceiling": 0.9818,
+      "new": 0.981846,
+      "delta": 4.6e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "triage.acuity.kappa_quadratic",
+      "ceiling": 0.6449,
+      "new": 0.644909,
+      "delta": 9e-06,
+      "status": "PASS"
+    },
+    {
+      "metric": "triage.disposition.accuracy@0.5",
+      "ceiling": 0.7798,
+      "new": 0.77977,
+      "delta": -3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "triage.disposition.roc_auc",
+      "ceiling": 0.8644,
+      "new": 0.86437,
+      "delta": -3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_base.top1",
+      "ceiling": 0.6009,
+      "new": 0.600881,
+      "delta": -1.9e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_base.top3",
+      "ceiling": 0.8271,
+      "new": 0.827081,
+      "delta": -1.9e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_base.top5",
+      "ceiling": 0.9056,
+      "new": 0.905583,
+      "delta": -1.7e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.dept_base.top1",
+      "ceiling": 0.6066,
+      "new": 0.606562,
+      "delta": -3.8e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.dept_base.top3",
+      "ceiling": 0.9228,
+      "new": 0.922821,
+      "delta": 2.1e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_nurse.top1",
+      "ceiling": 0.6407,
+      "new": 0.640744,
+      "delta": 4.4e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_nurse.top3",
+      "ceiling": 0.8572,
+      "new": 0.857248,
+      "delta": 4.8e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.diag_nurse.kappa",
+      "ceiling": 0.5915,
+      "new": 0.591468,
+      "delta": -3.2e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.dept_nurse.top1",
+      "ceiling": 0.7079,
+      "new": 0.707933,
+      "delta": 3.3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.dept_nurse.top3",
+      "ceiling": 0.9407,
+      "new": 0.940793,
+      "delta": 9.3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "doctor.dept_nurse.kappa",
+      "ceiling": 0.4948,
+      "new": 0.494754,
+      "delta": -4.6e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.accuracy@0.5",
+      "ceiling": 0.8396,
+      "new": 0.83959,
+      "delta": -1e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.roc_auc",
+      "ceiling": 0.9138,
+      "new": 0.913833,
+      "delta": 3.3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.brier",
+      "ceiling": 0.1128,
+      "new": 0.112786,
+      "delta": -1.4e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.ece_10bin",
+      "ceiling": 0.0036,
+      "new": 0.00355,
+      "delta": -5e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.sensitivity@0.5",
+      "ceiling": 0.7649,
+      "new": 0.764911,
+      "delta": 1.1e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.specificity@0.5",
+      "ceiling": 0.883,
+      "new": 0.882951,
+      "delta": -4.9e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.under_triage@0.5",
+      "ceiling": 0.2351,
+      "new": 0.235089,
+      "delta": -1.1e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "dispo.over_triage@0.5",
+      "ceiling": 0.117,
+      "new": 0.117049,
+      "delta": 4.9e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "icd.oracle@5.blend",
+      "ceiling": 0.6698,
+      "new": 0.669833,
+      "delta": 3.3e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "icd.oracle@5.blend_vitals",
+      "ceiling": 0.6913,
+      "new": 0.691332,
+      "delta": 3.2e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "icd.e2e_union.blend_vitals.v3nurse",
+      "ceiling": 0.6488,
+      "new": 0.648776,
+      "delta": -2.4e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "icd.stage1.top1.v3nurse",
+      "ceiling": 0.6407,
+      "new": 0.640744,
+      "delta": 4.4e-05,
+      "status": "PASS"
+    },
+    {
+      "metric": "icd.stage1.top5.v3nurse",
+      "ceiling": 0.9277,
+      "new": 0.927718,
+      "delta": 1.8e-05,
+      "status": "PASS"
+    }
+  ]
+}

@@ -15,6 +15,7 @@
 | [`docs/agents/case-generation-agent.md`](docs/agents/case-generation-agent.md) | Case Generation (Phase 4, offline/benchmark-only): tabular row → grounded NL patient case; 4-way E2E vs tabular benchmark (incl. gate-isolating column) + the runtime multi-reading-vitals fix |
 | [`docs/llm-backend.md`](docs/llm-backend.md) | Switchable LLM backend (Gemini Flash 2.5 ↔ self-hosted MedGemma): `llm_config` design, vLLM/Colab serving, same-mode `parser-llm` benchmark, 20-case Experiment A results |
 | [`docs/datasets.md`](docs/datasets.md) | MIMIC-IV table reference (used + inspected-but-unused, leakage notes) |
+| [`docs/results/rebenchmark_v3/`](docs/results/rebenchmark_v3/) | Detailed v3 re-benchmark audit (2026-06-28): regression PASS vs `ceiling.json` + expanded metrics (per-class, calibration, disposition per-threshold table, graded ICD, Flash-vs-MedGemma + parser-cost). Raw artifacts: `benchmarks/audit/2026-06-28/` |
 | [`docs/future-work.md`](docs/future-work.md) | Why v2 gains were modest, prioritized roadmap, known issues, planned phases 4 + 5 |
 | [`webapp/README.md`](webapp/README.md) | Web interface — live conversational runtime (drives the real crew over SSE; injected interactive-tool channel + event-bus telemetry + intake-confirmation gate) + retained stage/parity test path |
 
