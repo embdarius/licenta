@@ -1,22 +1,10 @@
-"""
-Benchmark for Doctor disposition v3 (plan section 3, Option B).
+"""Benchmark for the doctor disposition model.
 
-Reproduces the exact train/test split from training (random_state=42,
-stratified) and evaluates the new doctor disposition model against the
-triage v3 cascade baseline that's already encoded in the soft-cascade
-features (`triage_disposition_proba_admit`). Since the live runtime
-also uses triage v3, this is a directly apples-to-apples comparison
-against what the user would see in production.
-
-Outputs:
-  - Headline accuracy / ROC AUC / Brier / ECE deltas
-  - Confusion matrix and over/under-triage rates at 0.5 threshold
-  - Calibration curve points (10 reliability bins)
-  - Per-subgroup analysis: elderly, polypharmacy, prior-ED-visit cohorts
-    (where plan section 3 predicts the lift concentrates)
-  - Feature importance audit on the uncalibrated model with feature-group
-    breakdown (TF-IDF / structured / cascade / vitals / meds / long /
-    PMH). Confirms PMH + nurse data carry their weight.
+Reproduces the training train/test split and evaluates the disposition model
+against the triage v3 cascade baseline encoded in the soft-cascade features.
+Reports accuracy/ROC AUC/Brier/ECE deltas, the confusion matrix and
+over/under-triage at 0.5, calibration curve points, per-subgroup analysis
+(elderly, polypharmacy, prior-ED-visit), and a feature-importance-by-group audit.
 """
 
 import json
@@ -46,13 +34,9 @@ from proiect_licenta.training.train_nurse import MED_CATEGORY_KEYWORDS
 from proiect_licenta.training.train_nurse_v3 import LONG_VITAL_FEATURE_COLS
 
 
-# ---------------------------------------------------------------------------
 # Reporting helpers
-# ---------------------------------------------------------------------------
 def print_section(title: str):
-    print(f"\n{'='*72}")
     print(f"  {title}")
-    print(f"{'='*72}")
 
 
 def report_binary(name: str, y_true, y_proba, threshold: float = 0.5) -> dict:
@@ -117,16 +101,12 @@ def expected_calibration_error(y_true, y_proba, n_bins: int = 10) -> float:
     return float(ece)
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 72)
-    print("  DOCTOR DISPOSITION v3 — BENCHMARK")
+    print("  DOCTOR DISPOSITION v3 - BENCHMARK")
     print("  Head-to-head vs triage v3 cascade baseline")
-    print("#" * 72)
 
-    # ── Load + rebuild the exact training pipeline ──
+    # Load + rebuild the exact training pipeline
     df = load_and_clean_data()
     features = build_features(df)
     y = df["admitted"].astype(int).reset_index(drop=True)
@@ -142,7 +122,7 @@ def main():
     print(f"  Train: {len(train_idx):,} | Test: {len(test_idx):,}")
     print(f"  Test admit rate: {y_test.mean():.4f}")
 
-    # ── Load the trained doctor disposition model ──
+    # Load the trained doctor disposition model
     model_path = DOCTOR_V3_DIR / "disposition_model.joblib"
     raw_path = DOCTOR_V3_DIR / "disposition_model_raw.joblib"
     if not model_path.exists():
@@ -153,22 +133,22 @@ def main():
     calibrated = joblib.load(model_path)
     raw = joblib.load(raw_path) if raw_path.exists() else None
 
-    # ── Baseline 1: triage v3 cascade dispo probability ──
-    print_section("BASELINE — TRIAGE v3 CASCADE DISPOSITION")
+    # Baseline 1: triage v3 cascade dispo probability
+    print_section("BASELINE - TRIAGE v3 CASCADE DISPOSITION")
     triage_v1_proba = X_test["triage_disposition_proba_admit"].values.astype(float)
     base_metrics = report_binary("triage v3 cascade", y_test, triage_v1_proba)
     base_ece = expected_calibration_error(y_test.values, triage_v1_proba)
     print(f"    ECE (10 bins)   : {base_ece:.4f}")
 
-    # ── Doctor disposition v3 (calibrated, deployment) ──
-    print_section("DOCTOR DISPOSITION v3 — CALIBRATED (deployment model)")
+    # Doctor disposition v3 (calibrated, deployment)
+    print_section("DOCTOR DISPOSITION v3 - CALIBRATED (deployment model)")
     doctor_proba = calibrated.predict_proba(X_test)[:, 1]
     doc_metrics = report_binary("doctor dispo v3 (cal)", y_test, doctor_proba)
     doc_ece = expected_calibration_error(y_test.values, doctor_proba)
     print(f"    ECE (10 bins)   : {doc_ece:.4f}")
 
     if raw is not None:
-        print_section("DOCTOR DISPOSITION v3 — UNCALIBRATED (audit only)")
+        print_section("DOCTOR DISPOSITION v3 - UNCALIBRATED (audit only)")
         raw_proba = raw.predict_proba(X_test)[:, 1]
         raw_metrics = report_binary("doctor dispo v3 (raw)", y_test, raw_proba)
         raw_ece = expected_calibration_error(y_test.values, raw_proba)
@@ -176,8 +156,8 @@ def main():
         print(f"    [calibration delta: ECE {raw_ece:.4f} -> {doc_ece:.4f}  "
               f"(lower is better)]")
 
-    # ── Headline delta ──
-    print_section("HEADLINE DELTA — TRIAGE v3 CASCADE → DOCTOR DISPOSITION v3")
+    # Headline delta
+    print_section("HEADLINE DELTA - TRIAGE v3 CASCADE -> DOCTOR DISPOSITION v3")
     print(f"  Accuracy   :  {base_metrics['accuracy']:.4f} -> "
           f"{doc_metrics['accuracy']:.4f}   delta {doc_metrics['accuracy']-base_metrics['accuracy']:+.4f}")
     print(f"  ROC AUC    :  {base_metrics['roc_auc']:.4f} -> "
@@ -195,7 +175,7 @@ def main():
     print(f"  Over-tri   :  {base_metrics['over_triage']:.4f} -> "
           f"{doc_metrics['over_triage']:.4f}   delta {doc_metrics['over_triage']-base_metrics['over_triage']:+.4f}  (lower=better)")
 
-    # ── Calibration curve ──
+    # Calibration curve
     print_section("CALIBRATION CURVE (10 reliability bins, calibrated model)")
     centers, fracs, preds, counts = calibration_curve(y_test.values, doctor_proba)
     print(f"  {'bin center':>11s}  {'predicted mean':>15s}  {'observed admit':>15s}  {'n':>6s}")
@@ -204,7 +184,7 @@ def main():
         bar = "#" * bar_w + "." * (40 - bar_w)
         print(f"  {c:>11.2f}  {p:>15.4f}  {f:>15.4f}  {n:>6,}  |{bar}|")
 
-    # ── Per-subgroup analysis ──
+    # Per-subgroup analysis
     print_section("PER-SUBGROUP DELTAS  (plan section 3: lift concentrates in elderly / polypharmacy / repeat-visits)")
     subgroups = {
         "elderly (age >= 65)":
@@ -246,7 +226,7 @@ def main():
               f"{d_acc-b_acc:>+8.4f}   {b_auc:>9.4f}  {d_auc:>9.4f}  "
               f"{d_auc-b_auc:>+8.4f}")
 
-    # ── Feature importance audit ──
+    # Feature importance audit
     if raw is not None:
         print_section("FEATURE IMPORTANCE AUDIT (uncalibrated XGBoost, by gain)")
         booster = raw.get_booster()
@@ -313,9 +293,7 @@ def main():
         for c, g in cascade_with_gain:
             print(f"    {c:38s}  gain={g:.1f}")
 
-    print("\n" + "#" * 72)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 72)
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

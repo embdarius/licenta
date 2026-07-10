@@ -3,7 +3,7 @@
 Edit cell sources here, then run `python scripts/build_optuna_doctor_notebook.py`.
 
 The notebook runs `scripts/tune_doctor_v3_heads.py` in chunks on Colab GPU. It is
-a REPORTING-ONLY, constrained Group-2 hyperparameter sweep for the doctor v3
+a reporting-only, constrained Group-2 hyperparameter sweep for the doctor v3
 DEPARTMENT + DISPOSITION heads: it never overwrites the live doctor v3 model
 joblibs (everything lands in `artifacts/doctor/v3/hpo/`), and every trial is
 persisted to a SQLite study on Drive so runs resume across Colab sessions.
@@ -34,20 +34,20 @@ def code(cell_id: str, src: str) -> None:
 
 md("intro-md", """# Doctor v3 - Constrained Optuna HPO (Colab GPU, resumable, reporting-only)
 
-A **constrained** search over only the inherited **Group-2** XGBoost
+A constrained search over only the inherited Group-2 XGBoost
 regularization knobs (`max_depth`, `subsample`, `colsample_bytree`,
 `colsample_bylevel`, `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`)
-for the two **untuned** doctor heads: **department** (11-class) and
-**disposition** (binary admit/discharge). Each head's documented **Group-1**
-config is **frozen** (department: `lr=0.02`, `n_estimators=3000`,
+for the two untuned doctor heads: department (11-class) and
+disposition (binary admit/discharge). Each head's documented Group-1
+config is frozen (department: `lr=0.02`, `n_estimators=3000`,
 `early_stopping=100`, sqrt-inverse class weighting; disposition: `lr=0.02`,
 `n_estimators=5000`, `early_stopping=150`, `scale_pos_weight=sqrt(N_neg/N_pos)`).
 The diagnosis head is already tuned by the older `scripts/tune_doctor_v3.py`.
 
-**This is reporting-only.** Nothing here overwrites your existing Drive
+This is reporting-only. Nothing here overwrites your existing Drive
 artifacts:
 
-- the live doctor v3 joblibs in `artifacts/doctor/v3/` are only ever **read**
+- the live doctor v3 joblibs in `artifacts/doctor/v3/` are only ever read
   (`diagnosis_model.joblib`, `department_model.joblib`, `disposition_model.joblib`);
 - all sweep outputs land in a new `artifacts/doctor/v3/hpo/` subdir;
 - the department stage reuses the existing `data/derived/tune_cache/`; the
@@ -55,13 +55,13 @@ artifacts:
 - the Optuna study DB is `hpo/optuna_doctor.db` (distinct from the triage one).
 
 ## Objective
-- **Department:** maximize **macro-F1** across the 11 service classes (matches
+- Department: maximize macro-F1 across the 11 service classes (matches
   the diagnosis sweep's "useful across categories" thesis). No constraint. The
   diagnosis-softmax cascade is built once per run and reused across trials.
-- **Disposition:** maximize **ROC AUC** **subject to** a hard constraint -
+- Disposition: maximize ROC AUC subject to a hard constraint -
   under-triage rate (admit predicted as discharge, threshold 0.5) must not
   exceed the incumbent's. The current hand-tuned config is enqueued as
-  **trial 0** and defines that baseline. The dangerous error (missing an
+  trial 0 and defines that baseline. The dangerous error (missing an
   admission) can only *hold or improve*; it can never be traded away for AUC.
 
 ## How resume works
@@ -72,20 +72,19 @@ loses the in-flight trial; re-run the tune cell to continue. A human-readable
 
 ## Order of operations
 1. Setup (Cells 1-5): mount, clone, symlink, install, GPU smoke.
-2. **Self-test** (Cell 6) - synthetic plumbing check for both heads, seconds.
-3. **Smoke** (Cell 7) - real-data subsample, 2 trials, throwaway paths.
-4. **Department** (Cell 8) - run in 10-trial chunks.
-5. **Disposition** (Cell 9) - run in 10-trial chunks (independent of department).
-6. **State** (Cell 10) - read-only study inspection between chunks.
-7. **Report** (Cell 11) - incumbent vs best on the outer-test split ->
+2. Self-test (Cell 6) - synthetic plumbing check for both heads, seconds.
+3. Smoke (Cell 7) - real-data subsample, 2 trials, throwaway paths.
+4. Department (Cell 8) - run in 10-trial chunks.
+5. Disposition (Cell 9) - run in 10-trial chunks (independent of department).
+6. State (Cell 10) - read-only study inspection between chunks.
+7. Report (Cell 11) - incumbent vs best on the outer-test split ->
    `hpo/doctor_hpo_results.json` (the thesis table).
 
 ## Prereq: Colab GPU runtime
-Runtime menu -> Change runtime type -> **T4 GPU** (free) or L4/A100 (Pro).""")
+Runtime menu -> Change runtime type -> T4 GPU (free) or L4/A100 (Pro).""")
 
 
-md("section1-md", """---
-## Section 1 - Setup
+md("section1-md", """## Setup
 """)
 
 
@@ -170,8 +169,7 @@ m.fit(X, y)
 print('XGBoost GPU smoke test PASSED')""")
 
 
-md("section2-md", """---
-## Section 2 - Pre-flight (run BEFORE the full sweep)
+md("section2-md", """## Pre-flight (run BEFORE the full sweep)
 
 These two cells prove the pipeline runs and saves correctly without committing
 to a multi-hour run. Both write only to throwaway paths.""")
@@ -210,16 +208,15 @@ for stage in ('department', 'disposition'):
         sys.argv = _saved""")
 
 
-md("section3-md", """---
-## Section 3 - Run the sweep (resumable, full Group-1 config)
+md("section3-md", """## Run the sweep (resumable, full Group-1 config)
 
 Set `N_TRIALS_THIS_SESSION` and run. Each run appends trials to the same study.
-**Recommended total budget: 30-50 trials per head.** The department stage's first
+Recommended total budget: 30-50 trials per head. The department stage's first
 run trains a diagnosis model (for the cascade) once per session; the disposition
 stage's first run builds the full 425K feature cache (slow, parses the 3.3 GB
 discharge.csv), then later runs load it in seconds.
 
-The two heads are **independent** - run them in either order.""")
+The two heads are independent - run them in either order.""")
 
 
 code("cell-tune-dept", """# Cell 8: Department head - macro-F1. Run in chunks; safe to ctrl-C.
@@ -275,8 +272,7 @@ finally:
     sys.argv = _saved""")
 
 
-md("section4-md", """---
-## Section 4 - Inspect & report
+md("section4-md", """## Inspect & report
 """)
 
 
@@ -345,26 +341,25 @@ for f in ('diagnosis_model.joblib', 'department_model.joblib', 'disposition_mode
         print(f'  live {f}: mtime {os.path.getmtime(p)} (unchanged by HPO)')""")
 
 
-md("section5-md", """---
-## Section 5 - Group-1 study (per-head cost/weighting config; SINGLE-OBJECTIVE)
+md("section5-md", """## Group-1 study (per-head cost/weighting config; SINGLE-OBJECTIVE)
 
-A separate study over the **Group-1** knobs that Sections 3-4 held frozen:
+A separate study over the Group-1 knobs that Sections 3-4 held frozen:
 `learning_rate`, `n_estimators`, and the class-weighting lever
 (`class_weight_exponent` for department, `scale_pos_weight` exponent for
-disposition). Per the doctor Group-1 plan this is **single-objective** (lower
-priority than triage's; mostly a cost/fidelity envelope), keeping the **same
-objectives + constraints** as the Group-2 sweep above:
+disposition). Per the doctor Group-1 plan this is single-objective (lower
+priority than triage's; mostly a cost/fidelity envelope), keeping the same
+objectives + constraints as the Group-2 sweep above:
 
-- **Department:** maximize macro-F1 (unconstrained).
-- **Disposition:** maximize ROC AUC **subject to** under-triage <= incumbent.
+- Department: maximize macro-F1 (unconstrained).
+- Disposition: maximize ROC AUC subject to under-triage <= incumbent.
 
-Group-2 stays frozen at the incumbent throughout. Everything lands in **separate**
+Group-2 stays frozen at the incumbent throughout. Everything lands in separate
 files (`optuna_doctor_g1.db`, `tuning_log_*_g1.json`, `tuned_params_doctor_g1.json`,
 `doctor_hpo_g1_results.json`) so the Group-2 study above is untouched. Still
-**reporting-only**.
+reporting-only.
 
 After you confirm a Group-1 best (the `selected` block in
-`tuned_params_doctor_g1.json`), you can optionally re-run the **Group-2** cells
+`tuned_params_doctor_g1.json`), you can optionally re-run the Group-2 cells
 above with `--use-group1-best` to search the regularization on top of it.""")
 
 
@@ -489,15 +484,14 @@ from proiect_licenta.paths import DOCTOR_V3_HPO_DIR
 print('\\nResults JSON:', DOCTOR_V3_HPO_DIR / 'doctor_hpo_g1_results.json')""")
 
 
-md("done-md", """---
-## Done
+md("done-md", """## Done
 
 `artifacts/doctor/v3/hpo/` now holds:
 
 - `optuna_doctor.db` - the persistent Optuna study (department + disposition).
 - `tuning_log_department.json`, `tuning_log_disposition.json` - per-trial running
   logs (every completed trial + feasibility flag for disposition). Use the
-  disposition log to plot **ROC AUC vs under-triage** across trials - a clean
+  disposition log to plot ROC AUC vs under-triage across trials - a clean
   thesis figure showing the trade-off the constraint refuses to make.
 - `tuned_params_doctor.json` - best department + best-feasible disposition Group-2.
 - `doctor_hpo_results.json` - incumbent vs best on the outer-test split (the
@@ -508,7 +502,7 @@ inherited Group-2 values are near-optimal - itself a reportable, honest
 defensibility result, now validated under a clinical-safety constraint for the
 disposition head.
 
-**Section 5 (Group-1)** adds the sibling single-objective study; it writes the
+Section 5 (Group-1) adds the sibling single-objective study; it writes the
 parallel `*_g1` files (`optuna_doctor_g1.db`, `tuning_log_*_g1.json`,
 `tuned_params_doctor_g1.json` with a `selected` block per head, and
 `doctor_hpo_g1_results.json` including the disposition operating-point table).""")

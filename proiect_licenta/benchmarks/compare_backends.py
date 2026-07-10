@@ -94,7 +94,7 @@ def parser_cost_table(fdata, mdata, fb, mb, out_dir,
     """Write `parser_cost.csv`: the NLP-parser-cost decomposition.
 
     Columns per metric: the backend-invariant reference ladder
-    (`feature_vector_gated`, `tool_direct` — neither uses the LLM, so they're
+    (`feature_vector_gated`, `tool_direct` - neither uses the LLM, so they're
     identical across backends and taken from the Flash run), each backend's
     `parser_llm`, and the isolated parser cost `parser_llm - tool_direct` per
     backend (the only step that differs is the LLM-parsed chief complaint).
@@ -114,7 +114,7 @@ def parser_cost_table(fdata, mdata, fb, mb, out_dir,
             md = max((abs(a[k] - b[k]) for k in a if k in b), default=0.0)
             if md > 1e-6:
                 print(f"    parser_cost: WARN '{rm}' differs across backends "
-                      f"(max {md:.2e}) — expected backend-invariant")
+                      f"(max {md:.2e}) - expected backend-invariant")
     rows = []
     for k in sorted(set(fvg) | set(td) | set(fpl) | set(mpl)):
         f_cost = (fpl[k] - td[k]) if (k in fpl and k in td) else None

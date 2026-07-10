@@ -1,29 +1,13 @@
 """Shared PMH (Past Medical History) feature aggregator.
 
-Extracted from `training/train_nurse_v3.py` (Doctor v3 nurse Change 1) so any
-training pipeline can reuse the same prior-encounter feature set without
-depending on the doctor pipeline. Used by:
+Used by train_nurse_v3 and train_triage_v3, which both emit the same
+PMH_FEATURE_COLS so any model that consumes PMH features sees the same 19-column
+layout (13 binary pmh_<group> flags plus 6 visit numerics). aggregate_pmh reads
+prior admissions, ED visits, ICD codes, and discharge-note PMH sections.
 
-    training/train_nurse_v3.py     (Doctor v3 nurse)
-    training/train_triage_v3.py    (Triage v3 — adds PMH on top of triage v2)
-
-Both sides emit the same `PMH_FEATURE_COLS` so any model that consumes PMH
-features sees the same column layout.
-
-Provides:
-    PMH_FEATURE_COLS    Deterministic column order for the 19-feature block.
-    PMH_NO_PRIOR_DAYS   Sentinel value for "no prior visit" (so the model can
-                        distinguish first-time patients from frequent flyers).
-    aggregate_pmh(...)  Per-stay PMH feature builder. Reads:
-                          - prior hospital admissions (admissions.csv)
-                          - prior ED visits (edstays)
-                          - prior ICD codes (diagnoses_icd.csv)
-                          - prior discharge-note PMH sections (discharge.csv)
-                        Emits 13 binary pmh_<group> flags + 6 visit numerics.
-
-Leakage is guarded by `prior_admittime < current_intime` and
-`prior_intime < current_intime`. Discharge notes are filtered to prior hadm_ids
-only, so the current encounter's discharge summary can never leak in.
+Leakage is guarded by prior_admittime < current_intime and
+prior_intime < current_intime, and discharge notes are filtered to prior hadm_ids
+only, so the current encounter can never leak in.
 """
 
 from __future__ import annotations
@@ -44,7 +28,7 @@ from proiect_licenta.pmh_vocab import (
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
 
-# Optional tqdm — matches train_nurse_v3.py behavior (auto in notebooks, plain
+# Optional tqdm - matches train_nurse_v3.py behavior (auto in notebooks, plain
 # bar in terminals, silent no-op when tqdm isn't installed).
 try:
     from tqdm.auto import tqdm as _tqdm  # type: ignore
@@ -83,7 +67,7 @@ def parse_pmh_lookup(pmh_lookup_json: str):
 
     Accepts either the raw ``pmh_block`` object or the tool's full output (with a
     nested ``pmh_block``). Returns ``None`` on empty/invalid input or a block
-    missing any required column — so a malformed lookup never silently corrupts
+    missing any required column - so a malformed lookup never silently corrupts
     the feature vector; it just reverts to self-report.
 
     Single source of truth shared by the triage tool and the doctor disposition
@@ -117,7 +101,7 @@ def pmh_self_report_discrepancy(prior_history: str, lookup_block: dict) -> list:
 
     When an EHR lookup overrides the patient's free-text PMH (the record wins,
     by design), this surfaces what the patient mentioned that isn't in the chart
-    — e.g. a condition managed outside this hospital system, or a new diagnosis
+    - e.g. a condition managed outside this hospital system, or a new diagnosis
     not yet coded. Purely informational: it does NOT alter the feature vector.
 
     Returns a sorted list of PMH category names present in the self-report but
@@ -137,9 +121,9 @@ def _build_icd_to_group(
     diagnosis_csv_path,
     diagnosis_group_map: dict,
 ) -> dict:
-    """Return an ICD code → diagnosis_group lookup derived from the ED label CSV.
+    """Return an ICD code -> diagnosis_group lookup derived from the ED label CSV.
 
-    Reuses the same ICD→category mapping that the doctor's supervision labels
+    Reuses the same ICD->category mapping that the doctor's supervision labels
     are built from. `diagnosis_group_map` maps the ED `category` strings to
     the 13 PMH/diagnosis groups; we apply it here so the ICD-derived PMH
     flags use the same label space as the discharge-note PMH flags.
@@ -187,7 +171,7 @@ def _parse_discharge_pmh(
             chunksize=2000,
         )
     except FileNotFoundError:
-        print("    discharge.csv not found — discharge-note PMH skipped.")
+        print("    discharge.csv not found - discharge-note PMH skipped.")
         return note_pmh_by_hadm
 
     pbar = tqdm(
@@ -264,7 +248,7 @@ def build_pmh_index(
     needed_subjects = set(int(s) for s in subjects)
     print(f"  Building PMH index over {len(needed_subjects):,} patients...")
 
-    # ── (1) Prior hospital admissions (subject_id, hadm_id, admittime) ──
+    # (1) Prior hospital admissions (subject_id, hadm_id, admittime)
     print("    Loading admissions.csv...")
     adm = pd.read_csv(
         admissions_csv_path,
@@ -282,7 +266,7 @@ def build_pmh_index(
     for sid in adm_by_subject:
         adm_by_subject[sid].sort()
 
-    # ── (2) Prior ED visits for the same patients ──
+    # (2) Prior ED visits for the same patients
     print("    Indexing prior ED visits...")
     ed_subset = edstays_full[edstays_full["subject_id"].isin(needed_subjects)].copy()
     ed_subset["intime"] = pd.to_datetime(ed_subset["intime"], errors="coerce")
@@ -302,7 +286,7 @@ def build_pmh_index(
     for sid in ed_by_subject:
         ed_by_subject[sid].sort()
 
-    # ── (3) ICD-derived PMH flags per hadm_id (fallback / supplement) ──
+    # (3) ICD-derived PMH flags per hadm_id (fallback / supplement)
     print("    Building ICD->diagnosis_group map from categorized_diagnosis.csv...")
     icd_to_group = _build_icd_to_group(diagnosis_csv_path, diagnosis_group_map)
     print(f"    ICD codes mapped: {len(icd_to_group):,}")
@@ -331,16 +315,16 @@ def build_pmh_index(
         if grp and (catch_all_label is None or grp != catch_all_label):
             icd_pmh_by_hadm[int(hid)].add(grp)
 
-    # ── (4) Discharge-note PMH per hadm_id (richer source) ──
-    print(f"    Parsing discharge.csv ({discharge_csv_path}) — chunked...")
+    # (4) Discharge-note PMH per hadm_id (richer source)
+    print(f"    Parsing discharge.csv ({discharge_csv_path}) - chunked...")
     if not Path(discharge_csv_path).exists():
-        print(f"    WARNING: {discharge_csv_path} not found — skipping discharge PMH.")
+        print(f"    WARNING: {discharge_csv_path} not found - skipping discharge PMH.")
         note_pmh_by_hadm: dict[int, set] = {}
     else:
         note_pmh_by_hadm = _parse_discharge_pmh(discharge_csv_path, needed_subjects)
     print(f"    Discharge-note PMH parsed for {len(note_pmh_by_hadm):,} admissions")
 
-    # ── (5) Per-stay medication block from medrecon.csv (ED home-med list) ──
+    # (5) Per-stay medication block from medrecon.csv (ED home-med list)
     # Keyed on the ED stay_id (medrecon's grain). Aggregated with the SAME
     # recipe training uses (`flags_from_row` OR'd across rows). The lookup tool
     # then returns a RETURNING patient's most-recent PRIOR stay's block via
@@ -355,7 +339,7 @@ def build_pmh_index(
         needed_stays = set(int(s) for s in ed_subset["stay_id"].dropna().tolist())
         print(f"    Loading medrecon.csv ({medrecon_csv_path})...")
         if not Path(medrecon_csv_path).exists():
-            print(f"    WARNING: {medrecon_csv_path} not found — skipping med index.")
+            print(f"    WARNING: {medrecon_csv_path} not found - skipping med index.")
         else:
             med = pd.read_csv(
                 medrecon_csv_path, usecols=["stay_id", "name", "etcdescription"],
@@ -389,7 +373,7 @@ def assemble_pmh_for_stay(
     ``intime`` may be a pandas Timestamp / datetime or an ISO string. Returns a
     dict keyed by PMH_FEATURE_COLS (no stay_id). First-time patients (no prior
     admission or ED visit before ``intime``) get the all-zero no_history=1
-    pattern — identical to the runtime ask-the-patient fallback, so known and
+    pattern - identical to the runtime ask-the-patient fallback, so known and
     unknown patients split exactly the way the model was trained to expect.
     """
     intime = pd.to_datetime(intime)
@@ -465,12 +449,12 @@ def assemble_meds_for_stay(subject_id: int, intime, index: dict):
     """Return the medication block for the patient's MOST RECENT PRIOR ED stay
     (strictly before ``intime``), leakage-safe by the same ``< intime`` rule as
     ``assemble_pmh_for_stay``. Returns ``None`` when the subject has no prior ED
-    stay carrying a medrecon record (→ the lookup reports no med record and the
+    stay carrying a medrecon record (-> the lookup reports no med record and the
     runtime keeps its ask-the-patient path), or when the index was built without
     medications (``include_meds=False`` / an older index).
 
     Medications come from the patient's last documented home-med list (medrecon),
-    NOT the current encounter — a live patient's current med list is exactly what
+    NOT the current encounter - a live patient's current med list is exactly what
     the nurse is collecting, so the EHR can only supply the prior visit's list.
     This is the honest deployment semantics (a strong proxy for stable chronic
     meds), at the cost of not matching a visit where the patient's meds changed.
@@ -522,7 +506,7 @@ def aggregate_pmh(
     discharge_csv_path : Path to mimic-iv-notes/.../discharge.csv (3.3 GB).
         Read in chunks; only the subject_ids in `stays_df` are kept.
     diagnosis_csv_path : Path to categorized_diagnosis.csv (for the
-        ICD→category lookup table).
+        ICD->category lookup table).
     diagnosis_group_map : Maps the ED `category` strings to the 13 PMH
         diagnosis groups (same map used to build supervision labels in the
         doctor pipeline).
@@ -556,7 +540,7 @@ def aggregate_pmh(
         include_meds=False,  # training builds its own current-stay med features
     )
 
-    # ── Per-stay assembly (cheap; queries the prebuilt index) ──
+    # Per-stay assembly (cheap; queries the prebuilt index)
     print("    Assembling per-stay PMH features...")
     out_records = []
     _iter = zip(
@@ -579,8 +563,8 @@ def aggregate_pmh(
     result = pd.DataFrame(out_records)
     flag_cols = [c for c in result.columns if c.startswith("pmh_")]
     any_flag = (result[flag_cols].sum(axis=1) > 0).mean()
-    print(f"    Per-stay PMH coverage: {100*any_flag:.1f}% have ≥1 PMH flag, "
-          f"{100*(1-result['no_history'].mean()):.1f}% have ≥1 prior visit")
+    print(f"    Per-stay PMH coverage: {100*any_flag:.1f}% have >=1 PMH flag, "
+          f"{100*(1-result['no_history'].mean()):.1f}% have >=1 prior visit")
     return result
 
 
@@ -588,7 +572,7 @@ def fill_missing_pmh_columns(df: pd.DataFrame) -> None:
     """Ensure every PMH_FEATURE_COLS column exists and has sensible defaults.
 
     Stays that didn't appear in the aggregate_pmh result (shouldn't happen on
-    a clean merge, but guard) get the no_history fallback — identical to the
+    a clean merge, but guard) get the no_history fallback - identical to the
     inference-time zero-fill for first-time patients.
 
     Mutates ``df`` in place.

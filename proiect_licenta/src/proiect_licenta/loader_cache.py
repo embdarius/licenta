@@ -1,23 +1,12 @@
-"""Opt-in disk cache for the heavy ``load_and_clean_data`` loaders.
+"""Opt-in disk cache for the heavy load_and_clean_data loaders.
 
-These loaders re-stream ``discharge.csv`` (3.3 GB) for the PMH parse plus the
-vitals/medication aggregation every call — minutes each. When the
-``LOADER_CACHE_DIR`` environment variable is set (e.g. to a Google Drive folder),
-the decorated loader saves its cleaned output there on first run and loads it on
-every later run, so a multi-loader benchmark (and re-runs across Colab sessions)
-pays the parse cost once.
-
-Safety
-------
-* **Opt-in.** With ``LOADER_CACHE_DIR`` unset the decorator is a no-op — training
-  and every existing call site behave exactly as before.
-* **Auto-invalidation.** The cache key is a fingerprint of the source files'
-  (size, mtime) plus a ``version`` integer, so a changed MIMIC file (or a bumped
-  ``version`` when the loader logic changes) rebuilds automatically — it can never
-  silently serve stale data.
-
-Bump a loader's ``version=`` argument whenever you change what that loader
-produces, so old caches are discarded.
+These loaders re-stream discharge.csv (3.3 GB) for the PMH parse and the
+vitals/medication aggregation on every call. With LOADER_CACHE_DIR set, the
+decorated loader saves its cleaned output on first run and loads it afterward, so
+the parse cost is paid once. Unset means no-op. The cache key fingerprints the
+source files' size and mtime plus a version integer, so a changed MIMIC file or a
+bumped version rebuilds automatically. Bump a loader's version= whenever you
+change what it produces.
 """
 from __future__ import annotations
 
@@ -72,9 +61,9 @@ def disk_cached(key: str, source_files, version: int = 1):
                     if json.loads(meta_path.read_text()).get("fingerprint") == fp:
                         print(f"[loader-cache] HIT  {key}  <- {data_path}")
                         return joblib.load(data_path)
-                    print(f"[loader-cache] STALE {key} (source changed) — rebuilding")
-                except Exception as e:  # corrupt meta -> rebuild
-                    print(f"[loader-cache] meta unreadable ({e}) — rebuilding")
+                    print(f"[loader-cache] STALE {key} (source changed), rebuilding")
+                except Exception as e:  # corrupt meta, rebuild
+                    print(f"[loader-cache] meta unreadable ({e}), rebuilding")
             result = fn(*args, **kwargs)
             try:
                 joblib.dump(result, data_path, compress=3)

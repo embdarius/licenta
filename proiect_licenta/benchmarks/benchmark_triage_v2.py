@@ -1,5 +1,4 @@
-"""
-Benchmark script for triage v2 models (with vital signs).
+"""Benchmark script for triage v2 models (with vital signs).
 
 Reproduces the exact train/test split from training (random_state=42, stratified,
 capped at 100K rows), loads saved v2 model artifacts, and evaluates with detailed metrics.
@@ -20,9 +19,7 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Make the proiect_licenta package importable from this script
-# ---------------------------------------------------------------------------
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -33,9 +30,7 @@ from proiect_licenta.training.train_triage_v2 import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def print_confusion_matrix(cm, labels):
@@ -49,28 +44,20 @@ def print_confusion_matrix(cm, labels):
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  TRIAGE v2 MODEL BENCHMARK (with vital signs)")
     print("  Evaluating saved models on held-out test set (20%)")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
-    # 1. Load data (same as training — includes 100K cap)
-    # ------------------------------------------------------------------
+    # 1. Load data (same as training - includes 100K cap)
     df = load_and_clean_data()
 
-    # ------------------------------------------------------------------
     # 2. Reproduce exact train/test split
-    # ------------------------------------------------------------------
     print_section("TRAIN/TEST SPLIT (80/20, stratified, random_state=42)")
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
     )
     print(f"  Train: {len(train_df):,} | Test: {len(test_df):,}")
 
-    # ------------------------------------------------------------------
     # 3. Load saved artifacts
-    # ------------------------------------------------------------------
     print_section("LOADING SAVED v2 ARTIFACTS")
     tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(MODELS_DIR / "severity_map.joblib")
@@ -96,10 +83,8 @@ def main():
     y_admit_test = test_df["admitted"].reset_index(drop=True)
     arrival_test = test_df["arrival_transport"].reset_index(drop=True)
 
-    # ===================================================================
     #  ACUITY MODEL BENCHMARK
-    # ===================================================================
-    print_section("ACUITY MODEL — ESI 1-5 PREDICTION")
+    print_section("ACUITY MODEL - ESI 1-5 PREDICTION")
 
     y_pred_acuity = acuity_model.predict(X_test) + 1
     y_prob_acuity = acuity_model.predict_proba(X_test)
@@ -172,10 +157,8 @@ def main():
     print(f"    Mean confidence (correct):   {max_probs[correct_mask].mean():.4f}")
     print(f"    Mean confidence (incorrect): {max_probs[~correct_mask].mean():.4f}")
 
-    # ===================================================================
     #  DISPOSITION MODEL BENCHMARK
-    # ===================================================================
-    print_section("DISPOSITION MODEL — ADMITTED vs NOT ADMITTED")
+    print_section("DISPOSITION MODEL - ADMITTED vs NOT ADMITTED")
 
     X_test_disp = X_test.copy()
     X_test_disp["predicted_acuity"] = y_pred_acuity
@@ -214,10 +197,8 @@ def main():
             print(f"    ESI {esi}: accuracy={acc:.4f}  "
                   f"(n={n:,}, actual admit rate={admit_rate:.1%})")
 
-    # ===================================================================
-    #  ACUITY — BY ARRIVAL TRANSPORT
-    # ===================================================================
-    print_section("ACUITY — BY ARRIVAL TRANSPORT")
+    #  ACUITY - BY ARRIVAL TRANSPORT
+    print_section("ACUITY - BY ARRIVAL TRANSPORT")
 
     for group_name, group_mask in [
         ("AMBULANCE/HELICOPTER (real vitals)", arrival_test.isin(["AMBULANCE", "HELICOPTER"])),
@@ -247,10 +228,8 @@ def main():
                 print(f"    ESI {esi}: {esi_correct}/{esi_total} "
                       f"({100*esi_correct/esi_total:.1f}%)")
 
-    # ===================================================================
     #  FEATURE IMPORTANCE (Top 30)
-    # ===================================================================
-    print_section("TOP 30 FEATURE IMPORTANCES — ACUITY MODEL")
+    print_section("TOP 30 FEATURE IMPORTANCES - ACUITY MODEL")
 
     feature_names = list(X_test.columns)
     importances = acuity_model.feature_importances_
@@ -269,9 +248,7 @@ def main():
         bar = "#" * max(1, int(40 * importances[idx] / importances[sorted_idx[0]]))
         print(f"  {rank:>2}. {display:<45s} {importances[idx]:.5f}  {bar}")
 
-    # ===================================================================
     #  SUMMARY
-    # ===================================================================
     print_section("BENCHMARK SUMMARY")
     print(f"  Test set size:              {len(y_acuity_test):,}")
     print(f"  Total features:             {X_test.shape[1]}")
@@ -288,9 +265,7 @@ def main():
     print(f"  Over-triage rate:           {100*over_triage/len(y_acuity_test):.1f}%")
     print(f"  Under-triage rate:          {100*under_triage/len(y_acuity_test):.1f}%")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 70 + "\n")
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

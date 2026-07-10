@@ -1,6 +1,5 @@
 // A compact chip showing a tool call in real time: a spinner while running, a
-// check when done. Expandable to reveal the raw args/output (the transparency
-// layer for the curious / for the reasoning view).
+// check when done. Expandable to reveal the raw args/output.
 import { useState } from "react";
 
 const TOOL_LABELS: Record<string, string> = {

@@ -1,32 +1,22 @@
-"""Detailed tabular re-benchmark of every live v3 model — one auditable JSON + CSVs.
+"""Detailed tabular re-benchmark of every live v3 model.
 
-Reuses the EXACT deterministic splits and feature builders of the existing
-per-agent benchmarks (so the headline numbers must reproduce ``ceiling.json``),
-and computes the full metric suite from :mod:`_metrics` for:
+Reuses the deterministic splits and feature builders of the per-agent benchmarks
+(so the headline numbers reproduce ceiling.json) and computes the full _metrics
+suite for triage acuity + disposition, doctor diagnosis + department (v3_base and
+v3_nurse), the calibrated doctor disposition model (per-threshold table, sweep,
+subgroups, calibration, feature-importance audit), and the Stage-2 exact-ICD
+resolver.
 
-  * Triage acuity (ESI 1-5, ordinal) + triage disposition (binary, raw)
-  * Doctor diagnosis (13-class) + department (11-class), v3_base AND v3_nurse
-  * Doctor disposition v3 (binary, isotonic-calibrated) — per-threshold table at
-    {0.15, 0.20, 0.30, 0.40-LIVE, 0.50} + 0.10-0.90 sweep, subgroups, calibration,
-    lift vs the triage-v3 cascade baseline, feature-importance-by-group audit
-  * Stage-2 exact-ICD resolver (delegates to ``run_icd_benchmark``)
-
-Outputs (all under ``--out-dir``, default
-``artifacts/benchmarks/audit/<date>/tabular/``):
-  tabular_full.json          master: every metric + metadata
-  regression_check.json      each headline metric vs ceiling.json (delta + PASS/FAIL)
-  *_per_class.csv / *_confusion_*.csv / *_thresholds.csv / *_calibration.csv / ...
-  icd_resolution_full.json + icd_resolution_summary.csv
-
-Each section loads its own data (the discharge.csv PMH parse is re-streamed per
-loader — there is no shared disk cache), so the full run is long; sections free
-their memory before the next. Use ``--skip-*`` to run a subset.
+Outputs under --out-dir: tabular_full.json (master), regression_check.json
+(each headline metric vs ceiling.json), per-class/confusion/threshold/calibration
+CSVs, and the ICD resolution JSON + summary. Each section loads its own data and
+frees it before the next, so the full run is long; use --skip-* for a subset.
 
 Run:  uv run python benchmarks/benchmark_tabular_full.py [--out-dir DIR] [--skip-icd ...]
 """
 
 # Force UTF-8 stdout/stderr BEFORE the v3 loaders (their PMH step prints non-cp1252
-# chars) — mirrors the guard in the other benchmark scripts.
+# chars) - mirrors the guard in the other benchmark scripts.
 import sys
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -77,9 +67,7 @@ def _quiet_build(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-# ---------------------------------------------------------------------------
 # CSV helpers
-# ---------------------------------------------------------------------------
 def write_df(df: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8")
@@ -112,11 +100,9 @@ def per_class_compare_df(base_pc, nurse_pc):
     return pd.DataFrame(rows)
 
 
-# ===========================================================================
 # Section: TRIAGE (acuity + disposition)
-# ===========================================================================
 def run_triage(out_dir: Path) -> dict:
-    hdr("TRIAGE v3 — acuity (ESI 1-5) + disposition (admit/discharge)")
+    hdr("TRIAGE v3 - acuity (ESI 1-5) + disposition (admit/discharge)")
     from proiect_licenta.training.train_triage_v3 import (
         load_and_clean_data as load_v3, build_features as build_v3,
     )
@@ -196,11 +182,9 @@ def run_triage(out_dir: Path) -> dict:
     return report
 
 
-# ===========================================================================
 # Section: DOCTOR diagnosis + department (v3_base vs v3_nurse)
-# ===========================================================================
 def run_doctor_heads(out_dir: Path) -> dict:
-    hdr("DOCTOR v3 — diagnosis (13c) + department (11c): base vs nurse")
+    hdr("DOCTOR v3 - diagnosis (13c) + department (11c): base vs nurse")
     from proiect_licenta.training.train_doctor import DEPARTMENT_NAMES
     from proiect_licenta.training.train_nurse_v3 import (
         load_and_clean_data as load_v3, build_features as build_nurse,
@@ -233,7 +217,7 @@ def run_doctor_heads(out_dir: Path) -> dict:
     diag_idx = list(range(len(diag_labels)))
     dept_idx = list(range(len(dept_labels)))
 
-    # ---- Diagnosis ----
+    # Diagnosis
     diag_base = M.multiclass_report(
         y_diag_te.values, base_diag.predict(Xb_te), base_diag.predict_proba(Xb_te),
         diag_idx, diag_labels, topk=(1, 3, 5), y_train=y_diag_tr.values)
@@ -243,7 +227,7 @@ def run_doctor_heads(out_dir: Path) -> dict:
         y_diag_te.values, nd_pred, nd_prob, diag_idx, diag_labels,
         topk=(1, 3, 5), y_train=y_diag_tr.values)
 
-    # ---- Department (cascade) ----
+    # Department (cascade)
     Xb_te_d = Xb_te.copy()
     Xb_te_d["predicted_diagnosis"] = base_diag.predict(Xb_te)
     db_prob = base_dept.predict_proba(Xb_te_d)
@@ -314,11 +298,9 @@ def run_doctor_heads(out_dir: Path) -> dict:
     return report
 
 
-# ===========================================================================
 # Section: DOCTOR DISPOSITION v3 (calibrated binary)
-# ===========================================================================
 def run_disposition(out_dir: Path) -> dict:
-    hdr("DOCTOR DISPOSITION v3 — calibrated binary (LIVE threshold 0.40)")
+    hdr("DOCTOR DISPOSITION v3 - calibrated binary (LIVE threshold 0.40)")
     from proiect_licenta.training.train_doctor_disposition import (
         load_and_clean_data, build_features, SOFT_CASCADE_COLS,
     )
@@ -483,9 +465,7 @@ def run_disposition(out_dir: Path) -> dict:
     return report
 
 
-# ===========================================================================
 # Section: ICD resolver (delegates to run_icd_benchmark)
-# ===========================================================================
 def run_icd(out_dir: Path) -> dict:
     hdr("STAGE-2 EXACT-ICD RESOLVER (oracle + e2e + 3 graded engines)")
     from benchmark_icd_resolution import run_icd_benchmark
@@ -523,9 +503,7 @@ def run_icd(out_dir: Path) -> dict:
     return results
 
 
-# ===========================================================================
 # Regression check vs ceiling.json
-# ===========================================================================
 def regression_check(master: dict, tol: float = 2e-3) -> dict:
     ceiling_path = ARTIFACTS_DIR / "benchmarks" / "tabular" / "ceiling.json"
     if not ceiling_path.exists():
@@ -637,9 +615,7 @@ def regression_check(master: dict, tol: float = 2e-3) -> dict:
     }
 
 
-# ===========================================================================
 # Main
-# ===========================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=None,
@@ -654,10 +630,8 @@ def main():
         ARTIFACTS_DIR / "benchmarks" / "audit" / date.today().isoformat() / "tabular")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "#" * 74)
-    print("  DETAILED TABULAR RE-BENCHMARK — all live v3 models")
+    print("  DETAILED TABULAR RE-BENCHMARK - all live v3 models")
     print(f"  Output: {out_dir}")
-    print("#" * 74)
 
     master = {
         "_meta": {
@@ -697,9 +671,7 @@ def main():
     (out_dir / "tabular_full.json").write_text(
         json.dumps(master, indent=2), encoding="utf-8")
     print(f"\n  Master JSON -> {out_dir / 'tabular_full.json'}")
-    print("\n" + "#" * 74)
-    print("  TABULAR BENCHMARK COMPLETE")
-    print("#" * 74 + "\n")
+    print("Tabular benchmark complete.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-"""
-Four-way comparison: v1 vs v2 vs v3 base vs v3 with-nurse.
+"""Four-way comparison: v1 vs v2 vs v3 base vs v3 with-nurse.
 
 Reads the metadata.json saved by each training pipeline and prints a
 single side-by-side table of the headline metrics. No model loading,
@@ -44,9 +43,7 @@ def fmt_int(x):
 
 
 def main():
-    print("\n" + "#" * 90)
     print("  Doctor Model Comparison -- v1 / v2 / v3 base / v3 with-nurse")
-    print("#" * 90)
 
     rows = []
     for label, art_dir, blurb in VERSIONS:
@@ -78,9 +75,7 @@ def main():
             "catch_all_excluded": meta.get("catch_all_excluded"),
         })
 
-    # ────────────────────────────────────────────────────────────────────
     # Headline accuracy table
-    # ────────────────────────────────────────────────────────────────────
     print(f"\n  {'Version':<12s}  {'Diag classes':>12s}  {'Diag acc':>10s}  "
           f"{'Dept classes':>12s}  {'Dept acc':>10s}  {'n_train':>8s}  {'n_test':>8s}")
     print(f"  {'-' * 86}")
@@ -95,9 +90,7 @@ def main():
             f"{fmt_int(r['n_train']):>8s}  {fmt_int(r['n_test']):>8s}"
         )
 
-    # ────────────────────────────────────────────────────────────────────
     # Improvement deltas (only when prior tier is available)
-    # ────────────────────────────────────────────────────────────────────
     print(f"\n  Improvement deltas (top-1 diagnosis / top-1 department):")
     print(f"  {'Comparison':<35s}  {'Delta Diag':>10s}  {'Delta Dept':>10s}  Note")
     print(f"  {'-' * 86}")
@@ -124,9 +117,7 @@ def main():
         d_dept = delta_str(a["dept_acc"], b["dept_acc"])
         print(f"  {name:<35s}  {d_diag:>10s}  {d_dept:>10s}  {note}")
 
-    # ────────────────────────────────────────────────────────────────────
     # Per-version notes
-    # ────────────────────────────────────────────────────────────────────
     print(f"\n  Version details:")
     for r in rows:
         marker = "  [MISSING]" if r["missing"] else ""
@@ -137,13 +128,9 @@ def main():
             if r["catch_all_excluded"]:
                 print(f"       catch_all_excluded: {r['catch_all_excluded']}")
 
-    print("\n" + "#" * 90)
-    print("  COMPARISON COMPLETE")
-    print("  Reminder: v1/v2 evaluate on 14 classes (incl. catch-all bucket),")
-    print("            v3 evaluates on 13 classes (catch-all excluded).")
-    print("            The v3 numbers are not strictly higher than v1/v2 by")
-    print("            magic -- they reflect a different (cleaner) task.")
-    print("#" * 90 + "\n")
+    print("\n  v1/v2 evaluate on 14 classes (including the catch-all bucket),")
+    print("  v3 evaluates on 13 classes (catch-all excluded). The v3 numbers are")
+    print("  not directly comparable; they reflect a different, cleaner task.")
 
 
 if __name__ == "__main__":

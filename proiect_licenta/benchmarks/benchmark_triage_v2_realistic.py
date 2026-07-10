@@ -1,5 +1,4 @@
-"""
-Realistic benchmark for triage v2 models.
+"""Realistic benchmark for triage v2 models.
 
 Mirrors actual inference behavior:
   - Ambulance/helicopter patients: real vitals from triage.csv
@@ -24,9 +23,7 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Make the proiect_licenta package importable from this script
-# ---------------------------------------------------------------------------
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -38,9 +35,7 @@ from proiect_licenta.training.train_triage_v2 import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def print_confusion_matrix(cm, labels):
@@ -58,11 +53,11 @@ def mask_vitals_for_walkins(X: pd.DataFrame, test_df: pd.DataFrame,
     """Mask vital sign features to 'missing' for non-ambulance/helicopter patients.
 
     For walk-in/other/unknown patients:
-      - Raw vitals → set to median (as if imputed from missing)
-      - Missing flags → set to 1
-      - Abnormality flags → set to 0 (median values are normal)
-      - abnormal_vital_count → set to 0
-      - Vital interaction features → set to 0
+      - Raw vitals -> set to median (as if imputed from missing)
+      - Missing flags -> set to 1
+      - Abnormality flags -> set to 0 (median values are normal)
+      - abnormal_vital_count -> set to 0
+      - Vital interaction features -> set to 0
     Ambulance/helicopter patients keep their real values.
     """
     X = X.copy()
@@ -76,28 +71,28 @@ def mask_vitals_for_walkins(X: pd.DataFrame, test_df: pd.DataFrame,
     print(f"  Masking vitals for {n_masked:,}/{n_total:,} non-ambulance/helicopter patients "
           f"({100*n_masked/n_total:.1f}%)")
 
-    # Raw vitals → median
+    # Raw vitals -> median
     for col in VITAL_COLS:
         X.loc[walkin_mask, col] = vital_medians[col]
 
-    # Missing flags → 1
+    # Missing flags -> 1
     for col in VITAL_COLS:
         X.loc[walkin_mask, f"{col}_missing"] = 1
 
-    # Abnormality flags → 0
+    # Abnormality flags -> 0
     abnormality_flag_names = list(ABNORMALITY_THRESHOLDS.keys())
     for flag in abnormality_flag_names:
         X.loc[walkin_mask, flag] = 0
 
-    # Abnormal count → 0
+    # Abnormal count -> 0
     X.loc[walkin_mask, "abnormal_vital_count"] = 0
 
-    # Vital-transport interactions → 0 (walk-ins aren't ambulance anyway, but be explicit)
+    # Vital-transport interactions -> 0 (walk-ins aren't ambulance anyway, but be explicit)
     for col in ["tachycardic_ambulance", "hypoxic_ambulance",
                 "hypotensive_ambulance", "fever_ambulance"]:
         X.loc[walkin_mask, col] = 0
 
-    # Vital-age interactions → 0
+    # Vital-age interactions -> 0
     for col in ["tachycardic_elderly", "hypoxic_elderly", "hypotensive_elderly"]:
         X.loc[walkin_mask, col] = 0
 
@@ -105,28 +100,20 @@ def mask_vitals_for_walkins(X: pd.DataFrame, test_df: pd.DataFrame,
 
 
 def main():
-    print("\n" + "#" * 70)
-    print("  TRIAGE v2 — REALISTIC BENCHMARK")
+    print("  TRIAGE v2 - REALISTIC BENCHMARK")
     print("  Vitals only for ambulance/helicopter; masked for walk-ins")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
-    # 1. Load data (same as training — includes 100K cap)
-    # ------------------------------------------------------------------
+    # 1. Load data (same as training - includes 100K cap)
     df = load_and_clean_data()
 
-    # ------------------------------------------------------------------
     # 2. Reproduce exact train/test split
-    # ------------------------------------------------------------------
     print_section("TRAIN/TEST SPLIT (80/20, stratified, random_state=42)")
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
     )
     print(f"  Train: {len(train_df):,} | Test: {len(test_df):,}")
 
-    # ------------------------------------------------------------------
     # 3. Load saved artifacts
-    # ------------------------------------------------------------------
     print_section("LOADING SAVED v2 ARTIFACTS")
     tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(MODELS_DIR / "severity_map.joblib")
@@ -151,16 +138,12 @@ def main():
     y_admit_test = test_df["admitted"].reset_index(drop=True)
     arrival_test = test_df["arrival_transport"].reset_index(drop=True)
 
-    # ------------------------------------------------------------------
     # 4. Mask vitals for walk-in patients
-    # ------------------------------------------------------------------
     print_section("MASKING VITALS FOR WALK-IN PATIENTS")
     X_test_realistic = mask_vitals_for_walkins(X_test, test_df, vital_medians)
 
-    # ===================================================================
-    #  ACUITY MODEL — OVERALL
-    # ===================================================================
-    print_section("ACUITY MODEL — OVERALL (realistic inference)")
+    #  ACUITY MODEL - OVERALL
+    print_section("ACUITY MODEL - OVERALL (realistic inference)")
 
     y_pred_acuity = acuity_model.predict(X_test_realistic) + 1
     y_prob_acuity = acuity_model.predict_proba(X_test_realistic)
@@ -195,10 +178,8 @@ def main():
     kappa_q = cohen_kappa_score(y_acuity_test, y_pred_acuity, weights="quadratic")
     print(f"  Cohen's kappa (quadratic): {kappa_q:.4f}")
 
-    # ===================================================================
-    #  ACUITY — BREAKDOWN BY ARRIVAL TRANSPORT
-    # ===================================================================
-    print_section("ACUITY — BY ARRIVAL TRANSPORT (ambulance/helicopter vs walk-in)")
+    #  ACUITY - BREAKDOWN BY ARRIVAL TRANSPORT
+    print_section("ACUITY - BY ARRIVAL TRANSPORT (ambulance/helicopter vs walk-in)")
 
     for group_name, group_mask in [
         ("AMBULANCE/HELICOPTER (real vitals)", arrival_test.isin(["AMBULANCE", "HELICOPTER"])),
@@ -229,10 +210,8 @@ def main():
                 print(f"    ESI {esi}: {esi_acc}/{esi_total} "
                       f"({100*esi_acc/esi_total:.1f}%)")
 
-    # ===================================================================
     #  DISPOSITION MODEL
-    # ===================================================================
-    print_section("DISPOSITION MODEL — OVERALL (realistic inference)")
+    print_section("DISPOSITION MODEL - OVERALL (realistic inference)")
 
     X_test_disp = X_test_realistic.copy()
     X_test_disp["predicted_acuity"] = y_pred_acuity
@@ -257,7 +236,7 @@ def main():
         auc_disp = None
 
     # Disposition by arrival transport
-    print_section("DISPOSITION — BY ARRIVAL TRANSPORT")
+    print_section("DISPOSITION - BY ARRIVAL TRANSPORT")
     for group_name, group_mask in [
         ("AMBULANCE/HELICOPTER (real vitals)", arrival_test.isin(["AMBULANCE", "HELICOPTER"])),
         ("WALK-IN (vitals masked)", arrival_test == "WALK IN"),
@@ -271,10 +250,8 @@ def main():
         print(f"\n  {group_name} (n={n:,}):")
         print(f"    Accuracy: {acc:.4f} ({acc*100:.2f}%)")
 
-    # ===================================================================
     #  SUMMARY
-    # ===================================================================
-    print_section("BENCHMARK SUMMARY — REALISTIC INFERENCE")
+    print_section("BENCHMARK SUMMARY - REALISTIC INFERENCE")
     print(f"  Test set size:              {len(y_acuity_test):,}")
     print(f"  Patients with real vitals:  {arrival_test.isin(['AMBULANCE', 'HELICOPTER']).sum():,} "
           f"({100*arrival_test.isin(['AMBULANCE', 'HELICOPTER']).sum()/len(arrival_test):.1f}%)")
@@ -293,9 +270,7 @@ def main():
     print(f"  Over-triage rate:           {100*over_triage/len(y_acuity_test):.1f}%")
     print(f"  Under-triage rate:          {100*under_triage/len(y_acuity_test):.1f}%")
 
-    print("\n" + "#" * 70)
-    print("  REALISTIC BENCHMARK COMPLETE")
-    print("#" * 70 + "\n")
+    print("Realistic benchmark complete.")
 
 
 if __name__ == "__main__":

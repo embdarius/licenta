@@ -1,36 +1,16 @@
-"""
-Case Generation Agent — Phase 4 (Text Generation Agent)
-=======================================================
+"""Case Generation Agent (offline/benchmark-only).
 
-Translates real MIMIC-IV tabular ED rows into realistic natural-language
-patient descriptions — the raw free-text the NLP Parser sees at live
-inference — plus every other input the crew collects interactively
-(vitals, cardiac rhythm, medications, past medical history). The cases are
-generated **strictly from the tabular row**; the LLM only rephrases, it
-invents nothing, and a deterministic grounding validator enforces that.
-
-The generated cases drive `benchmarks/benchmark_pipeline_e2e.py`, which runs
-them end-to-end through the full crew and compares accuracy against the
-"normal" tabular benchmark on the same stay_ids.
-
-Design (see the approved plan + docs/agents/case-generation-agent.md):
-  * The LLM's ONLY free output is the opening ``narrative`` (the NLP-parser
-    input). Everything else — demographics, vitals, rhythm, medications,
-    PMH free-text, prior-admission count — is deterministic from the row,
-    so invention risk is confined to the narrative and caught by the
-    validator.
-  * `prior_history` is reverse-mapped from the loader's real `pmh_*` flags
-    to canonical condition phrases (grounding, not invention). The phrases
-    are chosen so they round-trip through `pmh_vocab.flags_from_text` back
-    to the same category.
-  * Cases (+ the cached per-stay feature rows the feature-vector baseline
-    needs) are persisted under data/derived/synthetic_cases/ — gitignored,
-    because they are MIMIC-derived patient text (DUA).
-
-Heavy by design: `generate_and_save_cases` runs the disposition + nurse_v3
-loaders once (incl. the discharge.csv PMH stream) to sample faithfully from
-the held-out test splits and capture real PMH + diagnosis/department ground
-truth. The benchmark then runs fast off the cached JSON + feature pickle.
+Translates real MIMIC-IV tabular ED rows into realistic natural-language patient
+descriptions (the free text the NLP Parser sees) plus every other input the crew
+collects (vitals, rhythm, medications, PMH). Cases are generated strictly from
+the tabular row: the LLM only rephrases the opening narrative, everything else is
+deterministic from the row, and a grounding validator enforces that invention is
+confined to (and caught in) the narrative. prior_history is reverse-mapped from
+the loader's real pmh_* flags to canonical phrases that round-trip through
+pmh_vocab.flags_from_text back to the same category. Generated cases drive
+benchmark_pipeline_e2e.py and are persisted under data/derived/synthetic_cases/
+(gitignored under the MIMIC DUA). generate_and_save_cases runs the disposition
+and nurse_v3 loaders once to sample from the held-out test splits.
 """
 
 import json
@@ -57,14 +37,12 @@ from proiect_licenta.preprocessing import normalize_complaint_text
 from proiect_licenta.pmh_vocab import (
     PMH_CATEGORIES, PMH_KEYWORD_MAP, flags_from_text as pmh_flags_from_text,
 )
-# Switchable LLM backend — None for the default flash backend (Gemini, unchanged).
+# Switchable LLM backend - None for the default flash backend (Gemini, unchanged).
 from proiect_licenta.llm_config import get_llm
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Paths / artifacts
-# ---------------------------------------------------------------------------
 SYNTH_DIR = DERIVED_DIR / "synthetic_cases"
 CASES_JSON = SYNTH_DIR / "cases.json"
 FEATURES_PKL = SYNTH_DIR / "sampled_features.pkl"
@@ -77,9 +55,7 @@ DEFAULT_N_DISCHARGED = 7
 DEFAULT_SEED = 20260529
 
 
-# ---------------------------------------------------------------------------
 # PMH category -> canonical patient-speak phrase (deterministic reverse map)
-# ---------------------------------------------------------------------------
 # Curated preferred phrasing per diagnosis group. Every phrase is verified at
 # import time to round-trip through pmh_vocab.flags_from_text back to its
 # category (so the triage/disposition/v3 tools re-derive the same flag the
@@ -131,9 +107,7 @@ def prior_history_text(fired_categories) -> str:
     return ", ".join(phrases)
 
 
-# ---------------------------------------------------------------------------
 # Small field normalizers (tabular raw -> crew input vocabulary)
-# ---------------------------------------------------------------------------
 def transport_to_input(raw: str) -> str:
     r = str(raw).strip().upper()
     return {
@@ -148,12 +122,10 @@ def gender_to_input(raw: str) -> str:
     return {"M": "male", "F": "female"}.get(r, "unknown")
 
 
-# ---------------------------------------------------------------------------
 # Targeted raw pulls (medication names, cardiac rhythm) keyed by stay_id
-# ---------------------------------------------------------------------------
 def pull_medrecon_names(stay_ids) -> dict:
     """{stay_id: 'drug a, drug b'} from medrecon.csv (the patient's home-med
-    NAMES — what a patient would actually report to the nurse)."""
+    NAMES - what a patient would actually report to the nurse)."""
     stay_set = set(int(s) for s in stay_ids)
     med = pd.read_csv(MEDRECON_CSV, usecols=["stay_id", "name"])
     med = med[med["stay_id"].isin(stay_set)]
@@ -173,11 +145,11 @@ def pull_medrecon_names(stay_ids) -> dict:
 
 
 def pull_rhythm_readings(stay_intime: dict) -> dict:
-    """{stay_id: ['sinus', 'atrial fibrillation', ...]} — ALL non-null rhythm
+    """{stay_id: ['sinus', 'atrial fibrillation', ...]} - ALL non-null rhythm
     readings within [intime, intime + 4h], chronological (same leakage guard +
     window as training's `_aggregate_vitalsigns`). Returning the full sequence
     (not just the first) lets the doctor tools reproduce training's rhythm
-    aggregation — mode bucket + any-non-sinus `rhythm_irregular` — closing the
+    aggregation - mode bucket + any-non-sinus `rhythm_irregular` - closing the
     single-reading divergence (#3)."""
     stay_set = set(int(s) for s in stay_intime)
     vs = pd.read_csv(VITALSIGN_CSV, usecols=["stay_id", "charttime", "rhythm"])
@@ -200,7 +172,7 @@ def pull_rhythm_readings(stay_intime: dict) -> dict:
 
 
 def pull_vital_trajectory(stay_intime: dict) -> dict:
-    """{stay_id: {vital: [chronological readings]}} — the REAL multi-reading
+    """{stay_id: {vital: [chronological readings]}} - the REAL multi-reading
     trajectory within [intime, intime + 4h], same window + clip parity as
     train_nurse_v3._aggregate_vitalsigns. This is what a runtime that collected
     several readings during the stay would have; the benchmark feeds it into the
@@ -230,9 +202,7 @@ def pull_vital_trajectory(stay_intime: dict) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Field extraction (one tabular row -> the full input bundle + ground truth)
-# ---------------------------------------------------------------------------
 def extract_fields(
     row: pd.Series,
     diag_gt: Optional[str],
@@ -276,7 +246,7 @@ def extract_fields(
     return {
         "stay_id": int(row["stay_id"]),
         "subject_id": int(row["subject_id"]),
-        # Current ED arrival time — the leakage cutoff the PatientHistoryLookupTool
+        # Current ED arrival time - the leakage cutoff the PatientHistoryLookupTool
         # filters prior encounters against (only visits strictly before this are
         # used). Stored as ISO so the benchmark can feed it to the lookup tool.
         "intime": str(row["intime"]),
@@ -300,7 +270,7 @@ def extract_fields(
             "n_prior_admissions": n_prior_adm,
         },
         # What the nurse tool collects (all patients). `vital_trajectory` is the
-        # real multi-reading sequence within [intime,+4h] — what a runtime that
+        # real multi-reading sequence within [intime,+4h] - what a runtime that
         # took several readings would have. Snapshot `vitals` is kept too so the
         # snapshot-fallback path stays testable.
         "nurse_inputs": {
@@ -317,9 +287,7 @@ def extract_fields(
     }
 
 
-# ---------------------------------------------------------------------------
-# Grounding validator — enforce "no invented clinical facts" on the narrative
-# ---------------------------------------------------------------------------
+# Grounding validator - enforce "no invented clinical facts" on the narrative
 _AGE_PAT = re.compile(r"\b(\d{1,3})[\s-]*(?:years?[\s-]*old|y[/.]?o\b|yo\b|year[\s-]*old)", re.I)
 _AGE_PAT2 = re.compile(r"\b(?:i'?m|i am|aged)\s+(\d{1,3})\b", re.I)
 _PAIN_PAT = re.compile(r"\b(\d{1,2})\s*(?:/\s*10|out of 10)\b", re.I)
@@ -327,7 +295,7 @@ _BP_PAT = re.compile(r"\b\d{2,3}\s*/\s*\d{2,3}\b")          # blood-pressure-lik
 _VITAL_NUM_PAT = re.compile(r"\b(?:bpm|mmhg|°|℉|spo2|o2 sat|sat of|temp(?:erature)? of)\b", re.I)
 
 # Clinical jargon a layperson would not say. Flagged so the "stay lay" rule is
-# enforced — important because a medical-domain generator (e.g. MedGemma) may
+# enforced - important because a medical-domain generator (e.g. MedGemma) may
 # leak clinical vocabulary into the patient voice, which would unfairly inflate
 # downstream parser accuracy (pre-clinicalizing the input; see docs/llm-backend
 # §7). Deliberately only clearly-technical terms/abbreviations to avoid false
@@ -341,7 +309,7 @@ _CLINICAL_JARGON_PAT = re.compile(
     re.I,
 )
 
-# Generation-only completeness anchors — DELIBERATELY SEPARATE from
+# Generation-only completeness anchors - DELIBERATELY SEPARATE from
 # preprocessing.LAY_TO_CLINICAL (the eval-time lay->clinical map). This detects
 # whether a *lay narrative* covers a complaint, and is intentionally broader, so
 # enforcing completeness here does NOT bias the generator toward the eval map's
@@ -416,15 +384,15 @@ def _dropped_complaints(complaint_str: str, narrative: str) -> list:
 def validate_grounding(narrative: str, fields: dict) -> tuple:
     """Return (ok, reasons). Checks three things:
 
-    1. *Invention* — any stated age/pain must match the row, and the opening
+    1. *Invention* - any stated age/pain must match the row, and the opening
        narrative must not contain fabricated clinical measurements (BP/HR/temp/O2,
        which belong to the nurse stage).
-    2. *Clinical leakage* — the narrative must stay in lay language (no clinical
+    2. *Clinical leakage* - the narrative must stay in lay language (no clinical
        jargon/abbreviations), so a medical-domain generator can't pre-clinicalize
        the input and unfairly inflate parser accuracy.
-    3. *Completeness* — every tabular complaint should be voiced; a dropped
+    3. *Completeness* - every tabular complaint should be voiced; a dropped
        complaint is flagged (conservatively, for common concepts) so the retry
-       loop regenerates. Faithful lay *wording* is still NOT scored — that
+       loop regenerates. Faithful lay *wording* is still NOT scored - that
        paraphrase is exactly what the E2E test measures."""
     reasons = []
     if not narrative or not narrative.strip():
@@ -456,7 +424,7 @@ def validate_grounding(narrative: str, fields: dict) -> tuple:
     if jargon:
         reasons.append(f"narrative uses clinical jargon (should be lay): {', '.join(jargon)}")
 
-    # Completeness — flag dropped complaints
+    # Completeness - flag dropped complaints
     dropped = _dropped_complaints(t["chief_complaints"], text)
     if dropped:
         reasons.append(f"narrative omits complaint(s): {', '.join(dropped)}")
@@ -464,9 +432,7 @@ def validate_grounding(narrative: str, fields: dict) -> tuple:
     return (len(reasons) == 0), reasons
 
 
-# ---------------------------------------------------------------------------
-# Case Generation Agent (offline CrewAI crew — never joins the live pipeline)
-# ---------------------------------------------------------------------------
+# Case Generation Agent (offline CrewAI crew - never joins the live pipeline)
 @CrewBase
 class CaseGenerationCrew:
     """Single-agent crew that rephrases structured ED data as a first-person
@@ -474,7 +440,7 @@ class CaseGenerationCrew:
 
     Uses DEDICATED config files (not the live crew's config/agents.yaml /
     config/tasks.yaml) because @CrewBase maps every task in a tasks.yaml to an
-    @agent method on the class — sharing the files would couple this offline
+    @agent method on the class - sharing the files would couple this offline
     crew to the live ProiectLicenta pipeline and break both.
     """
 
@@ -550,9 +516,7 @@ def generate_narrative(fields: dict, max_attempts: int = 3) -> dict:
             "attempts": max_attempts}
 
 
-# ---------------------------------------------------------------------------
 # Sampling + extraction (runs the heavy loaders once)
-# ---------------------------------------------------------------------------
 def _doctor_v3_test_stay_ids(df_nurse: pd.DataFrame) -> set:
     """Reproduce the doctor-v3 nurse benchmark split (stratify on diagnosis)
     and return the set of held-out test stay_ids."""
@@ -579,7 +543,7 @@ def sample_and_extract(
     Returns (cases, feature_cache) where feature_cache[stay_id] holds the
     pre-built feature rows the feature-vector baseline needs.
     """
-    # Lazy imports — heavy modules with import-time cost.
+    # Lazy imports - heavy modules with import-time cost.
     import gc
     from proiect_licenta.training import train_doctor_disposition as dispo
     from proiect_licenta.training import train_nurse_v3 as nurse_v3
@@ -593,26 +557,22 @@ def sample_and_extract(
     from proiect_licenta.tools.triage_tool import _ensure_pickle_compat_in_main
     _ensure_pickle_compat_in_main()
 
-    print("=" * 70)
-    print("  CASE GENERATION — sampling from held-out test splits")
-    print("=" * 70)
+    print("Case generation: sampling from held-out test splits")
 
-    # IMPORTANT (memory): we do NOT call build_features on the full 418K-row
-    # dataset — densifying the 2070-col TF-IDF feature matrix over 418K rows
-    # needs ~7 GB and OOMs. The train/test split only needs the labels for
-    # stratification, so we (1) load the cleaned dataframes, (2) reproduce the
-    # splits from labels alone, (3) sample the ~20 stay_ids, and only THEN
-    # (4) build features on the tiny sampled sub-frames. build_features is a
-    # pure fit=False transform, so per-row results are identical to building on
-    # the full frame and slicing.
+    # Don't build_features on the full 418K rows: densifying the 2070-col TF-IDF
+    # matrix there needs ~7 GB and OOMs. The split only needs labels for
+    # stratification, so we load the cleaned frames, reproduce the splits from
+    # labels alone, sample the stay_ids, and only then build features on the tiny
+    # sampled sub-frames. build_features is a pure fit=False transform, so per-row
+    # results match building on the full frame and slicing.
 
-    # ── Disposition loader (full population: acuity + dispo + all inputs) ──
+    # Disposition loader (full population: acuity + dispo + all inputs)
     print("\n[1/4] Loading disposition dataset (full population)...")
     df_d = dispo.load_and_clean_data().reset_index(drop=True)
     y_adm = df_d["admitted"].astype(int)
 
     # Reproduce the disposition test split (same as benchmark_doctor_disposition)
-    # using indices + labels only — no feature matrix required.
+    # using indices + labels only - no feature matrix required.
     idx = np.arange(len(df_d))
     _, test_idx = train_test_split(
         idx, test_size=0.2, random_state=42, stratify=y_adm,
@@ -621,7 +581,7 @@ def sample_and_extract(
     admit_rate = float(y_adm.iloc[test_idx].mean())
     # Keep only the 83K-row test slice and free the full 418K frame BEFORE the
     # nurse loader runs. Everything downstream (intime map, df_d_sub features) is
-    # a subset of the test split, so this is behaviour-preserving — and it avoids
+    # a subset of the test split, so this is behaviour-preserving - and it avoids
     # holding two full MIMIC frames in memory at once, which OOMs on ~14 GB RAM.
     df_test = df_d.iloc[test_idx].copy()
     del df_d, y_adm, idx
@@ -629,7 +589,7 @@ def sample_and_extract(
     print(f"  disposition test split: {len(test_idx):,} rows "
           f"(admit rate {admit_rate:.3f})")
 
-    # ── Nurse v3 loader (admitted, diagnosis/department ground truth) ──
+    # Nurse v3 loader (admitted, diagnosis/department ground truth)
     print("\n[2/4] Loading doctor v3 nurse dataset (admitted, diag/dept labels)...")
     df_n = nurse_v3.load_and_clean_data().reset_index(drop=True)
     diag_by_stay = dict(zip(df_n["stay_id"].astype(int), df_n["diagnosis_group"]))
@@ -638,7 +598,7 @@ def sample_and_extract(
     print(f"  admitted/non-catch-all rows: {len(df_n):,} | "
           f"doctor-v3 test stays: {len(doctor_test_ids):,}")
 
-    # ── Build candidate pools ──
+    # Build candidate pools
     rng = np.random.RandomState(seed)
     test_stay_ids = df_test["stay_id"].astype(int).values
 
@@ -670,16 +630,16 @@ def sample_and_extract(
     print(f"\n[3/4] Sampled {len(chosen)} cases "
           f"({n_admitted} admitted + {n_discharged} discharged)")
 
-    # ── Targeted raw pulls (med names, rhythm, vital trajectory) ──
+    # Targeted raw pulls (med names, rhythm, vital trajectory)
     print("\n[4/4] Pulling raw medication names + cardiac rhythm + vital trajectory...")
     med_names = pull_medrecon_names(chosen)
     intime_by_stay = dict(zip(df_test["stay_id"].astype(int), df_test["intime"]))
     rhythm_readings = pull_rhythm_readings({s: intime_by_stay[s] for s in chosen})
     vital_traj = pull_vital_trajectory({s: intime_by_stay[s] for s in chosen})
 
-    # ── Build features ONLY for the sampled rows (memory-safe) ──
+    # Build features ONLY for the sampled rows (memory-safe)
     print("\n  Building features for the sampled rows only "
-          "(sub-frame transform — memory-safe)...")
+          "(sub-frame transform - memory-safe)...")
     df_d_sub = df_test[df_test["stay_id"].astype(int).isin(chosen_set)].copy().reset_index(drop=True)
     feats_d_sub = dispo.build_features(df_d_sub).reset_index(drop=True)
     dsub_row_by_stay = {int(s): i for i, s in enumerate(df_d_sub["stay_id"].astype(int))}
@@ -718,9 +678,7 @@ def sample_and_extract(
     return cases, feature_cache
 
 
-# ---------------------------------------------------------------------------
 # Orchestration: generate narratives + persist
-# ---------------------------------------------------------------------------
 def generate_and_save_cases(
     n_admitted: int = DEFAULT_N_ADMITTED,
     n_discharged: int = DEFAULT_N_DISCHARGED,
@@ -732,7 +690,7 @@ def generate_and_save_cases(
     cases.json + sampled_features.pkl.
 
     By default these go to data/derived/synthetic_cases/ (the canonical set the
-    E2E benchmark loads). Pass ``out_dir`` to write to a separate directory —
+    E2E benchmark loads). Pass ``out_dir`` to write to a separate directory -
     used by Experiment B to keep each LLM backend's narratives apart
     (e.g. synthetic_cases_medgemma/) so the Case-Generation comparison never
     overwrites the Flash-generated canonical cases."""
@@ -772,11 +730,9 @@ def generate_and_save_cases(
     cases_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     joblib.dump(feature_cache, features_pkl)
 
-    print(f"\n{'='*70}")
     print(f"  Saved {len(cases)} cases -> {cases_json}")
     print(f"  Saved feature cache -> {features_pkl}")
     print(f"  Grounding: {len(cases) - n_flagged}/{len(cases)} clean, {n_flagged} flagged")
-    print(f"{'='*70}")
     return cases
 
 

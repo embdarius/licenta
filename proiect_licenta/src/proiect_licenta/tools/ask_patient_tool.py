@@ -1,10 +1,8 @@
-"""
-Ask Patient Tool — CrewAI Tool
+"""Ask-patient tool: lets an agent ask a follow-up question and read the answer.
 
-Allows an agent to ask the patient a follow-up question and receive their
-response. At the terminal the answer is read from stdin; behind the web UI a
-``channel`` is injected and the question is routed to the browser instead (see
-``proiect_licenta.interaction``). Behavior with no channel is unchanged.
+At the terminal the answer comes from stdin; behind the web UI an injected
+channel routes the question to the browser (see proiect_licenta.interaction).
+Behavior with no channel is unchanged.
 """
 
 from typing import Any, Type

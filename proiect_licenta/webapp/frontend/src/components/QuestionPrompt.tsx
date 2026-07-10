@@ -78,7 +78,7 @@ function SimpleAnswer({ kind, onAnswer }: { kind: string; onAnswer: (t: string) 
   );
 }
 
-// Editable confirmation of the parsed intake — the "menu to intervene".
+// Editable confirmation of the parsed intake before triage runs.
 function IntakeConfirm({ parsed, onAnswer }: { parsed: any; onAnswer: (t: string) => void }) {
   const ccWasList = Array.isArray(parsed.chief_complaints);
   const [form, setForm] = useState({

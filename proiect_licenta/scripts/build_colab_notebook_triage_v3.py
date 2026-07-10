@@ -41,30 +41,29 @@ Trains `artifacts/triage/v3/` from the current HEAD of the repo on Colab GPU.
 
 ## v3 iteration history
 
-**Iteration 1 (2026-05-26):** Initial v3. v2 features (vital signs, abnormality flags, walk-in masking) + 19 PMH features parsed from prior MIMIC discharge summaries + ICD codes (Doctor v3 nurse Change 1 recipe). Acuity 68.01% -> 68.61%, disposition 76.17% -> 77.96%. See `docs/agents/triage-agent.md#triage-v3--pmh-features`.
+Iteration 1 (2026-05-26): Initial v3. v2 features (vital signs, abnormality flags, walk-in masking) + 19 PMH features parsed from prior MIMIC discharge summaries + ICD codes (Doctor v3 nurse Change 1 recipe). Acuity 68.01% -> 68.61%, disposition 76.17% -> 77.96%. See `docs/agents/triage-agent.md#triage-v3--pmh-features`.
 
-**Iteration 2 (current):** Two stacked improvements on top of iteration 1:
-- **Section 1.1 - longer training (both heads).** lr 0.02 -> 0.01, n_estimators 3000 -> 5000, early_stopping_rounds 100 -> 150. Iteration 1's `best_iteration` was 2999/3000 on the acuity head and 2983/3000 on the disposition head - neither had converged. Lower lr + more trees gives the booster room to actually find the minimum.
-- **Section 1.2 - ordinal-aware acuity (acuity head only).** Two changes that approximate an ordinal objective without a custom loss function:
-  1. **Extreme-class sample-weight boost.** Multiply the existing sqrt-balanced weights by `ESI_EXTREME_BOOST = {1: 1.5, 2: 1.3, 3: 1.0, 4: 1.0, 5: 2.0}`. Pushes the gradient updates toward the clinically critical extremes (ESI 1 = resuscitation; ESI 5 = currently catastrophic 14% recall) and toward ESI 2 (the most clinically dangerous to under-triage).
-  2. **QWK eval metric for early stopping.** Replace `eval_metric="mlogloss"` with a custom `neg_quadratic_kappa` callable. The booster still trains via the standard multi:softprob loss (proper, smooth) but early stopping now picks the iteration with the highest quadratic-weighted κ - rewarding ordinal-friendly iterations over flat-class-confusion iterations.
+Iteration 2 (current): Two stacked improvements on top of iteration 1:
+- Section 1.1 - longer training (both heads). lr 0.02 -> 0.01, n_estimators 3000 -> 5000, early_stopping_rounds 100 -> 150. Iteration 1's `best_iteration` was 2999/3000 on the acuity head and 2983/3000 on the disposition head - neither had converged. Lower lr + more trees gives the booster room to actually find the minimum.
+- Section 1.2 - ordinal-aware acuity (acuity head only). Two changes that approximate an ordinal objective without a custom loss function:
+  1. Extreme-class sample-weight boost. Multiply the existing sqrt-balanced weights by `ESI_EXTREME_BOOST = {1: 1.5, 2: 1.3, 3: 1.0, 4: 1.0, 5: 2.0}`. Pushes the gradient updates toward the clinically critical extremes (ESI 1 = resuscitation; ESI 5 = currently catastrophic 14% recall) and toward ESI 2 (the most clinically dangerous to under-triage).
+  2. QWK eval metric for early stopping. Replace `eval_metric="mlogloss"` with a custom `neg_quadratic_kappa` callable. The booster still trains via the standard multi:softprob loss (proper, smooth) but early stopping now picks the iteration with the highest quadratic-weighted κ - rewarding ordinal-friendly iterations over flat-class-confusion iterations.
 
 The disposition head only gets section 1.1 (binary admit/discharge has no ordinal structure for section 1.2).
 
 ## Base feature set (unchanged from iteration 1)
 
 - Acuity + disposition on TF-IDF + structured triage features + 6 vital signs + 8 abnormality flags + vital-transport / vital-age interactions. Vitals are masked to NaN for non-ambulance / non-helicopter patients to match inference behavior.
-- **19 PMH features** - 13 binary `pmh_<group>` flags from prior discharge summaries (OR'd with ICD-derived flags) + 6 prior-encounter numerics (`n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`, `same_complaint_as_prior`, `no_history`).
+- 19 PMH features - 13 binary `pmh_<group>` flags from prior discharge summaries (OR'd with ICD-derived flags) + 6 prior-encounter numerics (`n_prior_admissions`, `n_prior_ed_visits`, `days_since_last_admission`, `days_since_last_ed`, `same_complaint_as_prior`, `no_history`).
 
 Leakage is zero by construction: both PMH sources are filtered to `prior_*time < current_intime`.
 
 ## GPU + progress
 
-All XGBoost training runs on **GPU (CUDA)** via XGBoost 2.x's `device="cuda"` API. The env vars `XGB_DEVICE=cuda` + `XGB_TREE_METHOD=hist` are set in Cell 7 before training kicks off - read by `train_triage_v3.py:XGB_DEVICE`.
+All XGBoost training runs on GPU (CUDA) via XGBoost 2.x's `device="cuda"` API. The env vars `XGB_DEVICE=cuda` + `XGB_TREE_METHOD=hist` are set in Cell 7 before training kicks off - read by `train_triage_v3.py:XGB_DEVICE`.
 
-The training cell now shows a **live tqdm progress bar** per head with the latest eval-metric value updating in the postfix, plus periodic `[iter] metric:value` stdout lines every 100 iterations as a backup textual trail.
+The training cell now shows a live tqdm progress bar per head with the latest eval-metric value updating in the postfix, plus periodic `[iter] metric:value` stdout lines every 100 iterations as a backup textual trail.
 
----
 
 ## Repo layout assumption
 
@@ -83,13 +82,11 @@ licenta/                                    <- git repo root (cloned to /content
 
 If your fork is flatter (project files at the git root), edit `PROJECT_PATH` in Cell 2.
 
----
 
 ## Prereq: Colab runtime must have GPU
 
-Runtime menu -> Change runtime type -> **T4 GPU** (free tier) or L4/A100 (Colab Pro). Cell 5 (GPU smoke test) refuses to continue if `nvidia-smi` doesn't see a device.
+Runtime menu -> Change runtime type -> T4 GPU (free tier) or L4/A100 (Colab Pro). Cell 5 (GPU smoke test) refuses to continue if `nvidia-smi` doesn't see a device.
 
----
 
 ## One-Time Drive Setup (do this before running any cells)
 
@@ -124,7 +121,6 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 
 > Note: triage v3 does NOT need `vitalsign.csv`, `medrecon.csv`, `services.csv`, or `diagnosis.csv` (those are doctor-only). It DOES need `categorized_diagnosis.csv` because the PMH aggregator uses the same ICD->group map the doctor pipeline uses.
 
----
 
 ## Estimated runtimes (Colab T4 GPU)
 
@@ -132,7 +128,7 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 |------|------|
 | Setup + install | ~3 min |
 | GPU smoke test + file checks | < 1 min |
-| `train_triage_v3` total | **~40-60 min** (iteration 2: longer training) |
+| `train_triage_v3` total | ~40-60 min (iteration 2: longer training) |
 | &nbsp;&nbsp;discharge.csv PMH parse (CPU) | ~15-25 min |
 | &nbsp;&nbsp;XGBoost acuity (GPU, up to 5000 trees) | ~12-20 min |
 | &nbsp;&nbsp;XGBoost disposition (GPU, up to 5000 trees) | ~8-15 min |
@@ -141,8 +137,7 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 > The CPU-bound PMH parse dominates the first half; longer XGBoost training dominates the second half. Total runtime is ~50% higher than iteration 1.""")
 
 
-md("section1-md", """---
-## Section 1 - Environment Setup
+md("section1-md", """## Environment Setup
 *Run these cells at the start of every Colab session.*""")
 
 
@@ -215,15 +210,14 @@ pip('scikit-learn>=1.4.0')
 print('All dependencies installed.')""")
 
 
-md("section-gpu-md", """---
-## Section 2 - Verify GPU + Environment
+md("section-gpu-md", """## Verify GPU + Environment
 
-Cell 5 is the **gate** for the rest of the notebook:
+Cell 5 is the gate for the rest of the notebook:
 1. Confirms `nvidia-smi` sees a CUDA device.
 2. Confirms XGBoost >= 2.0 can build a small model on the GPU end-to-end (catches mismatched CUDA / driver setups before we burn 30 min on a CPU fallback).
 3. Confirms all required MIMIC-IV files and the triage v2 baseline artifacts are reachable through the symlinks set up in Cell 3.
 
-**If any check fails, stop and fix it before proceeding** - the long training run will either fall back to CPU silently or crash mid-way.""")
+If any check fails, stop and fix it before proceeding - the long training run will either fall back to CPU silently or crash mid-way.""")
 
 
 code("cell-gpu-smoke", """# Cell 5: GPU + XGBoost CUDA smoke test
@@ -291,25 +285,24 @@ print(f'\\nTRIAGE_V3_DIR (will be created/overwritten): {TRIAGE_V3_DIR}')
 print('All required checks passed. Ready to train.')""")
 
 
-md("section3-md", """---
-## Section 3 - Train Triage v3 iteration 2 (GPU)
+md("section3-md", """## Train Triage v3 iteration 2 (GPU)
 
 Trains the v3 iteration-2 pipeline on GPU. Heavy steps inside this single cell:
 
 1. Load `triage.csv` + `edstays.csv` + `patients.csv` (~1 min). Vitals get masked to NaN for non-ambulance / non-helicopter patients to match inference behavior.
-2. **PMH aggregation:** stream `discharge.csv` (3.3 GB) in chunks, parse the PMH sections against `pmh_vocab.py`, OR with ICD-derived flags from `diagnoses_icd.csv`. ~15-25 min, CPU-bound.
-3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF = **~2070 features**.
+2. PMH aggregation: stream `discharge.csv` (3.3 GB) in chunks, parse the PMH sections against `pmh_vocab.py`, OR with ICD-derived flags from `diagnoses_icd.csv`. ~15-25 min, CPU-bound.
+3. Build the full feature matrix: 23 v1 structured + 28 v2 vital + 19 PMH + 2000 TF-IDF = ~2070 features.
 4. Split 80/20 (random_state=42, stratified on `acuity`).
-5. **Train acuity model on GPU** (~12-20 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.2 applied: sample weights are multiplied by `ESI_EXTREME_BOOST` and the eval metric is the negative quadratic-weighted κ (XGBoost minimizes, so best iteration = highest κ).
-6. **Train disposition model on GPU** (~8-15 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.1 only - same `logloss` early stopping, no ordinal weighting.
+5. Train acuity model on GPU (~12-20 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.2 applied: sample weights are multiplied by `ESI_EXTREME_BOOST` and the eval metric is the negative quadratic-weighted κ (XGBoost minimizes, so best iteration = highest κ).
+6. Train disposition model on GPU (~8-15 min, up to 5000 trees, lr=0.01, early stopping=150). Section 1.1 only - same `logloss` early stopping, no ordinal weighting.
 7. Save artifacts to Drive via the symlink (`artifacts/triage/v3/`).
 
 ### What you should see in the cell output
 
 Per training head, the cell shows:
-- A **live tqdm progress bar** ticking once per boosting iteration. The postfix shows the latest validation metric (`neg_quadratic_kappa` for acuity, `logloss` for disposition) so you can watch the model converge in real time.
-- A periodic **`[iter] metric:value`** textual line every 100 iterations as a backup trail (XGBoost's built-in `verbose=100`).
-- After fit completes: the `best_iteration` value. **If `best_iteration` is close to 5000 again, the model still hasn't converged** - drop lr further or push n_estimators higher in a follow-up run.
+- A live tqdm progress bar ticking once per boosting iteration. The postfix shows the latest validation metric (`neg_quadratic_kappa` for acuity, `logloss` for disposition) so you can watch the model converge in real time.
+- A periodic `[iter] metric:value` textual line every 100 iterations as a backup trail (XGBoost's built-in `verbose=100`).
+- After fit completes: the `best_iteration` value. If `best_iteration` is close to 5000 again, the model still hasn't converged - drop lr further or push n_estimators higher in a follow-up run.
 
 ### Outputs
 - `acuity_model.joblib` - 5-class XGBoost.
@@ -378,21 +371,20 @@ print(f'  First three: {pmh_cols[:3]}')
 print(f'  Numerics:    {pmh_cols[-6:]}')""")
 
 
-md("section4-md", """---
-## Section 4 - Benchmark v3 vs v2 (head-to-head on identical test rows)
+md("section4-md", """## Benchmark v3 vs v2 (head-to-head on identical test rows)
 
 Runs `benchmark_triage_v3.py`, which:
 
 1. Re-runs `load_and_clean_data` from `train_triage_v3.py` (so the test set includes PMH columns).
 2. Reproduces the same 80/20 stratified split via `random_state=42`.
 3. Predicts with v3 on its full feature matrix.
-4. Rebuilds the v2 feature matrix on the **same test rows** and predicts with the v2 artifacts loaded from Drive.
-5. Reports the Δ on acuity (exact / within-1 / κ / under-triage) and disposition (accuracy / ROC AUC) — plus per-class recall, confusion matrices, and a PMH-feature-importance audit.
+4. Rebuilds the v2 feature matrix on the same test rows and predicts with the v2 artifacts loaded from Drive.
+5. Reports the Δ on acuity (exact / within-1 / κ / under-triage) and disposition (accuracy / ROC AUC) - plus per-class recall, confusion matrices, and a PMH-feature-importance audit.
 
-**What to look for:**
-- Acuity exact accuracy Δ: predicted +1-2pp, with most lift on **ESI 1 / ESI 2 recall** (where prior history matters most clinically).
+What to look for:
+- Acuity exact accuracy Δ: predicted +1-2pp, with most lift on ESI 1 / ESI 2 recall (where prior history matters most clinically).
 - Disposition accuracy Δ: predicted +1.5-2.5pp. Prior admission rate is plausibly the single strongest signal we've added.
-- PMH feature audit: ≥1 PMH feature should have non-zero importance. None will likely crack the top 50 (matches the Doctor Change 1 pattern — PMH contributes through many small interactions).
+- PMH feature audit: >=1 PMH feature should have non-zero importance. None will likely crack the top 50 (matches the Doctor Change 1 pattern - PMH contributes through many small interactions).
 
 *Expected runtime: 2-3 min.*""")
 
@@ -404,16 +396,15 @@ runpy.run_path(
 )""")
 
 
-md("section5-md", """---
-## Section 5 - Audit (PMH wiring + iteration 2 config)
+md("section5-md", """## Audit (PMH wiring + iteration 2 config)
 
 Fail-fast verification gates. Failing any of these should block trusting the new artifacts.
 
-**PMH wiring (unchanged from iteration 1):**
+PMH wiring (unchanged from iteration 1):
 - The metadata must record exactly 19 PMH feature columns.
-- The acuity model's `feature_importances_` must show ≥1 PMH-related column with non-zero gain. Zero everywhere = silent merge failure.
+- The acuity model's `feature_importances_` must show >=1 PMH-related column with non-zero gain. Zero everywhere = silent merge failure.
 
-**Iteration 2 config (new):**
+Iteration 2 config (new):
 - Metadata must include the `iteration` and `training_config` blocks recorded by `save_models`.
 - Acuity head must have used `neg_quadratic_kappa` as eval_metric and `ESI_EXTREME_BOOST` for sample weighting.
 - `best_iteration` should *not* be 4999 - if it is, the model still hasn't converged at the new (longer) training budget, and a follow-up run with lr=0.005 or n_estimators=8000 is warranted.""")
@@ -424,12 +415,8 @@ import joblib, pandas as pd, json
 
 meta = json.loads((TRIAGE_V3_DIR / 'model_metadata.json').read_text())
 
-# ===================================================================
 # (A) Iteration 2 training config audit (section 1.1 + 1.2)
-# ===================================================================
-print('=' * 60)
 print('A. Iteration 2 training config audit (sections 1.1 + 1.2)')
-print('=' * 60)
 print(f'  iteration:    {meta.get(\"iteration\")}')
 cfg = meta.get('training_config') or {}
 print(f'  acuity_n_estimators:           {cfg.get(\"acuity_n_estimators\")}  (expected 5000)')
@@ -455,17 +442,14 @@ print(f'\\n  Acuity best_iteration:       {acuity.best_iteration}  (of {cfg.get(
 print(f'  Disposition best_iteration:  {disp.best_iteration}  (of {cfg.get(\"disp_n_estimators\")})')
 
 if acuity.best_iteration >= cfg.get('acuity_n_estimators', 5000) - 1:
-    print('  WARN: acuity model hit the n_estimators ceiling — still has not converged.')
+    print('  WARN: acuity model hit the n_estimators ceiling - still has not converged.')
     print('        Drop lr to 0.005 or push n_estimators to 8000 in a follow-up run.')
 if disp.best_iteration >= cfg.get('disp_n_estimators', 5000) - 1:
-    print('  WARN: disposition model hit the n_estimators ceiling — still has not converged.')
+    print('  WARN: disposition model hit the n_estimators ceiling - still has not converged.')
 
-# ===================================================================
 # (B) PMH wiring audit (unchanged from iteration 1)
-# ===================================================================
 print('\\n' + '=' * 60)
 print('B. PMH wiring audit')
-print('=' * 60)
 pmh_cols_meta = meta.get('pmh_feature_cols', [])
 print(f'  pmh_feature_cols recorded: {len(pmh_cols_meta)} (expected 19)')
 assert len(pmh_cols_meta) == 19

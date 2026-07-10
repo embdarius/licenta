@@ -44,7 +44,7 @@ html, body {
            outline-none placeholder:text-slate-400
            focus:border-clinical focus:ring-2 focus:ring-clinical/20;
   }
-  /* Status pills — clinical semantics, muted (not neon) */
+  /* Status pills */
   .status-admit {
     @apply inline-flex items-center gap-1.5 rounded border border-red-200 bg-red-50 px-2 py-0.5
            text-xs font-semibold text-red-700;

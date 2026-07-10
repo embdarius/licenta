@@ -1,38 +1,19 @@
 """Graded (near-miss) similarity metrics for Stage-2 exact-ICD evaluation.
 
-Evaluation-only. The Stage-2 resolver (``icd_resolution.py``) still emits exactly
-the same ranked code lists; these helpers score those lists with PARTIAL credit
-for clinically-close misses, complementing the strict exact-code recall in
-``benchmarks/benchmark_icd_resolution.py``. Nothing here touches the predictor,
-the resolver artifact, or any training.
+Evaluation-only. These helpers score the resolver's ranked code lists with
+partial credit for clinically-close misses, complementing the strict exact-code
+recall in benchmark_icd_resolution.py. Three engines share one grader interface:
+TF-IDF title cosine (lexical), Gemini title cosine (semantic, cached offline),
+and ICD-tree distance (shared prefix / chapter).
 
-Three engines, all exposed through a uniform grader interface so the benchmark
-can iterate them generically:
+Graded credit takes the max similarity over the top-k predicted codes:
 
-  - TF-IDF title cosine   : cosine of TF-IDF vectors of the ICD *titles* (the
-                            supervisor's literal "cosine on titles" idea; lexical).
-  - Gemini title cosine   : cosine of cached Gemini embeddings of the titles
-                            (semantic; built once, then read offline).  [Phase B]
-  - ICD-tree distance     : hierarchical credit by shared code prefix / ICD
-                            chapter.                                     [Phase C]
+    graded@k(row) = max over c in topk(row) of sim(true_code_row, c)
 
-Graded credit mirrors strict recall@k by taking the MAX similarity over the
-top-k predicted codes:
-
-    graded@k(row) = max over c in topk(row) of  sim(true_code_row, c)
-
-Since ``sim(x, x) == 1`` this guarantees ``graded@k >= strict recall@k`` always;
-the gap is the partial credit earned by near misses.
-
-The title engines compare CODE TITLES on both sides: each candidate code's
-representative title (from the resolver index) and the TRUE code's representative
-title (same map). Comparing code-title to code-title — rather than the patient's
-raw narrative to a code title — both matches the supervisor's "how close are the
-two codes by their titles" framing and makes an exact-code hit score exactly 1.0
-(identical titles), so the invariant above holds at both granularities. Codes
-absent from the index (never candidates, so they cannot strict-hit) fall back to
-the row's raw ``icd_title`` — handled by the benchmark when it builds the true
-titles.
+Since sim(x, x) == 1, graded@k >= strict recall@k always; the gap is the partial
+credit from near misses. Both title engines compare code titles on each side
+(candidate title vs true-code title), so an exact hit scores 1.0. Codes absent
+from the index fall back to the row's raw icd_title.
 """
 from __future__ import annotations
 
@@ -48,9 +29,7 @@ def _clean(titles):
     return [("" if t is None else str(t)) for t in titles]
 
 
-# ---------------------------------------------------------------------------
 # Graded aggregation (shared by every engine)
-# ---------------------------------------------------------------------------
 def graded_max_over_topk(sim_all: np.ndarray, order: np.ndarray, k: int) -> np.ndarray:
     """Per-row max similarity over the top-k ranked candidates.
 
@@ -67,9 +46,7 @@ def graded_max_over_topk(sim_all: np.ndarray, order: np.ndarray, k: int) -> np.n
     return np.take_along_axis(sim_all, topk, axis=1).max(axis=1)
 
 
-# ---------------------------------------------------------------------------
 # TF-IDF title engine
-# ---------------------------------------------------------------------------
 def fit_title_tfidf(all_titles) -> TfidfVectorizer:
     """Fit a small word-level TF-IDF over the set of distinct ICD titles.
 
@@ -80,7 +57,7 @@ def fit_title_tfidf(all_titles) -> TfidfVectorizer:
 
     The token pattern keeps SINGLE-character tokens (``\\b\\w+\\b`` instead of
     sklearn's default ``\\w\\w+``). ICD titles distinguish variants precisely by
-    those one-char tails — "hepatitis A" vs "hepatitis B", "type 1" vs "type 2" —
+    those one-char tails - "hepatitis A" vs "hepatitis B", "type 1" vs "type 2" -
     and dropping them would collapse such near misses to an identical (1.0)
     vector, destroying the very signal this metric exists to capture.
     """
@@ -96,9 +73,7 @@ def tfidf_vectors(titles, vec: TfidfVectorizer) -> np.ndarray:
     return np.asarray(M.todense(), dtype=np.float32)
 
 
-# ---------------------------------------------------------------------------
 # Grader: title-vector engines (TF-IDF now, Gemini in Phase B share this class)
-# ---------------------------------------------------------------------------
 class TitleGrader:
     """A title-cosine grader parameterized by a vectorizer callable.
 
@@ -152,9 +127,7 @@ class TitleGrader:
         return float((self.C[cols] @ self.true[r]).max())
 
 
-# ---------------------------------------------------------------------------
-# Gemini title-embedding engine (Phase B) — semantic, cached, backend-agnostic
-# ---------------------------------------------------------------------------
+# Gemini title-embedding engine (Phase B) - semantic, cached, backend-agnostic
 GEMINI_EMBED_MODEL = "gemini-embedding-001"
 _GEMINI_BATCH = 100
 _GEMINI_RATE_PER_MIN = 2000   # stay safely under the paid-tier 3000/min quota
@@ -222,7 +195,7 @@ def build_or_load_title_embeddings(titles, cache_path, verbose=True):
 
     Loads any existing cache (joblib), embeds only the not-yet-cached titles, and
     saves the union back. Built once (needs a Gemini key at build time);
-    thereafter every run — under any LLM backend — reads the cache and makes zero
+    thereafter every run - under any LLM backend - reads the cache and makes zero
     API calls. Embedding is **rate-limited** (paced under the per-minute quota)
     and **resumable**: each batch is saved incrementally and HTTP 429s are honored
     with the server's retry delay, so a kill/retry never loses progress. Returns
@@ -313,9 +286,7 @@ def gemini_vectors(titles, cache):
     return normalize(M)
 
 
-# ---------------------------------------------------------------------------
-# ICD-tree engine (Phase C) — hierarchical credit by shared prefix / chapter
-# ---------------------------------------------------------------------------
+# ICD-tree engine (Phase C) - hierarchical credit by shared prefix / chapter
 W_ROLLUP = 0.6   # credit for sharing the 3-char rubric (full granularity only)
 W_CHAPTER = 0.3  # credit for sharing the ICD chapter
 

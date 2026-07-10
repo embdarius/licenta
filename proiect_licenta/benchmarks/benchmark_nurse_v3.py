@@ -1,17 +1,9 @@
-"""
-Benchmark: Doctor v3 base vs v3 with-nurse comparison
+"""Benchmark: doctor v3 base vs v3 with-nurse.
 
-Evaluates both v3 models on the same held-out test data to quantify the
-impact of nurse-collected vital signs and medication features ON THE NEW
-13-class label space (catch-all class excluded, full filtered dataset).
-
-  v3 base       : complaints + demographics + triage predictions (no nurse)
-  v3 with nurse : v3 base + snapshot vitals + medications (Phase A);
-                  Phase B will add longitudinal vitals + rhythm here.
-
-This is the v3 analogue of benchmark_nurse.py (which compares v1 vs v2).
-The two scripts are kept side-by-side so the thesis can show v1-vs-v2
-(14 classes) AND v3-base-vs-v3-with-nurse (13 classes) tables.
+Evaluates both v3 models on the same held-out test data to quantify the impact of
+nurse-collected vitals and medications on the 13-class label space. This is the
+v3 analogue of benchmark_nurse.py (v1 vs v2), kept side-by-side so the thesis can
+show both comparisons.
 """
 
 import json
@@ -49,28 +41,20 @@ from proiect_licenta.training.train_doctor_v3 import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  DOCTOR v3 BASE vs v3 WITH-NURSE BENCHMARK COMPARISON")
-    print(f"  Catch-all '{CATCH_ALL_LABEL}' EXCLUDED — 13-class label space")
+    print(f"  Catch-all '{CATCH_ALL_LABEL}' EXCLUDED - 13-class label space")
     print("  Impact of nurse-collected vitals + medications on the cleaner labels")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
     # 1. Load data (v3 with-nurse loader is the superset; both v3 base
     #    and v3 with-nurse use the same row filter so this is a single
     #    source of truth for the test set).
-    # ------------------------------------------------------------------
     df = load_v3_data()
 
-    # ------------------------------------------------------------------
     # 2. Build features for both versions (NO sub-sampling for v3)
-    # ------------------------------------------------------------------
     print_section("BUILDING FEATURES (full filtered dataset, no sub-sample)")
     print(f"  Full filtered dataset: {len(df):,}")
 
@@ -82,9 +66,7 @@ def main():
     features_v3_nurse = build_v3_with_nurse_features(df)
     print(f"  v3 with-nurse features: {features_v3_nurse.shape[1]}")
 
-    # ------------------------------------------------------------------
     # 3. Encode labels + split (same seed for both)
-    # ------------------------------------------------------------------
     meta_base = json.loads((DOCTOR_V3_BASE_DIR / "metadata.json").read_text())
     meta_nurse = json.loads((DOCTOR_V3_DIR / "metadata.json").read_text())
 
@@ -96,7 +78,7 @@ def main():
         "v3 base and v3 with-nurse have different diagnosis label spaces"
     )
     assert CATCH_ALL_LABEL not in diagnosis_labels, (
-        f"v3 metadata still contains catch-all '{CATCH_ALL_LABEL}' — bug"
+        f"v3 metadata still contains catch-all '{CATCH_ALL_LABEL}' - bug"
     )
 
     diag_map = {l: i for i, l in enumerate(diagnosis_labels)}
@@ -117,9 +99,7 @@ def main():
 
     print(f"  Train: {len(Xb_train):,} | Test: {len(Xb_test):,}")
 
-    # ------------------------------------------------------------------
     # 4. Load models
-    # ------------------------------------------------------------------
     print_section("LOADING MODELS")
     base_diag = joblib.load(DOCTOR_V3_BASE_DIR / "diagnosis_model.joblib")
     base_dept = joblib.load(DOCTOR_V3_BASE_DIR / "department_model.joblib")
@@ -128,10 +108,8 @@ def main():
     print(f"  v3 base trained:       {meta_base['trained_at']}")
     print(f"  v3 with-nurse trained: {meta_nurse['trained_at']}")
 
-    # ------------------------------------------------------------------
     # 5. Evaluate DIAGNOSIS models
-    # ------------------------------------------------------------------
-    print_section(f"DIAGNOSIS CATEGORY — v3 base vs v3 with-nurse "
+    print_section(f"DIAGNOSIS CATEGORY - v3 base vs v3 with-nurse "
                   f"({len(diagnosis_labels)} classes)")
 
     yb_pred = base_diag.predict(Xb_test)
@@ -182,17 +160,15 @@ def main():
         target_names=short_diag, digits=4, zero_division=0,
     ))
 
-    # ------------------------------------------------------------------
     # 6. Evaluate DEPARTMENT models
-    # ------------------------------------------------------------------
-    print_section(f"DEPARTMENT — v3 base vs v3 with-nurse "
+    print_section(f"DEPARTMENT - v3 base vs v3 with-nurse "
                   f"({len(department_labels)} classes)")
 
-    # v3 base — legacy single-int cascade (predicted_diagnosis). Unchanged.
+    # v3 base - legacy single-int cascade (predicted_diagnosis). Unchanged.
     Xb_test_dept = Xb_test.copy()
     Xb_test_dept["predicted_diagnosis"] = base_diag.predict(Xb_test)
 
-    # v3 nurse — A3 added a 13-col softmax cascade (diag_proba_<label>).
+    # v3 nurse - A3 added a 13-col softmax cascade (diag_proba_<label>).
     # Build it from metadata.diag_cascade_cols if present, else fall back to
     # the legacy single-int cascade so older artifacts still benchmark.
     Xn_test_dept = Xn_test.copy()
@@ -250,10 +226,8 @@ def main():
             full = DEPARTMENT_NAMES.get(label, label)[:35]
             print(f"  {label:<20s}  {full:<35s}  {a_b:>6.3f}  {a_n:>6.3f}  {sign}{delta:>6.3f}  {mask.sum():>6,}")
 
-    # ------------------------------------------------------------------
-    # 7. Feature importance — v3 with-nurse top features
-    # ------------------------------------------------------------------
-    print_section("TOP 20 FEATURE IMPORTANCES — v3 WITH-NURSE DIAGNOSIS MODEL")
+    # 7. Feature importance - v3 with-nurse top features
+    print_section("TOP 20 FEATURE IMPORTANCES - v3 WITH-NURSE DIAGNOSIS MODEL")
     tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
     tfidf_vocab_inv = {v: k for k, v in tfidf.vocabulary_.items()}
     feature_names = list(Xn_test.columns)
@@ -297,9 +271,7 @@ def main():
         ) or name.startswith("n_") and name.endswith("_readings"):
             print(f"    #{rank:>2}: {name:<35s}  importance={importances[idx]:.5f}")
 
-    # ------------------------------------------------------------------
     # 8. Baseline comparisons
-    # ------------------------------------------------------------------
     print_section("BASELINE COMPARISONS")
 
     diag_majority = y_diag_train.mode()[0]
@@ -319,9 +291,7 @@ def main():
     print(f"  Department v3 base:            {db_acc:.4f}  (+{db_acc-dept_majority_acc:.4f})")
     print(f"  Department v3 with-nurse:      {dn_acc:.4f}  (+{dn_acc-dept_majority_acc:.4f})")
 
-    # ------------------------------------------------------------------
     # 9. Summary
-    # ------------------------------------------------------------------
     print_section("BENCHMARK SUMMARY")
     print(f"  Test set size:               {len(y_diag_test):,}")
     print(f"  Catch-all excluded:          {meta_base.get('catch_all_excluded', '?')}")
@@ -347,9 +317,7 @@ def main():
     print(f"    {'Top-3 accuracy':<20s}  {db_top3:>7.2%}  {dn_top3:>7.2%}  {dn_top3-db_top3:>+7.2%}")
     print(f"    {'Cohen kappa':<20s}  {db_kappa:>7.4f}  {dn_kappa:>7.4f}  {dn_kappa-db_kappa:>+7.4f}")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE (v3 base vs v3 with-nurse)")
-    print("#" * 70 + "\n")
+    print("Benchmark complete (v3 base vs v3 with-nurse).")
 
 
 if __name__ == "__main__":

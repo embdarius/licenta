@@ -1,11 +1,10 @@
 """FastAPI backend for the interactive live-inference website.
 
-Drives the same prediction tools the live CrewAI crew uses, one pipeline stage
-per endpoint, via ``proiect_licenta.pipeline``. Predictions are byte-identical
-to the crew (see ``webapp/backend/test_parity.py``); only the stdin/LLM-ask
-interactivity is replaced by web-native forms.
+Drives the same prediction tools the CrewAI crew uses, one pipeline stage per
+endpoint, via proiect_licenta.pipeline. Predictions match the crew (see
+test_parity.py); only the stdin/LLM interactivity is replaced by web-native forms.
 
-Run (from the repo root):
+Run from the repo root:
     uv run uvicorn webapp.backend.main:app --reload --port 8000
 """
 from __future__ import annotations
@@ -24,7 +23,7 @@ from webapp.backend.schemas import (
     StageResponse, TriageRequest,
 )
 
-app = FastAPI(title="ED Decision-Support — Live Inference")
+app = FastAPI(title="ED Decision-Support - Live Inference")
 
 # Live conversational runtime (drives the real agentic crew over SSE). The
 # stage endpoints below remain as a non-interactive test path (pipeline.py).
@@ -38,11 +37,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# In-memory session store. A session accumulates state across stages exactly as
-# the crew passes context task-to-task. Process-local + ephemeral — fine for a
-# single-user demo; swap for Redis if this ever needs to scale.
-# ---------------------------------------------------------------------------
+# In-memory session store. A session accumulates state across stages the way the
+# crew passes context task-to-task. Process-local and ephemeral.
 _SESSIONS: dict[str, dict] = {}
 
 
@@ -75,7 +71,7 @@ def create_session() -> SessionResponse:
 
 @app.post("/api/parse", response_model=ParseResponse)
 def parse(req: ParseRequest) -> ParseResponse:
-    """Stage 0 — LLM intake parse (free text -> prefilled, editable fields)."""
+    """Stage 0 - LLM intake parse (free text -> prefilled, editable fields)."""
     if not req.narrative.strip():
         raise HTTPException(status_code=400, detail="Empty narrative.")
     fields = pipeline.parse_intake(req.narrative)
@@ -84,7 +80,7 @@ def parse(req: ParseRequest) -> ParseResponse:
 
 @app.post("/api/triage", response_model=StageResponse)
 def triage(req: TriageRequest) -> StageResponse:
-    """Stage 1 — EHR lookup (returning patients) + triage acuity/disposition."""
+    """Stage 1 - EHR lookup (returning patients) + triage acuity/disposition."""
     s = _session(req.session_id)
 
     # MRN/EHR lookup: a returning patient's real prior-encounter PMH + med blocks
@@ -126,7 +122,7 @@ def triage(req: TriageRequest) -> StageResponse:
 
 @app.post("/api/doctor-initial", response_model=StageResponse)
 def doctor_initial(session_id: str) -> StageResponse:
-    """Stage 2 — initial doctor assessment (v3_base), gated on triage admit."""
+    """Stage 2 - initial doctor assessment (v3_base), gated on triage admit."""
     s = _session(session_id)
     c = s["core"]
     if c is None:
@@ -144,7 +140,7 @@ def doctor_initial(session_id: str) -> StageResponse:
 
 @app.post("/api/nurse", response_model=StageResponse)
 def nurse(req: NurseRequest) -> StageResponse:
-    """Stage 3 — nurse multi-reading collection (web-native, same payload shape)."""
+    """Stage 3 - nurse multi-reading collection (web-native, same payload shape)."""
     s = _session(req.session_id)
     if s["core"] is None:
         raise HTTPException(status_code=409, detail="Run /api/triage first.")
@@ -164,7 +160,7 @@ def nurse(req: NurseRequest) -> StageResponse:
 
 @app.post("/api/disposition", response_model=StageResponse)
 def disposition(session_id: str) -> StageResponse:
-    """Stage 4 — calibrated disposition refinement (the before/after-nurse flip)."""
+    """Stage 4 - calibrated disposition refinement (the before/after-nurse flip)."""
     s = _session(session_id)
     c = s["core"]
     n = s["nurse"]
@@ -189,7 +185,7 @@ def disposition(session_id: str) -> StageResponse:
 
 @app.post("/api/reassessment", response_model=StageResponse)
 def reassessment(session_id: str) -> StageResponse:
-    """Stage 5 — enhanced diagnosis/department, gated on the REFINED disposition."""
+    """Stage 5 - enhanced diagnosis/department, gated on the REFINED disposition."""
     s = _session(session_id)
     c = s["core"]
     n = s["nurse"]

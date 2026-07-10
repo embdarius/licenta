@@ -1,5 +1,4 @@
-// Triage screening verdict vs the post-nurse refined verdict — the
-// before/after-nurse comparison that motivates the two-phase design.
+// Triage screening verdict vs the post-nurse refined verdict.
 export default function DispositionFlip({
   triageAdmit, refinedAdmit,
 }: {

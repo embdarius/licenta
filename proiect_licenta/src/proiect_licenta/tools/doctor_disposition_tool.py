@@ -1,41 +1,15 @@
-"""
-Doctor Disposition Tool — CrewAI Tool (plan section 3, Option B)
-=================================================================
+"""Doctor disposition tool: calibrated binary admit/discharge.
 
-Wraps the calibrated binary admit/discharge model trained by
-`train_doctor_disposition.py`. Lives at
-`artifacts/doctor/v3/disposition_model.joblib` (calibrated) plus a
-`_raw` sibling for audit. Cascade source is **triage v3** (the
-disposition model was trained that way, unlike the v3 diagnosis +
-department models which still use triage v1 cascade).
-
-Pipeline at inference:
-
-  1. Build a single-row DataFrame from the LLM-provided inputs.
-  2. Re-mask walk-in vitals to NaN on a copy and pass to
-     ``train_triage_v3.build_features(fit=False)`` to construct the
-     2069-col v3 input vector (structured + v3 vitals + PMH + TF-IDF).
-  3. Run the triage v3 acuity model -> 5 softmax columns; run the
-     triage v3 disposition model (cascading on predicted_acuity int)
-     -> 1 admit-probability column. Append as the 6 soft-cascade cols.
-  4. Build the snapshot-vital → longitudinal-vital fallback identical
-     to the v3-nurse tool (min == max == last == snapshot, delta = 0,
-     abnormal-reading counts = clinical flags, rhythm one-hot bucket).
-  5. Build the 11 medication columns via the shared med vocabulary.
-  6. Concatenate -> 2128-col feature vector matching training.
-  7. Call ``disposition_model.predict_proba(features)`` (the deployment
-     artifact is ``CalibratedClassifierCV(FrozenEstimator(XGB),
-     method="isotonic")`` so this returns calibrated probabilities)
-     and threshold at **0.40** (tuned from 0.50 via a sweep on the 83K
-     disposition test split — max F1 / max Youden, −5.4pp under-triage)
-     to produce the binary decision. The threshold is held in
-     ``DECISION_THRESHOLD`` near the top of the module; see the comment
-     there + ``benchmarks/sweep_disposition_threshold.py``.
-
-Output: calibrated admit/discharge probabilities, the binary decision,
-a calibration note, the triage v3 baseline this refined, and a
-``nurse_data_used`` block so the LLM can summarize the signals that
-fed in.
+Wraps the calibrated model from train_doctor_disposition.py
+(artifacts/doctor/v3/disposition_model.joblib, with a _raw sibling for audit).
+The cascade source is triage v3, unlike the v3 diagnosis/department models which
+use the triage v1 cascade. At inference it builds the 2069-col v3 input vector,
+appends the 6 soft-cascade columns (triage v3 acuity softmax + admit probability),
+the longitudinal-vital fallback, and the 11 medication columns to reach the
+2128-col training layout, then calls predict_proba (the artifact is a calibrated
+isotonic model) and thresholds at DECISION_THRESHOLD to decide. Output includes
+the probabilities, the decision, the triage v3 baseline it refined, and a
+nurse_data_used block.
 """
 
 import json
@@ -51,9 +25,7 @@ from pydantic import BaseModel, Field
 from sklearn.metrics import cohen_kappa_score
 
 
-# ---------------------------------------------------------------------------
-# Pickle-compat shim — neg_quadratic_kappa
-# ---------------------------------------------------------------------------
+# Pickle-compat shim - neg_quadratic_kappa
 # The triage v3 acuity model was pickled with a custom `eval_metric` callable
 # whose __module__ is '__main__' (because it was trained via runpy in the
 # Colab notebook). Without this shim, joblib.load fails at unpickle time when
@@ -70,9 +42,7 @@ def _ensure_pickle_compat_in_main():
         main_mod.neg_quadratic_kappa = neg_quadratic_kappa
 
 
-# ---------------------------------------------------------------------------
 # Paths + shared helpers (triage v3 cascade + v3-nurse longitudinal layout)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V3_DIR,
     DOCTOR_V3_DIR,
@@ -107,30 +77,15 @@ from proiect_licenta.pmh_features import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Operating point
-# ---------------------------------------------------------------------------
-# The model produces calibrated probabilities; this is just the cutoff where
-# P(admit) becomes an "admit" decision. No retraining is involved — changing it
-# only slides along the fixed ROC curve (AUC 0.9138).
-#
-# Tuned to 0.40 from the original 0.50 via a sweep on the 83,617-row disposition
-# test split (benchmarks/sweep_disposition_threshold.py). 0.40 maximizes BOTH
-# F1 (0.7830) and Youden's J (0.6604), and cuts the under-triage rate from
-# 23.5% -> 18.1% (-5.4pp, ~765 fewer missed admits per ~31K admitted) for only
-# a -0.6pp raw-accuracy cost (0.840 -> 0.833). Accuracy is the wrong selector
-# here — it favors the discharge majority (63%); for a clinical disposition,
-# under-triage (missed admits) is the costlier error, so F1 / Youden / a target
-# under-triage rate are the appropriate selectors and both point to 0.40.
-#
-# Future: 0.30 is a candidate if missed admits are deemed substantially costlier
-# than false admits (under-triage 13.5%, but over-triage rises to 20.7%). NOTE:
-# the "25-35% over-triage is acceptable" figure from ED literature is for
-# trauma/ESI ACUITY triage (cost = team activation / resources). This is an
-# ADMIT/DISCHARGE model where over-triage = an unnecessary inpatient admission
-# (bed + cost + iatrogenic risk), a higher and lumpier cost — so that band does
-# not transfer directly. Going below 0.40 should be backed by an explicit cost
-# model or clinician sign-off, not the trauma analogy alone.
+# Operating point: the cutoff where calibrated P(admit) becomes an "admit"
+# decision. Changing it only slides along the fixed ROC curve (no retraining).
+# Tuned to 0.40 from 0.50 via sweep_disposition_threshold.py on the 83,617-row
+# test split: 0.40 maximizes F1 and Youden's J and cuts under-triage from 23.5%
+# to 18.1% for a 0.6pp accuracy cost. Accuracy favors the discharge majority, so
+# for a clinical disposition under-triage is the costlier error and F1/Youden are
+# the right selectors. Going below 0.40 should be backed by an explicit cost
+# model, not the ED over-triage literature (which is about acuity triage, not
+# admit/discharge where over-triage means an unnecessary admission).
 DECISION_THRESHOLD: float = 0.40
 
 
@@ -167,9 +122,7 @@ def _classify_medications(medications_raw: str) -> dict:
     return {"n_medications": n_meds, "meds_unknown": 0, **flags}
 
 
-# ---------------------------------------------------------------------------
 # Lazy model loading (per-process cache)
-# ---------------------------------------------------------------------------
 _dispo_cache = None
 
 
@@ -193,7 +146,7 @@ def get_disposition_models():
         except Exception:
             pass
 
-        # Doctor disposition v3 — deployment + raw audit copies
+        # Doctor disposition v3 - deployment + raw audit copies
         disposition_model = joblib.load(DOCTOR_V3_DIR / "disposition_model.joblib")
 
         with open(DOCTOR_V3_DIR / "metadata.json", "r", encoding="utf-8") as f:
@@ -211,13 +164,11 @@ def get_disposition_models():
     return _dispo_cache
 
 
-# ---------------------------------------------------------------------------
 # Tool Input Schema
-# ---------------------------------------------------------------------------
 class DoctorDispositionInput(BaseModel):
     """Input schema for the Doctor Disposition Tool.
 
-    Same fields as the v3-nurse reassessment tool — admit/discharge
+    Same fields as the v3-nurse reassessment tool - admit/discharge
     refinement uses the same signals (triage + vitals + meds + rhythm + PMH).
     """
     chief_complaints: str = Field(
@@ -236,7 +187,7 @@ class DoctorDispositionInput(BaseModel):
     )
     predicted_acuity: int = Field(
         ...,
-        description="ESI acuity level (1-5) from the triage agent — reported in the output but the tool re-runs triage v3 internally for the soft cascade.",
+        description="ESI acuity level (1-5) from the triage agent - reported in the output but the tool re-runs triage v3 internally for the soft cascade.",
     )
     triage_is_admitted: bool = Field(
         ...,
@@ -273,7 +224,7 @@ class DoctorDispositionInput(BaseModel):
             "Copy the nurse tool's `vital_trajectory` block here verbatim. "
             "When provided, the model uses real vital trends (min/max/last/"
             "delta, abnormal-reading counts) instead of a single-snapshot "
-            "fallback — this materially improves the admit/discharge "
+            "fallback - this materially improves the admit/discharge "
             "prediction. Empty string if only one reading is available."
         ),
     )
@@ -286,7 +237,7 @@ class DoctorDispositionInput(BaseModel):
             "admission / same-complaint-as-prior numerics a patient can't report "
             "at the bedside) OVERRIDES the self-reported prior_history / "
             "n_prior_admissions fields. Empty string for first-time / unknown "
-            "patients — then the self-report fields are used."
+            "patients - then the self-report fields are used."
         ),
     )
     med_lookup_json: str = Field(
@@ -296,24 +247,22 @@ class DoctorDispositionInput(BaseModel):
             "for a RETURNING patient (paste it verbatim). When provided, the "
             "patient's reconciled home-med list from their most recent prior visit "
             "OVERRIDES the self-reported medications_raw. Empty string for "
-            "first-time / unknown patients or when no prior med record exists — "
+            "first-time / unknown patients or when no prior med record exists - "
             "then the self-reported medications are parsed instead."
         ),
     )
 
 
-# ---------------------------------------------------------------------------
 # CrewAI Tool
-# ---------------------------------------------------------------------------
 class DoctorDispositionTool(BaseTool):
     name: str = "doctor_disposition_tool"
     description: str = (
         "Refines the triage admit/discharge prediction using ALL data collected "
-        "so far: triage features (via the soft cascade — full 5-class acuity "
+        "so far: triage features (via the soft cascade - full 5-class acuity "
         "softmax + triage disposition probability), snapshot vitals, longitudinal "
         "vital fallback, cardiac rhythm, medications, and past medical history. "
         "The underlying model is a calibrated binary classifier trained on the "
-        "FULL 425K ED stays (admit + discharge) — see "
+        "FULL 425K ED stays (admit + discharge) - see "
         "docs/agents/doctor-agent.md#doctor-disposition-v3 for the per-subgroup "
         "lift and ECE 0.0036 calibration story. Returns calibrated admit/discharge "
         "probabilities and the binary decision at threshold 0.40 (tuned from 0.50). ALWAYS call this "
@@ -354,7 +303,7 @@ class DoctorDispositionTool(BaseTool):
         triage_dispo_model = models["triage_dispo_model"]
         dispo_model = models["dispo_model"]
 
-        # ── 1. Demographics + arrival transport flags ──
+        # 1. Demographics + arrival transport flags
         age_val = max(0, min(120, age))
         gender_male = 1 if gender.lower() in ("male", "m") else 0
         at = arrival_transport.lower().replace(" ", "_")
@@ -363,14 +312,14 @@ class DoctorDispositionTool(BaseTool):
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
         is_walkin_mode = not (arrival_ambulance or arrival_helicopter)
 
-        # ── 2. Pain ──
+        # 2. Pain
         pain_val = max(-1, min(10, pain_score))
         pain_missing = 1 if pain_val < 0 else 0
 
-        # ── 3. Vital values — keep two copies:
-        #    (a) `vital_values` — imputed for the disposition model's own use
+        # ── 3. Vital values - keep two copies:
+        #    (a) `vital_values` - imputed for the disposition model's own use
         #        + downstream longitudinal fallback
-        #    (b) `vital_cascade` — NaN if missing OR if walk-in (so v3's
+        #    (b) `vital_cascade` - NaN if missing OR if walk-in (so v3's
         #        `_missing` flags compute correctly inside build_features)
         vitals_raw_in = {
             "temperature": temperature, "heartrate": heartrate,
@@ -409,7 +358,7 @@ class DoctorDispositionTool(BaseTool):
         hypertension = 1 if vital_values["sbp"] > 140 else 0
         hypotension = 1 if vital_values["sbp"] < 90 else 0
 
-        # ── 4. PMH — EHR lookup (preferred) OR ask-the-patient fallback ──
+        # 4. PMH - EHR lookup (preferred) OR ask-the-patient fallback
         # If patient_history_lookup_tool found a returning patient, its real
         # prior-encounter block (PMH flags + the days-since / same-complaint
         # numerics the bedside interview can't recover) overrides the
@@ -466,7 +415,7 @@ class DoctorDispositionTool(BaseTool):
             if used_history_lookup else []
         )
 
-        # ── 5. Single-row df for the cascade input (v3 build_features) ──
+        # 5. Single-row df for the cascade input (v3 build_features)
         df_cascade = pd.DataFrame({
             "chiefcomplaint": [chief_complaints],
             "age": [age_val],
@@ -493,7 +442,7 @@ class DoctorDispositionTool(BaseTool):
         )
         triage_features = triage_features.reset_index(drop=True)
 
-        # ── 6. Soft cascade — full triage v3 acuity softmax + dispo prob ──
+        # 6. Soft cascade - full triage v3 acuity softmax + dispo prob
         acuity_proba = acuity_model.predict_proba(triage_features)[0]
         predicted_acuity_int = int(np.argmax(acuity_proba)) + 1
         triage_features_disp = triage_features.copy()
@@ -506,7 +455,7 @@ class DoctorDispositionTool(BaseTool):
             triage_features[f"triage_acuity_proba_{k + 1}"] = float(acuity_proba[k])
         triage_features["triage_disposition_proba_admit"] = triage_dispo_proba_admit
 
-        # ── 7. Medications — EHR lookup (preferred) OR ask-the-patient ──
+        # 7. Medications - EHR lookup (preferred) OR ask-the-patient
         # If patient_history_lookup_tool returned a med_block (returning patient
         # with a prior reconciled home-med list), it OVERRIDES the self-reported
         # medications; otherwise parse the patient-reported med text. Mirrors the
@@ -523,11 +472,11 @@ class DoctorDispositionTool(BaseTool):
         )
         meds_df = pd.DataFrame({col: [med_info[col]] for col in MED_FEATURE_COLS})
 
-        # ── 8. Longitudinal vital block ──
+        # 8. Longitudinal vital block
         # If the nurse supplied a multi-reading trajectory, build REAL
         # min/max/last/delta + abnormal-reading counts from it (and set
         # has_longitudinal_vitals=1). Otherwise fall back to the single
-        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) — the
+        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) - the
         # historical behavior. Snapshot-only systematically under-states the
         # admit probability vs the training distribution, so the trajectory
         # path matters for disposition accuracy.
@@ -544,21 +493,21 @@ class DoctorDispositionTool(BaseTool):
         long_df = pd.DataFrame({col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS})
         used_trajectory = int(long_data["has_longitudinal_vitals"]) == 1
 
-        # ── 9. Assemble final feature matrix (matches train_doctor_disposition) ──
+        # 9. Assemble final feature matrix (matches train_doctor_disposition)
         features = pd.concat([triage_features, meds_df, long_df], axis=1)
 
-        # ── 10. Predict (calibrated) ──
+        # 10. Predict (calibrated)
         proba = dispo_model.predict_proba(features)[0]
         p_discharge = float(proba[0])
         p_admit = float(proba[1])
         is_admitted = p_admit >= DECISION_THRESHOLD
         confidence = max(p_admit, p_discharge)
 
-        # ── Comparison with triage ──
+        # Comparison with triage
         triage_admit_at_threshold = triage_dispo_proba_admit >= DECISION_THRESHOLD
         flipped = (triage_admit_at_threshold != is_admitted)
 
-        # ── Concise reasoning bullets from top-signal features ──
+        # Concise reasoning bullets from top-signal features
         # Bands are anchored to DECISION_THRESHOLD so the prose always agrees
         # with the binary decision (a case just above the threshold is described
         # as a borderline admit, not a "modest discharge").
@@ -570,23 +519,23 @@ class DoctorDispositionTool(BaseTool):
             reasoning.append("High admit probability.")
         elif _margin >= 0 and _margin <= 0.10:
             reasoning.append(
-                f"Borderline admit — just above the {DECISION_THRESHOLD:.2f} threshold."
+                f"Borderline admit - just above the {DECISION_THRESHOLD:.2f} threshold."
             )
         elif _margin > 0.10:
             reasoning.append("Modest admit probability.")
         elif _margin < 0 and _margin >= -0.10:
             reasoning.append(
-                f"Borderline discharge — just below the {DECISION_THRESHOLD:.2f} threshold."
+                f"Borderline discharge - just below the {DECISION_THRESHOLD:.2f} threshold."
             )
         else:
             reasoning.append("High discharge probability.")
         if age_val >= 65:
             reasoning.append(
-                "Elderly patient (age >= 65) — model gains substantial signal in this subgroup."
+                "Elderly patient (age >= 65) - model gains substantial signal in this subgroup."
             )
         if n_prior_adm_val >= 1:
             reasoning.append(
-                f"Patient reports {n_prior_adm_val} prior hospital admission(s) — strong prior for repeat admission."
+                f"Patient reports {n_prior_adm_val} prior hospital admission(s) - strong prior for repeat admission."
             )
         if any((fever, tachycardia, hypoxia, hypotension, hypertension)):
             abn = [name for name, flag in [
@@ -603,10 +552,10 @@ class DoctorDispositionTool(BaseTool):
             )
         if bucket and bucket != "sinus":
             reasoning.append(
-                f"Non-sinus cardiac rhythm reported ('{bucket}') — irregular-rhythm flag set."
+                f"Non-sinus cardiac rhythm reported ('{bucket}') - irregular-rhythm flag set."
             )
 
-        # ── Build result ──
+        # Build result
         result = {
             "patient_summary": {
                 "chief_complaints": [c.strip() for c in chief_complaints.split(",") if c.strip()],
@@ -676,7 +625,7 @@ class DoctorDispositionTool(BaseTool):
                 ),
                 "no_history_fallback": bool(pmh_no_history),
                 # EHR lookup: when True, the PMH block came from the real prior
-                # record (patient_history_lookup_tool) rather than self-report —
+                # record (patient_history_lookup_tool) rather than self-report -
                 # including the days-since / same-complaint numerics below.
                 "used_history_lookup": bool(used_history_lookup),
                 "history_lookup_numerics": ({

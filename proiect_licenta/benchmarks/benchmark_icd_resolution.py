@@ -1,34 +1,18 @@
-"""Benchmark: Stage-2 exact-ICD resolution — Doctor v3_base (pre-nurse) vs v3-nurse.
+"""Benchmark: Stage-2 exact-ICD resolution, doctor v3_base vs v3-nurse.
 
-Both Doctor v3 diagnosis models share one test split, and the Stage-2 resolver
-(built by `uv run train_icd_resolver`) is model-agnostic — its candidate codes +
-prototype centroids come from the shared training split, not from either
-diagnosis model. So the **oracle** metrics (which use the true category) are
-identical for both models and reported once; only the **end-to-end** metrics
-differ, isolating how much the nurse-collected data improves exact-ICD recall.
+Both v3 diagnosis models share one test split, and the resolver (built by
+`uv run train_icd_resolver`) is model-agnostic, so the oracle metrics (using the
+true category) are identical for both and reported once; only the end-to-end
+metrics differ, isolating how much nurse data improves exact-ICD recall.
+Evaluated at two granularities (3-char rollup and full code) and three blend
+variants (tuned alpha, prevalence-only, cosine-only), reporting oracle-category,
+end-to-end, and conditional recall per (granularity, variant).
 
-Evaluated at two granularities (3-char rollup = headline, full code = secondary)
-and three blend variants:
-
-  - blend       : the resolver's tuned alpha (cosine + prevalence)
-  - prevalence  : alpha = 0 (frequency-only baseline)
-  - cosine      : alpha = 1 (prototype-cosine only)
-
-Metrics reported per (granularity, variant):
-  - Oracle-category : within the TRUE category, is the true code in top-5/top-10?
-                      (isolates Stage-2 from Stage-1 category errors)
-  - End-to-end      : across the top-5 PREDICTED categories, is the true code in
-                      the union of (top-5 cats x top-5 codes), or the flat top-10
-                      ranked by P(category) x score?
-  - Conditional     : end-to-end recall among rows whose true category is in the
-                      predicted top-5 (removes the Stage-1 category ceiling).
-
-Run: ``uv run python benchmarks/benchmark_icd_resolution.py``
+Run: uv run python benchmarks/benchmark_icd_resolution.py
 """
-# Force UTF-8 stdout/stderr BEFORE crewai is imported (it wraps the streams).
-# The v3 loader's PMH step prints non-cp1252 chars (e.g. "≥"), which crash a
-# piped Windows console (cp1252). Mirrors the guard in main.py. errors="replace"
-# guarantees a stray char never aborts the run.
+# Force UTF-8 stdout before crewai wraps the streams. The v3 loader's PMH step
+# prints non-cp1252 characters that otherwise crash a piped Windows console.
+# Mirrors the guard in main.py; errors="replace" keeps a stray char from aborting.
 import sys
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -74,9 +58,7 @@ TOP_CATS = 5
 
 
 def print_section(title):
-    print(f"\n{'='*72}")
     print(f"  {title}")
-    print(f"{'='*72}")
 
 
 def _attach_icd_version(df: pd.DataFrame) -> pd.DataFrame:
@@ -140,7 +122,7 @@ def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx
     Returns a dict ``{"r5", "r10", "scored", "graded": {name: (g5, g10)}}`` where
     the graded scores give partial credit (max similarity over the top-k) for
     clinically-close misses. ``graded@k >= r{k}`` always (sim of a code with
-    itself is 1). Strict numbers are byte-identical to the pre-graded version.
+    itself is 1). Strict numbers are unchanged from the pre-graded version.
     """
     hit1 = hit3 = hit5 = hit10 = scored = 0
     rr_sum = 0.0                              # sum of reciprocal ranks of the true code
@@ -163,8 +145,8 @@ def _oracle_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, true_cat_idx
         top5 = codes_arr[order[:, :K_PER_CAT]]
         top10 = codes_arr[order[:, :K_FLAT]]
         # Additive @1/@3 + MRR of the true code (full ranking). Vectorized over
-        # this category's rows; strict @5/@10 below stay byte-identical to the
-        # original per-row set membership check.
+        # this category's rows; strict @5/@10 below match the original per-row set
+        # membership check.
         ranked = codes_arr[order]
         tc_col = true_codes[rows]
         match = ranked == tc_col[:, None]
@@ -202,7 +184,7 @@ def _end_to_end_recall(Q_test, physio_test, pmh_test, has_pmh, df_test, proba,
     """End-to-end recall: union(top-5 cats x top-5 codes) and flat top-10.
 
     Returns a dict with the strict union/flat/conditional recall + category
-    accuracy, plus per-grader graded (union, flat, cond) — the max similarity of
+    accuracy, plus per-grader graded (union, flat, cond) - the max similarity of
     the true code to the codes in the predicted set, giving partial credit for
     near misses. The conditional recall restricts to rows whose true category is
     in the predicted top-5 (removes the Stage-1 ceiling). `subset_mask` restricts
@@ -353,9 +335,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
     ``artifacts/benchmarks/icd_resolution_graded.json``). Importable so the
     tabular orchestrator can fold these numbers into one master JSON without a
     second data load."""
-    print("\n" + "#" * 72)
-    print("  STAGE-2 EXACT-ICD BENCHMARK — Doctor v3_base (pre-nurse) vs v3 with-nurse")
-    print("#" * 72)
+    print("  STAGE-2 EXACT-ICD BENCHMARK - Doctor v3_base (pre-nurse) vs v3 with-nurse")
 
     # 1. Load once + reproduce the SHARED v3_base / v3-nurse split.
     df = load_v3_data()
@@ -418,7 +398,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
     print(f"  n_train={resolver['n_train']:,} | tuned weights (text/vit/prev): "
           f"blend={w_novit['text']:.1f}/{w_novit['vit']:.1f}/{w_novit['prev']:.1f}  "
           f"blend+vitals={w_full['text']:.1f}/{w_full['vit']:.1f}/{w_full['prev']:.1f}")
-    print("  (Stage-2 index is shared — candidates/centroids do NOT depend on the diagnosis")
+    print("  (Stage-2 index is shared - candidates/centroids do NOT depend on the diagnosis")
     print("   model; vitals are the patient's snapshot triage vitals, z-scored.)")
 
     # 2b. Graded near-miss metrics (evaluation-only; partial credit for clinically
@@ -523,9 +503,9 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
     def _graded_pair(gradedmap, keys):
         return {e: dict(zip(keys, v)) for e, v in gradedmap.items()}
 
-    # 3. Stage-2 ORACLE ceiling — model-INDEPENDENT (uses the TRUE category, so it
+    # 3. Stage-2 ORACLE ceiling - model-INDEPENDENT (uses the TRUE category, so it
     #    is identical for v3_base and v3-nurse; reported once).
-    print_section("STAGE-2 ORACLE CEILING (shared — within the true category)")
+    print_section("STAGE-2 ORACLE CEILING (shared - within the true category)")
     for g in icdr.GRANULARITIES:
         gindex = resolver["granularities"][g]
         code_col = "rollup_code" if g == "rollup" else "icd_code"
@@ -560,7 +540,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
             } for name in variants
         }
 
-    # 4. END-TO-END per diagnosis model — this is where nurse data matters.
+    # 4. END-TO-END per diagnosis model - this is where nurse data matters.
     models = [
         ("v3_base (pre-nurse)", DOCTOR_V3_BASE_DIR, Xb_test),
         ("v3 with-nurse", DOCTOR_V3_DIR, Xn_test),
@@ -575,7 +555,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
             nurse_proba, nurse_top5 = proba, top5
         cat_top1 = (np.argmax(proba, axis=1) == true_cat_idx).mean()
         cat_top5 = (top5 == true_cat_idx[:, None]).any(axis=1).mean()
-        print_section(f"END-TO-END — {model_name}")
+        print_section(f"END-TO-END - {model_name}")
         print(f"  Stage-1 category recall: top-1={cat_top1:.4f}  top-5={cat_top5:.4f}")
         for g in icdr.GRANULARITIES:
             gindex = resolver["granularities"][g]
@@ -613,7 +593,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
             }
 
     # 5. Before/after-nurse summary (headline = blend+vitals).
-    print_section(f"BEFORE/AFTER NURSE — exact-ICD end-to-end lift ({HEADLINE})")
+    print_section(f"BEFORE/AFTER NURSE - exact-ICD end-to-end lift ({HEADLINE})")
     base_name, nurse_name = models[0][0], models[1][0]
     for g in icdr.GRANULARITIES:
         label = "3-char rollup" if g == "rollup" else "full code"
@@ -642,11 +622,11 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
             },
         }
 
-    # 5b. Gated PMH term — only patients WITH prior history get the 4th term.
+    # 5b. Gated PMH term - only patients WITH prior history get the 4th term.
     w_pmh = resolver.get("weights_pmh")
     if w_pmh is not None and pmh_test is not None and has_pmh is not None:
         n_has, n_no = int(has_pmh.sum()), int((~has_pmh).sum())
-        print_section(f"PMH-GATED TERM — has-PMH {n_has:,} / no-PMH {n_no:,} "
+        print_section(f"PMH-GATED TERM - has-PMH {n_has:,} / no-PMH {n_no:,} "
                       f"({100*has_pmh.mean():.0f}% have history)")
         print(f"  no-PMH weights (text/vit/prev) = "
               f"{w_full['text']:.1f}/{w_full['vit']:.1f}/{w_full['prev']:.1f}  |  "
@@ -711,7 +691,7 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
 
     # 6. Spot-check (v3 with-nurse, blend+vitals, rollup).
     proba, top5_cat_idx = nurse_proba, nurse_top5
-    print_section("SPOT-CHECK (v3 with-nurse, blend+vitals, rollup) — first 3 test stays")
+    print_section("SPOT-CHECK (v3 with-nurse, blend+vitals, rollup) - first 3 test stays")
     gindex = resolver["granularities"]["rollup"]
     for r in range(min(3, len(df_test))):
         complaint = df_test["chiefcomplaint"].iloc[r]
@@ -746,12 +726,10 @@ def run_icd_benchmark(out_path: "Path | None" = None) -> dict:
         json.dump(results, f, indent=2)
     print_section("RESULTS SAVED")
     print(f"  Detailed results -> {out_path}")
-    print(f"  Invariant graded@k >= strict recall@k — violations: "
+    print(f"  Invariant graded@k >= strict recall@k - violations: "
           f"{results['_meta']['invariant_graded_ge_strict_violations']} (expected 0)")
 
-    print("\n" + "#" * 72)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 72 + "\n")
+    print("Benchmark complete.")
     return results
 
 

@@ -1,9 +1,9 @@
-"""Constrained Optuna hyperparameter sweep for the Triage v3 XGBoost heads.
+"""Constrained Optuna sweep for the triage v3 XGBoost heads.
 
-REPORTING-ONLY. This sweep searches only the inherited "Group 2" XGBoost
+Reporting-only. This sweep searches only the inherited "Group 2" XGBoost
 regularization knobs (max_depth, subsample, colsample_*, min_child_weight,
-gamma, reg_alpha, reg_lambda). The documented "Group 1" clinical-safety
-choices are FROZEN and imported verbatim from train_triage_v3:
+gamma, reg_alpha, reg_lambda). The documented "Group 1" clinical-safety choices
+are frozen and imported verbatim from train_triage_v3:
 
     learning_rate=0.01, n_estimators=5000, early_stopping_rounds=150,
     ESI_EXTREME_BOOST sample weights, neg_quadratic_kappa early-stopping metric.
@@ -13,12 +13,12 @@ output goes to a dedicated `artifacts/triage/v3/hpo/` subdir + a triage-only
 feature cache, so nothing produced by previous Colab notebooks is overwritten.
 
 Objective design (mirrors the thesis metrics in benchmark_triage_v3.evaluate_acuity):
-  * acuity      — maximize quadratic-weighted kappa (QWK) SUBJECT TO a hard
+  * acuity      - maximize quadratic-weighted kappa (QWK) SUBJECT TO a hard
                   constraint: under-triage rate <= the incumbent's under-triage
                   rate. The current (hand-tuned) Group-2 values are enqueued as
                   trial 0 and define that baseline in-sample on the inner-val
                   split. We never optimize headline accuracy.
-  * disposition — maximize ROC AUC (binary; no ordinal/safety constraint).
+  * disposition - maximize ROC AUC (binary; no ordinal/safety constraint).
 
 Resume is built in (mirrors scripts/tune_doctor_v3.py): every trial is committed
 to a SQLite study on Drive; `load_if_exists=True` means a fresh Colab session
@@ -32,9 +32,9 @@ Stages:
                           split and write triage_hpo_results.json (thesis table)
 
 Pre-flight:
-    --selftest            synthetic, CPU-only, no MIMIC/GPU — validates all
+    --selftest            synthetic, CPU-only, no MIMIC/GPU - validates all
                           plumbing (study + JSON log + resume) in seconds
-    --smoke               real-data subsample, throwaway paths, 2 trials —
+    --smoke               real-data subsample, throwaway paths, 2 trials -
                           run on Colab GPU BEFORE committing to a full sweep
 
 Usage on Colab (after symlinking artifacts/ + data/ to Drive):
@@ -53,12 +53,10 @@ from datetime import datetime
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
 # Python 3.12 / pydantic / optuna compatibility shim (copied verbatim from
 # scripts/tune_doctor_v3.py). Pydantic (via CrewAI) monkey-patches
 # warnings.warn with a filter that predates 3.12's skip_file_prefixes kwarg,
 # which optuna passes. Wrap it kwargs-tolerantly. Must run before `import optuna`.
-# ---------------------------------------------------------------------------
 import warnings as _w
 if not getattr(_w, "_optuna_compat_patched", False):
     _patched_warn = _w.warn
@@ -91,7 +89,7 @@ from xgboost import XGBClassifier
 from proiect_licenta.paths import (
     TRIAGE_V3_DIR, TRIAGE_V3_HPO_DIR, TRIAGE_TUNE_CACHE_DIR,
 )
-# Frozen Group-1 config + reusable feature/metric machinery — single source of
+# Frozen Group-1 config + reusable feature/metric machinery - single source of
 # truth is the training pipeline; we never re-implement it here.
 from proiect_licenta.training.train_triage_v3 import (
     load_and_clean_data, build_features,
@@ -104,14 +102,14 @@ from proiect_licenta.training.train_triage_v3 import (
 # own XGB_DEVICE at first import; in a Colab session where an earlier cell
 # imported that module before `XGB_DEVICE=cuda` was set (e.g. the self-test
 # cell), the cached constant would be stale "cpu" and every later run would
-# silently train on CPU. Reading os.environ here — this file's top level re-runs
-# on every `runpy.run_path` call, and is re-read in main() too — keeps the
+# silently train on CPU. Reading os.environ here - this file's top level re-runs
+# on every `runpy.run_path` call, and is re-read in main() too - keeps the
 # device correct regardless of cell order.
 XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
 # Early-stopping metric used DURING THE SEARCH only. The custom QWK metric
-# (neg_quadratic_kappa) runs in Python and forces a GPU→host round-trip every
+# (neg_quadratic_kappa) runs in Python and forces a GPU->host round-trip every
 # boosting round, which made each acuity trial take hours. The native mlogloss
 # is computed on-device and picks essentially the same iteration (the docs note
 # QWK early-stopping is "mostly cosmetic"; the sample-weight boost is the lever).
@@ -120,9 +118,7 @@ XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 SEARCH_EVAL_METRIC = "mlogloss"
 
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 ACUITY_STUDY_NAME = "triage_acuity_qwk"
 DISP_STUDY_NAME = "triage_disposition_auc"
 
@@ -143,10 +139,8 @@ FROZEN_GROUP2 = {
 ACUITY_CLASSES = [1, 2, 3, 4, 5]
 
 
-# ---------------------------------------------------------------------------
 # Group-2 search space (regularization box; ranges from tune_doctor_v3.py,
 # minus the frozen learning_rate). subsample is searched here too.
-# ---------------------------------------------------------------------------
 def suggest_group2(trial) -> dict:
     return {
         "max_depth": trial.suggest_int("max_depth", 4, 12),
@@ -160,17 +154,15 @@ def suggest_group2(trial) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Group-1 search (the clinical-safety levers themselves). MULTI-OBJECTIVE per
 # the triage future-work plan: the boost vector + disposition threshold move the
 # safety profile, so we report a Pareto frontier rather than collapse it into one
 # constrained scalar. Group-2 is frozen at FROZEN_GROUP2 throughout. ESI 3/4 are
 # pinned to 1.0 as the reference floor (only the extreme classes are boosted).
-# ---------------------------------------------------------------------------
 ACUITY_G1_STUDY_NAME = "triage_acuity_g1"
 DISP_G1_STUDY_NAME = "triage_disposition_g1"
 
-# Incumbent Group-1 — the documented iter-2 config (train_triage_v3). Enqueued as
+# Incumbent Group-1 - the documented iter-2 config (train_triage_v3). Enqueued as
 # trial 0 of each study so it sits on the frontier for comparison.
 FROZEN_GROUP1_ACUITY = {
     "learning_rate": ACUITY_LEARNING_RATE,      # 0.01
@@ -230,10 +222,8 @@ def _g1_disp_gcfg(base: dict, p: dict) -> dict:
     return g
 
 
-# ---------------------------------------------------------------------------
 # Per-trial XGBoost iteration progress bar (tqdm). Optional; silent fallback.
 # Mirrors train_triage_v3._make_xgb_progress_callback.
-# ---------------------------------------------------------------------------
 def _make_trial_progress_callback(n_total: int, desc: str):
     try:
         from tqdm.auto import tqdm as _tqdm
@@ -264,11 +254,9 @@ def _make_trial_progress_callback(n_total: int, desc: str):
     return _TqdmTrialCallback()
 
 
-# ---------------------------------------------------------------------------
 # Frozen training (Group-1 fixed; Group-2 passed in)
-# ---------------------------------------------------------------------------
 def _acuity_sample_weights(y_train: pd.Series, boost_map: dict | None = None) -> pd.Series:
-    """sqrt-balanced base weight * ESI boost — identical to
+    """sqrt-balanced base weight * ESI boost - identical to
     train_triage_v3.train_acuity_model when boost_map is None (Group-1 frozen).
 
     The Group-1 sweep passes a candidate boost vector here; Group-2 callers leave
@@ -349,9 +337,7 @@ def train_disposition(X_tr, y_tr, X_val, y_val, group2, gcfg, desc):
     return model
 
 
-# ---------------------------------------------------------------------------
-# Metrics — replicate benchmark_triage_v3.evaluate_acuity:57-81 exactly.
-# ---------------------------------------------------------------------------
+# Metrics - replicate benchmark_triage_v3.evaluate_acuity:57-81 exactly.
 def acuity_metrics(y_true: pd.Series, y_pred: np.ndarray) -> dict:
     yt = y_true.values
     errors = y_pred - yt
@@ -376,7 +362,7 @@ def disposition_metrics(y_true: pd.Series, y_pred, y_prob) -> dict:
 def disposition_metrics_at_threshold(y_true: pd.Series, y_prob, threshold: float) -> dict:
     """Group-1 disposition metrics at a candidate decision threshold. under_rate
     is the under-triage rate (a true admit predicted as discharge) as a fraction
-    of the whole population — the dangerous error, analogous to the acuity
+    of the whole population - the dangerous error, analogous to the acuity
     under_rate; the Pareto study trades it against overall accuracy. roc_auc is
     threshold-free, logged as a reference."""
     yt = y_true.values if hasattr(y_true, "values") else np.asarray(y_true)
@@ -394,9 +380,7 @@ def disposition_metrics_at_threshold(y_true: pd.Series, y_prob, threshold: float
     return out
 
 
-# ---------------------------------------------------------------------------
 # Feature cache (float32 parquet). Distinct dir from the doctor sweep.
-# ---------------------------------------------------------------------------
 def load_or_build_cache(cache_dir: Path, rebuild: bool, subsample: int | None):
     """Return (X_train, X_test, y_train_df, y_test_df). y_*_df has columns
     'acuity' (1-5) and 'admitted' (0/1). Features fit on OUTER-TRAIN only."""
@@ -462,9 +446,7 @@ def load_or_build_cache(cache_dir: Path, rebuild: bool, subsample: int | None):
     return X_train, X_test, y_train, y_test
 
 
-# ---------------------------------------------------------------------------
-# Incremental JSON log — rewritten after every completed trial (atomic).
-# ---------------------------------------------------------------------------
+# Incremental JSON log - rewritten after every completed trial (atomic).
 def _atomic_write_json(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -576,9 +558,7 @@ def _disposition_block(study, best) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Stage: acuity (constrained QWK)
-# ---------------------------------------------------------------------------
 def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
     y_acuity = y_train["acuity"].reset_index(drop=True)
     X_in_tr, X_in_val, y_in_tr, y_in_val = train_test_split(
@@ -630,7 +610,6 @@ def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
                    gc_after_trial=True)
 
     best = best_feasible_trial(study)
-    print("\n" + "=" * 60)
     if best is None:
         print("  No feasible trial yet (none beat the under-triage baseline).")
         return
@@ -642,9 +621,7 @@ def run_acuity_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
     _update_tuned_params(out_dir, "acuity", _acuity_block(study, best))
 
 
-# ---------------------------------------------------------------------------
 # Stage: disposition (ROC AUC, cascades on predicted_acuity)
-# ---------------------------------------------------------------------------
 def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_dir):
     tuned = _read_tuned_params(out_dir)
     acu = (tuned or {}).get("acuity")
@@ -704,7 +681,6 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_
                    gc_after_trial=True)
 
     best = study.best_trial
-    print("\n" + "=" * 60)
     print(f"  Best disposition trial: #{best.number}  auc={best.value:.4f}  "
           f"acc={best.user_attrs['accuracy']*100:.2f}%")
     for k, v in best.params.items():
@@ -712,9 +688,7 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, X_train, y_train, out_
     _update_tuned_params(out_dir, "disposition", _disposition_block(study, best))
 
 
-# ---------------------------------------------------------------------------
-# Stage: report — incumbent vs best-feasible on the OUTER test split.
-# ---------------------------------------------------------------------------
+# Stage: report - incumbent vs best-feasible on the OUTER test split.
 def run_report_stage(gcfg, X_train, y_train, X_test, y_test, out_dir):
     live_acuity = TRIAGE_V3_DIR / "acuity_model.joblib"
     live_disp = TRIAGE_V3_DIR / "disposition_model.joblib"
@@ -732,7 +706,7 @@ def run_report_stage(gcfg, X_train, y_train, X_test, y_test, out_dir):
     results = {"generated_at": datetime.now().isoformat(),
                "test_rows": int(len(X_test))}
 
-    # ---- Acuity ----
+    # Acuity
     print("\n  [acuity] incumbent (live iter-2 model) on outer-test ...")
     inc_model = joblib.load(live_acuity)
     inc_pred = inc_model.predict(X_test) + 1
@@ -754,11 +728,11 @@ def run_report_stage(gcfg, X_train, y_train, X_test, y_test, out_dir):
         acu_block["delta_qwk"] = best_m["qwk"] - inc_m["qwk"]
         acu_block["delta_under_rate"] = best_m["under_rate"] - inc_m["under_rate"]
     else:
-        print("  [acuity] no tuned acuity block yet — incumbent only.")
+        print("  [acuity] no tuned acuity block yet - incumbent only.")
         best_model = inc_model  # for cascade below
     results["acuity"] = acu_block
 
-    # ---- Disposition (cascade on predicted_acuity) ----
+    # Disposition (cascade on predicted_acuity)
     print("\n  [disposition] incumbent (live models) on outer-test ...")
     inc_disp = joblib.load(live_disp)
     X_test_inc = X_test.copy()
@@ -821,9 +795,7 @@ def _print_report_summary(results):
             print(f"    best:           acc={db['accuracy']*100:.2f}%  auc={db['roc_auc']}")
 
 
-# ---------------------------------------------------------------------------
 # tuned_params_triage.json read/update (preserve sibling blocks across stages)
-# ---------------------------------------------------------------------------
 def _tuned_path(out_dir: Path, fname: str = "tuned_params_triage.json") -> Path:
     return out_dir / fname
 
@@ -846,11 +818,9 @@ def _update_tuned_params(out_dir: Path, key: str, block: dict, quiet: bool = Fal
 G1_TUNED_FNAME = "tuned_params_triage_g1.json"
 
 
-# ===========================================================================
-# Group-1 multi-objective sweep (NSGA-II) — the clinical-safety levers.
+# Group-1 multi-objective sweep (NSGA-II) - the clinical-safety levers.
 # Group-2 stays frozen at FROZEN_GROUP2; we report a Pareto frontier instead of
 # a single constrained scalar (per the triage Group-1 future-work plan).
-# ===========================================================================
 def _esi5_recall(y_true, y_pred) -> float:
     return float(recall_score(y_true, y_pred, labels=[5], average="macro",
                               zero_division=0))
@@ -1070,7 +1040,6 @@ def run_disposition_stage_g1(args, gcfg, optuna, X_train, y_train, out_dir):
 
 
 def _print_pareto(study, obj_names, stage):
-    print("\n" + "=" * 60)
     front = study.best_trials
     print(f"  Pareto front ({stage}): {len(front)} non-dominated trial(s)")
     for t in sorted(front, key=lambda t: t.number):
@@ -1078,12 +1047,10 @@ def _print_pareto(study, obj_names, stage):
         print(f"    trial #{t.number:3d} | {vstr}")
     sel = _g1_select(study, stage)
     if sel:
-        print(f"  Chaining default (selected): trial #{sel['trial']} — {sel['rationale']}")
+        print(f"  Chaining default (selected): trial #{sel['trial']} - {sel['rationale']}")
 
 
-# ---------------------------------------------------------------------------
-# Group-1 report — Pareto frontier on the held-out OUTER test split.
-# ---------------------------------------------------------------------------
+# Group-1 report - Pareto frontier on the held-out OUTER test split.
 def _acuity_test_metrics(model, X_test, y_te) -> dict:
     pred = model.predict(X_test) + 1
     m = acuity_metrics(y_te, pred)
@@ -1111,7 +1078,7 @@ def run_report_stage_g1(gcfg, X_train, y_train, X_test, y_test, out_dir):
     results = {"generated_at": datetime.now().isoformat(),
                "test_rows": int(len(X_test)), "mode": "multi-objective"}
 
-    # ---- Acuity frontier ----
+    # Acuity frontier
     print("\n  [acuity] incumbent (live iter-2 model) on outer-test ...")
     inc_model = joblib.load(live_acuity)
     inc_m = _acuity_test_metrics(inc_model, X_test, y_acuity_te)
@@ -1136,7 +1103,7 @@ def run_report_stage_g1(gcfg, X_train, y_train, X_test, y_test, out_dir):
     acu_block["selected"] = tuned.get("acuity", {}).get("selected")
     results["acuity"] = acu_block
 
-    # ---- Disposition frontier (cascade with the incumbent/live acuity) ----
+    # Disposition frontier (cascade with the incumbent/live acuity)
     print("\n  [disposition] incumbent (live models) on outer-test ...")
     inc_disp = joblib.load(live_disp)
     X_test_casc = X_test.copy()
@@ -1199,13 +1166,9 @@ def _print_report_summary_g1(results):
                   f"under={fm['under_rate']*100:.2f}%  thr={fm['threshold']:.2f}")
 
 
-# ---------------------------------------------------------------------------
 # Self-test (synthetic, local, no MIMIC / no GPU)
-# ---------------------------------------------------------------------------
 def run_selftest():
-    print("=" * 60)
-    print("  SELFTEST — synthetic data, CPU, throwaway paths")
-    print("=" * 60)
+    print("  SELFTEST - synthetic data, CPU, throwaway paths")
     import optuna
     from optuna.samplers import TPESampler
 
@@ -1272,9 +1235,7 @@ def run_selftest_g1():
     """Synthetic CPU plumbing test for the multi-objective Group-1 path:
     NSGA-II study builds, trials complete, Pareto front + selection are
     extracted, tuned_params_triage_g1.json is written, live models untouched."""
-    print("=" * 60)
-    print("  SELFTEST (Group-1, multi-objective) — synthetic, CPU, throwaway paths")
-    print("=" * 60)
+    print("  SELFTEST (Group-1, multi-objective) - synthetic, CPU, throwaway paths")
     import optuna
     from optuna.samplers import NSGAIISampler
 
@@ -1371,9 +1332,7 @@ def _apply_group1_best(gcfg: dict, out_dir: Path) -> dict:
     return g
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def _make_gcfg(smoke: bool) -> dict:
     """Group-1 frozen training config. Smoke reduces trees purely for speed
     (throwaway numbers); full runs use the documented frozen constants."""
@@ -1467,10 +1426,8 @@ def main():
         gcfg["acuity_n_estimators"] = min(gcfg["acuity_n_estimators"], args.search_tree_cap)
         gcfg["disp_n_estimators"] = min(gcfg["disp_n_estimators"], args.search_tree_cap)
 
-    print("=" * 60)
-    print(f"  Triage v3 HPO — group={args.group} stage={args.stage}"
+    print(f"  Triage v3 HPO - group={args.group} stage={args.stage}"
           f"{'  [SMOKE]' if args.smoke else ''}")
-    print("=" * 60)
     print(f"  storage:   {args.storage}")
     print(f"  out_dir:   {out_dir}")
     print(f"  cache_dir: {cache_dir}")
@@ -1478,10 +1435,9 @@ def main():
     if args.search_tree_cap and args.stage in ("acuity", "disposition"):
         print(f"  search tree cap: {args.search_tree_cap}")
     if XGB_DEVICE == "cpu":
-        print("  WARNING: device is CPU — training will be very slow. Set "
+        print("  WARNING: device is CPU - training will be very slow. Set "
               "XGB_DEVICE=cuda (and use a GPU runtime) before running.")
-    print(f"  REPORTING-ONLY: live models in {TRIAGE_V3_DIR} will NOT be modified.")
-    print("=" * 60)
+    print(f"  Reporting only: live models in {TRIAGE_V3_DIR} will NOT be modified.")
 
     X_train, X_test, y_train, y_test = load_or_build_cache(
         cache_dir, rebuild=args.rebuild_features,

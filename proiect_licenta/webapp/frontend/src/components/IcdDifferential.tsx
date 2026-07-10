@@ -8,7 +8,7 @@ export default function IcdDifferential({ exact }: { exact: any }) {
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2">
         <span className="label">Likely exact diagnoses (advisory)</span>
         <span className="chip border border-slate-200 bg-slate-50 text-slate-500">
-          Retrieval cascade — does not alter category/department
+          Retrieval cascade - does not alter category/department
         </span>
       </div>
       <ul className="divide-y divide-slate-100">

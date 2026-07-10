@@ -1,9 +1,8 @@
-"""A1 — Optuna hyperparameter sweep for the v3-nurse diagnosis model.
+"""Optuna hyperparameter sweep for the v3-nurse diagnosis model.
 
-Objective: macro-F1 across the 13 diagnosis classes (NOT flat accuracy).
-This explicitly trades a fraction of Digestive recall (~81%, dominant) for
-Infectious / Other recall (~20%, minority) — the thesis story is "useful
-across categories", not "high top-1 only".
+Objective: macro-F1 across the 13 diagnosis classes, not flat accuracy. This
+trades a fraction of Digestive recall (dominant) for Infectious/Other recall
+(minority), the "useful across categories" story rather than top-1 only.
 
 Pause/resume is built in: Optuna persists every trial to a SQLite study
 database in `artifacts/doctor/v3/optuna_study.db` (which lives on Drive
@@ -38,8 +37,8 @@ from pathlib import Path
 # CrewAI) monkey-patches warnings.warn with a filter that predates Python
 # 3.12's new skip_file_prefixes kwarg. Optuna's optuna_warn passes that kwarg
 # on 3.12, causing TypeError. Wrap the patched warn with a kwargs-tolerant
-# shim — preserves pydantic's filtering while accepting unknown kwargs. Must
-# run before `import optuna` (which it does — optuna is imported lazily inside
+# shim - preserves pydantic's filtering while accepting unknown kwargs. Must
+# run before `import optuna` (which it does - optuna is imported lazily inside
 # main()).
 import warnings as _w
 if not getattr(_w, "_optuna_compat_patched", False):
@@ -77,11 +76,9 @@ from proiect_licenta.training.train_nurse_v3 import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Feature cache — building the full v3-nurse feature matrix is slow (~30 min
+# Feature cache - building the full v3-nurse feature matrix is slow (~30 min
 # CPU, dominated by the discharge.csv PMH parse). Cache to parquet on Drive
 # so re-tuning sessions reuse it. `--rebuild-features` forces regeneration.
-# ---------------------------------------------------------------------------
 DEFAULT_CACHE_DIR = DERIVED_DIR / "tune_cache"
 
 
@@ -135,11 +132,9 @@ def load_or_build_cache(cache_dir: Path, rebuild: bool = False):
     return features, y_diag, y_dept, diagnosis_labels, department_labels
 
 
-# ---------------------------------------------------------------------------
-# Per-trial XGBoost iteration progress bar (tqdm). Optional — falls back to
+# Per-trial XGBoost iteration progress bar (tqdm). Optional - falls back to
 # silent training when tqdm isn't installed or XGBoost's callback API is
 # unavailable. Mirrors the helper used by train_nurse_v3._make_xgb_progress_callback.
-# ---------------------------------------------------------------------------
 def _make_trial_progress_callback(n_total: int, desc: str):
     try:
         from tqdm.auto import tqdm as _tqdm
@@ -170,9 +165,7 @@ def _make_trial_progress_callback(n_total: int, desc: str):
     return _TqdmTrialCallback()
 
 
-# ---------------------------------------------------------------------------
 # Optuna objective
-# ---------------------------------------------------------------------------
 def make_objective(
     X_inner_train, y_inner_train,
     X_inner_val, y_inner_val,
@@ -256,9 +249,7 @@ def make_objective(
     return objective
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--n-trials", type=int, default=10,
@@ -279,7 +270,7 @@ def main():
     args = ap.parse_args()
 
     # Lazy import so the rest of the script (cache loading, etc.) runs even
-    # in environments without optuna — useful for debugging the cache path.
+    # in environments without optuna - useful for debugging the cache path.
     try:
         import optuna
         from optuna.samplers import TPESampler
@@ -296,16 +287,13 @@ def main():
     storage_url = args.storage or f"sqlite:///{DOCTOR_V3_DIR / 'optuna_study.db'}"
     cache_dir = Path(args.cache_dir)
 
-    print("=" * 60)
-    print("  A1 — Optuna hyperparameter sweep (macro-F1 objective)")
-    print("=" * 60)
+    print("  A1 - Optuna hyperparameter sweep (macro-F1 objective)")
     print(f"  storage:     {storage_url}")
     print(f"  study_name:  {args.study_name}")
     print(f"  n_trials:    {args.n_trials}")
     print(f"  timeout:     {args.timeout}")
     print(f"  cache_dir:   {cache_dir}")
     print(f"  device:      {XGB_DEVICE}  tree_method: {XGB_TREE_METHOD}")
-    print("=" * 60)
 
     # 1. Load / build feature cache
     X, y_diag, y_dept, diagnosis_labels, department_labels = load_or_build_cache(
@@ -320,7 +308,7 @@ def main():
     print(f"\n  Outer split (matches train_nurse_v3): "
           f"train={len(X_train):,}, test={len(X_test):,}")
 
-    # 3. Inner train/val split for tuning — different random_state so this
+    # 3. Inner train/val split for tuning - different random_state so this
     #    isn't accidentally correlated with the outer test split.
     X_inner_train, X_inner_val, y_inner_train, y_inner_val = train_test_split(
         X_train, y_diag_train, test_size=0.2, random_state=1,
@@ -374,9 +362,7 @@ def main():
     )
 
     # 6. Final summary + write tuned_params.json
-    print("\n" + "=" * 60)
     print(f"  Tuning complete. Total trials in study: {len(study.trials)}")
-    print("=" * 60)
     best = study.best_trial
     print(f"  Best macro_f1: {best.value:.4f}  (trial #{best.number})")
     print(f"  Top-1 acc at best: "

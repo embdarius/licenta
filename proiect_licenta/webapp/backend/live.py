@@ -35,9 +35,7 @@ router = APIRouter(prefix="/api/live", tags=["live"])
 _ABORT = object()
 
 
-# ---------------------------------------------------------------------------
 # Per-session channel
-# ---------------------------------------------------------------------------
 class SessionChannel:
     """Thread-safe bridge between the crew thread and the browser."""
 
@@ -48,13 +46,13 @@ class SessionChannel:
         self.finished = threading.Event()
         self._seq = 0
 
-    # -- crew thread -> browser ------------------------------------------------
+    # crew thread -> browser
     def emit(self, event: dict) -> None:
         self._seq += 1
         event = {"seq": self._seq, **event}
         self.events.put(event)
 
-    # -- tool asks a question, blocks until the browser answers ---------------
+    # tool asks a question, blocks until the browser answers
     def ask(self, kind: str, prompt: str, meta: Optional[dict] = None) -> str:
         self.emit({"type": "question", "kind": kind, "prompt": prompt,
                    "meta": meta or {}})
@@ -63,7 +61,7 @@ class SessionChannel:
             raise RuntimeError("Session cancelled")
         return answer
 
-    # -- browser -> crew thread -----------------------------------------------
+    # browser -> crew thread
     def answer(self, text: str) -> None:
         try:
             self._answer.put_nowait(text)
@@ -85,9 +83,7 @@ class SessionChannel:
 _SESSIONS: dict[str, SessionChannel] = {}
 
 
-# ---------------------------------------------------------------------------
-# Telemetry — CrewAI event-bus listeners (registered once)
-# ---------------------------------------------------------------------------
+# Telemetry - CrewAI event-bus listeners (registered once)
 _LISTENERS_REGISTERED = False
 
 
@@ -184,9 +180,7 @@ def _coerce(value: Any) -> Any:
     return s
 
 
-# ---------------------------------------------------------------------------
 # Reasoning / task callbacks (closures over the channel)
-# ---------------------------------------------------------------------------
 def _make_step_callback(ch: SessionChannel):
     def step_callback(step: Any) -> None:
         thought = getattr(step, "thought", None)
@@ -213,9 +207,7 @@ def _make_task_callback(ch: SessionChannel):
     return task_callback
 
 
-# ---------------------------------------------------------------------------
 # Crew runner thread
-# ---------------------------------------------------------------------------
 def _run_crew(ch: SessionChannel, narrative: str) -> None:
     token = interaction.set_current_channel(ch)
     try:
@@ -244,9 +236,7 @@ def _run_crew(ch: SessionChannel, narrative: str) -> None:
         ch.finished.set()
 
 
-# ---------------------------------------------------------------------------
 # HTTP API
-# ---------------------------------------------------------------------------
 class StartRequest(BaseModel):
     narrative: str
 

@@ -1,19 +1,10 @@
-"""
-Data Pipeline for Doctor Agent v3 with nurse data — MIMIC-IV ED
+"""Doctor v3 training pipeline with nurse data (MIMIC-IV-ED).
 
-Same architecture and feature set as Doctor v2 in Phase A:
-  - chief complaints + demographics + triage predictions (cascading)
-  - vital signs (snapshot from triage.csv) + clinical flags
-  - medication features (medrecon.csv)
-
-Two changes vs v2:
-  1. The "Symptoms, Signs, Ill-Defined" catch-all class is excluded
-     from training and evaluation (13-class label space).
-  2. The 100K stratified sample cap is removed; trains on the full
-     filtered set (~102K admitted patients).
-
-Phase B will add longitudinal vitals + rhythm from `vitalsign.csv` —
-those features hook in here, alongside the existing snapshot vitals.
+Phase A mirrors Doctor v2 (complaints, demographics, cascading triage
+predictions, snapshot vitals + clinical flags, medications) with the catch-all
+class excluded (13 classes) and no sample cap (full ~102K admitted set). Phase B
+adds longitudinal vitals and rhythm from vitalsign.csv alongside the snapshot
+vitals.
 """
 
 import json
@@ -29,34 +20,30 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from xgboost import XGBClassifier
 
-# A4 — use FrozenEstimator + cv=None for the calibration wrapper. The older
+# A4 - use FrozenEstimator + cv=None for the calibration wrapper. The older
 # `cv="prefit"` shortcut is deprecated in sklearn 1.6 and removed in newer
 # versions; FrozenEstimator + cv=None is the forward-compatible replacement
 # (Colab currently ships sklearn 1.6.x which already errors on "prefit").
 try:
     from sklearn.frozen import FrozenEstimator  # sklearn >= 1.6
     _HAS_FROZEN = True
-except ImportError:  # pragma: no cover — falls back to legacy "prefit" string
+except ImportError:  # pragma: no cover - falls back to legacy "prefit" string
     FrozenEstimator = None  # type: ignore[assignment]
     _HAS_FROZEN = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
-# XGBoost device / tree method — env-var-driven so the same pipeline runs on
+# XGBoost device / tree method - env-var-driven so the same pipeline runs on
 # Colab GPU without code changes. Defaults reproduce the CPU runtime exactly.
 #   XGB_DEVICE       "cpu" (default) | "cuda" | "cuda:0" ...
 #   XGB_TREE_METHOD  "hist" (default; works on both CPU and GPU in xgboost >= 2.0)
 # Set both via `os.environ` (or `export`) before `uv run train_nurse_v3`.
-# ---------------------------------------------------------------------------
 XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
-# ---------------------------------------------------------------------------
 # Optional progress bars (tqdm.auto picks Jupyter widgets in Colab, plain bar
 # in a terminal). If tqdm isn't installed, fall back to a no-op wrapper so
 # local `uv run train_nurse_v3` still works without an extra dependency.
-# ---------------------------------------------------------------------------
 try:
     from tqdm.auto import tqdm as _tqdm  # type: ignore
 
@@ -105,9 +92,7 @@ def _make_xgb_progress_callback(n_total: int, desc: str):
 
     return _TqdmCallback()
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 # v3 with-nurse reuses triage v1 base artifacts (tfidf, severity_map,
 # cascading triage models) for feature consistency with v3 base, then adds
 # vital + medication features on top.
@@ -121,9 +106,7 @@ from proiect_licenta.paths import (
 )
 from proiect_licenta.loader_cache import disk_cached
 
-# ---------------------------------------------------------------------------
 # Reuse from doctor pipeline (single source of truth for label maps)
-# ---------------------------------------------------------------------------
 from proiect_licenta.training.train_doctor import (
     CATCH_ALL_LABEL,
     DIAGNOSIS_GROUP_MAP,
@@ -139,10 +122,8 @@ from proiect_licenta.pmh_features import (
     fill_missing_pmh_columns,
 )
 
-# ---------------------------------------------------------------------------
 # Reuse vital + medication helpers from train_nurse (v2)
-# ---------------------------------------------------------------------------
-# These helpers are stable and shared between v2 and v3 — no need to
+# These helpers are stable and shared between v2 and v3 - no need to
 # duplicate them. Phase B will add a sibling `_aggregate_vitalsigns`
 # helper here for longitudinal aggregation.
 from proiect_licenta.training.train_nurse import (
@@ -157,9 +138,7 @@ from proiect_licenta.tools.med_vocab import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Longitudinal vitalsign.csv aggregation (Phase B)
-# ---------------------------------------------------------------------------
 # vitalsign.csv records vitals at multiple ED time points per stay. We
 # aggregate per stay into trajectory features (min/max/last/delta) and
 # rhythm flags. Time-windowed to [intime, intime + 4h] to avoid leaking
@@ -280,14 +259,14 @@ def _aggregate_vitalsigns(
             chunks.append(chunk)
 
     if not chunks:
-        print("  vitalsign.csv: no rows matched the admitted stays — empty result.")
+        print("  vitalsign.csv: no rows matched the admitted stays - empty result.")
         return pd.DataFrame(columns=["stay_id"])
 
     vs = pd.concat(chunks, ignore_index=True)
     print(f"  vitalsign.csv: {len(vs):,} rows across {vs['stay_id'].nunique():,} stays "
           f"(after filtering to admitted)")
 
-    # ── Time-window: keep readings within [intime, intime + 4h] ──
+    # Time-window: keep readings within [intime, intime + 4h]
     vs["charttime"] = pd.to_datetime(vs["charttime"], errors="coerce")
     vs = vs.merge(stays_df[["stay_id", "intime"]], on="stay_id", how="inner")
     # stays_df.intime is already datetime (set in load_and_clean_data)
@@ -313,7 +292,7 @@ def _aggregate_vitalsigns(
     # Sort by charttime so groupby().last() / .first() make temporal sense
     vs = vs.sort_values(["stay_id", "charttime"])
 
-    # ── Per-stay numeric aggregates (skip-NaN) ──
+    # Per-stay numeric aggregates (skip-NaN)
     grouped = vs.groupby("stay_id")
     agg_records = []
     for stay_id, sub in tqdm(
@@ -446,19 +425,15 @@ LONG_VITAL_FEATURE_COLS = (
 )
 
 
-# ---------------------------------------------------------------------------
-# PMH aggregation — Change 1 (extracted to pmh_features.py for reuse by
+# PMH aggregation - Change 1 (extracted to pmh_features.py for reuse by
 # train_triage_v3 and any future pipeline that needs prior-encounter features).
 # PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS, aggregate_pmh, and fill_missing_pmh_columns
 # are imported at the top of this file.
-# ---------------------------------------------------------------------------
 
 
 
 
-# ---------------------------------------------------------------------------
-# 1. Load & Clean Data — admitted patients + vitals + meds, catch-all dropped
-# ---------------------------------------------------------------------------
+# 1. Load & Clean Data - admitted patients + vitals + meds, catch-all dropped
 @disk_cached("nurse_v3", [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV,
                           SERVICES_CSV, MEDRECON_CSV, VITALSIGN_CSV,
                           DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV],
@@ -469,16 +444,14 @@ def load_and_clean_data() -> pd.DataFrame:
     Same as train_nurse.load_and_clean_data, but filters out the catch-all
     class after applying the diagnosis grouping.
     """
-    print("=" * 60)
-    print("STEP 1: Loading data (v3 with-nurse — admitted + vitals + meds, "
+    print("Loading data (v3 with-nurse - admitted + vitals + meds, "
           "catch-all excluded)")
-    print("=" * 60)
 
     # Load triage (includes vitals)
     triage = pd.read_csv(TRIAGE_CSV)
     print(f"  triage.csv: {len(triage):,} rows")
 
-    # Load edstays (full file — we need every ED visit per patient for the
+    # Load edstays (full file - we need every ED visit per patient for the
     # PMH features' n_prior_ed_visits / same_complaint_as_prior lookups, not
     # just admitted stays).
     edstays = pd.read_csv(
@@ -515,11 +488,11 @@ def load_and_clean_data() -> pd.DataFrame:
     med_features = _aggregate_medications(med)
     print(f"  medrecon.csv: {len(med):,} rows -> {len(med_features):,} stay-level records")
 
-    # ── Filter to admitted patients ──
+    # Filter to admitted patients
     admitted = edstays[edstays["disposition"] == "ADMITTED"].copy()
     print(f"\n  Admitted stays: {len(admitted):,}")
 
-    # ── Merge all tables ──
+    # Merge all tables
     df = triage.merge(admitted, on=["subject_id", "stay_id"], how="inner")
     df = df.merge(patients, on="subject_id", how="left")
     df = df.merge(diag, on="stay_id", how="inner")
@@ -527,23 +500,23 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(med_features, on="stay_id", how="left")  # left join: not all have meds
     print(f"  After full merge: {len(df):,}")
 
-    # ── Compute age ──
+    # Compute age
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # ── Clean chief complaints ──
+    # Clean chief complaints
     initial = len(df)
     df = df.dropna(subset=["chiefcomplaint", "category", "curr_service"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
     print(f"  After dropping missing data: {len(df):,} (dropped {initial - len(df):,})")
 
-    # ── Apply category groupings ──
+    # Apply category groupings
     df["diagnosis_group"] = df["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
     df["service_group"] = df["curr_service"].map(SERVICE_GROUP_MAP).fillna("OTHER")
 
-    # ── v3-specific: drop catch-all class ──
+    # v3-specific: drop catch-all class
     before = len(df)
     df = df[df["diagnosis_group"] != CATCH_ALL_LABEL].reset_index(drop=True)
     dropped = before - len(df)
@@ -551,29 +524,29 @@ def load_and_clean_data() -> pd.DataFrame:
           f"{before:,} -> {len(df):,} ({dropped:,} dropped, "
           f"{100 * dropped / before:.1f}%)")
 
-    # ── Clean pain ──
+    # Clean pain
     df["pain_triage"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain_triage"].isna().astype(int)
     df["pain"] = df["pain_triage"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
 
-    # ── Encode demographics ──
+    # Encode demographics
     df["gender_male"] = (df["gender"] == "M").astype(int)
     df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
     df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
-    # ── Acuity ──
+    # Acuity
     df["acuity"] = pd.to_numeric(df["acuity"], errors="coerce")
     df = df[df["acuity"].between(1, 5)]
     df["acuity"] = df["acuity"].astype(int)
     df["admitted"] = 1
 
-    # ── Clean vital signs (snapshot from triage.csv) ──
+    # Clean vital signs (snapshot from triage.csv)
     _clean_vitals(df)
 
-    # ── Phase B: longitudinal vitals + rhythm from vitalsign.csv ──
+    # Phase B: longitudinal vitals + rhythm from vitalsign.csv
     print("\n  Aggregating longitudinal vitals from vitalsign.csv...")
     long_vitals = _aggregate_vitalsigns(
         df[["stay_id", "intime"]],
@@ -584,7 +557,7 @@ def load_and_clean_data() -> pd.DataFrame:
     coverage = (df["has_longitudinal_vitals"] == 1).mean()
     print(f"  Longitudinal vitals coverage: {100*coverage:.1f}% of admitted stays")
 
-    # ── Change 1: PMH features from prior discharge notes + ICDs ──
+    # Change 1: PMH features from prior discharge notes + ICDs
     print("\n  Aggregating PMH features from prior encounters...")
     # The PMH step needs the normalized complaint text on the current row
     # (for same_complaint_as_prior). Compute it here once so we don't redo
@@ -603,7 +576,7 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(pmh_df, on="stay_id", how="left")
     fill_missing_pmh_columns(df)
 
-    # ── Fill missing medication flags (patients with no medrecon data) ──
+    # Fill missing medication flags (patients with no medrecon data)
     med_flag_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     for col in med_flag_cols:
         if col not in df.columns:
@@ -613,7 +586,7 @@ def load_and_clean_data() -> pd.DataFrame:
     for flag in MED_CATEGORY_KEYWORDS:
         df[flag] = df[flag].fillna(0).astype(int)
 
-    # ── Print distributions ──
+    # Print distributions
     print(f"\n  Diagnosis Category Distribution (grouped, 13 classes):")
     for cat in df["diagnosis_group"].value_counts().index:
         count = (df["diagnosis_group"] == cat).sum()
@@ -632,34 +605,30 @@ def load_and_clean_data() -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
 # 2. Build features
-# ---------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Build feature matrix: triage + triage preds + snapshot vitals + meds
     + longitudinal vitals + rhythm (Phase B).
     """
-    print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering (triage + snapshot vitals + meds + longitudinal vitals + rhythm)")
-    print("=" * 60)
+    print("Feature engineering (triage + snapshot vitals + meds + longitudinal vitals + rhythm)")
 
     df = df.copy()
 
-    # ── Load triage artifacts ──
+    # Load triage artifacts
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(TRIAGE_MODELS_DIR / "severity_map.joblib")
     acuity_model = joblib.load(TRIAGE_MODELS_DIR / "acuity_model.joblib")
     disposition_model = joblib.load(TRIAGE_MODELS_DIR / "disposition_model.joblib")
     print("  Loaded triage artifacts")
 
-    # ── Text features ──
+    # Text features
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # ── TF-IDF ──
+    # TF-IDF
     tfidf_matrix = tfidf.transform(df["complaint_text"])
     tfidf_df = pd.DataFrame(
         tfidf_matrix.toarray(),
@@ -668,7 +637,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     print(f"  TF-IDF features: {tfidf_df.shape[1]}")
 
-    # ── Severity priors ──
+    # Severity priors
     def compute_severity_priors(text: str) -> tuple:
         words = text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
@@ -683,7 +652,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["max_severity_prior"] = sev.apply(lambda x: x[2])
     df["std_severity_prior"] = sev.apply(lambda x: x[3])
 
-    # ── Age/pain bins ──
+    # Age/pain bins
     df["age_bin"] = pd.cut(
         df["age"], bins=[0, 18, 35, 50, 65, 80, 120], labels=[0, 1, 2, 3, 4, 5],
     ).astype(float).fillna(2)
@@ -691,7 +660,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
-    # ── Interaction features ──
+    # Interaction features
     df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
     df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
     df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
@@ -699,7 +668,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # ── Assemble triage feature vector (same order as triage pipeline) ──
+    # Assemble triage feature vector (same order as triage pipeline)
     structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
         "n_complaints", "complaint_length",
@@ -715,7 +684,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     tfidf_df = tfidf_df.reset_index(drop=True)
     triage_features = pd.concat([structured, tfidf_df], axis=1)
 
-    # ── Generate triage predictions (cascading) ──
+    # Generate triage predictions (cascading)
     print("  Generating triage predictions...")
     predicted_acuity = acuity_model.predict(triage_features) + 1
     triage_features_disp = triage_features.copy()
@@ -725,7 +694,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     triage_features["predicted_acuity"] = predicted_acuity
     triage_features["predicted_disposition"] = predicted_disposition
 
-    # ── Vital sign features (snapshot from triage.csv) ──
+    # Vital sign features (snapshot from triage.csv)
     vital_cols = [
         "temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp",
         "temperature_missing", "heartrate_missing", "resprate_missing",
@@ -736,36 +705,34 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     vitals = df[vital_cols].reset_index(drop=True)
     print(f"  Vital sign features (snapshot): {len(vital_cols)}")
 
-    # ── Medication features ──
+    # Medication features
     med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     meds = df[med_cols].reset_index(drop=True)
     print(f"  Medication features: {len(med_cols)}")
 
-    # ── Phase B: longitudinal vitals + rhythm ──
+    # Phase B: longitudinal vitals + rhythm
     long_vitals = df[LONG_VITAL_FEATURE_COLS].reset_index(drop=True)
     print(f"  Longitudinal vital + rhythm features: {len(LONG_VITAL_FEATURE_COLS)}")
 
-    # ── Change 1: PMH features (prior discharge notes + prior ICDs) ──
+    # Change 1: PMH features (prior discharge notes + prior ICDs)
     pmh = df[PMH_FEATURE_COLS].reset_index(drop=True)
     print(f"  PMH features: {len(PMH_FEATURE_COLS)}")
 
-    # ── Assemble all ──
+    # Assemble all
     features = pd.concat([triage_features, vitals, meds, long_vitals, pmh], axis=1)
     print(f"  Total features: {features.shape[1]}")
 
     return features
 
 
-# ---------------------------------------------------------------------------
-# A3 — diagnosis softmax cascade helpers
-# ---------------------------------------------------------------------------
+# A3 - diagnosis softmax cascade helpers
 # Replace the legacy single `predicted_diagnosis` int column with 13
 # `diag_proba_<sanitized_label>` float columns (the full softmax over
 # diagnosis classes). The department model can then weight ambiguous
 # predictions ("38% Circulatory, 32% Respiratory") instead of hard-locking
 # to the argmax. Shared between training (where we fit) and inference
 # (where doctor_tool_v3 reproduces the same column layout from the diag
-# model's predict_proba output — XGBoost requires identical column names
+# model's predict_proba output - XGBoost requires identical column names
 # in identical order between fit and predict).
 import re as _re
 
@@ -822,9 +789,7 @@ def _attach_diag_cascade(X, diag_model, diag_cascade_cols):
     return Xd
 
 
-# ---------------------------------------------------------------------------
 # 3-4. Train models
-# ---------------------------------------------------------------------------
 # A1-tuned hyperparameter set (when scripts/tune_doctor_v3.py has produced a
 # tuned_params.json under artifacts/doctor/v3/). XGBoost-side keys override
 # the hand-picked defaults below; `class_weight_exponent` swaps in for the
@@ -845,12 +810,10 @@ def train_model(
     `artifacts/doctor/v3/tuned_params.json` by `scripts/tune_doctor_v3.py`),
     the relevant hyperparameters override the hand-picked defaults, and the
     `class_weight_exponent` overrides the default 0.5 (sqrt). Only intended
-    for the v3 DIAGNOSIS model — the department model retains hand-picked
+    for the v3 DIAGNOSIS model - the department model retains hand-picked
     defaults unless the caller also wants tuning there.
     """
-    print(f"\n{'='*60}")
     print(f"  Training {model_name} ({len(label_names)} classes, XGBoost)")
-    print(f"{'='*60}")
 
     n_classes = len(label_names)
     class_counts = y_train.value_counts()
@@ -886,7 +849,7 @@ def train_model(
         lambda x: (total / (n_classes * class_counts[x])) ** cw_exponent
     )
 
-    # Optional tqdm progress bar — one tick per boosting iteration up to
+    # Optional tqdm progress bar - one tick per boosting iteration up to
     # 3000 (early stopping typically lands at 1700-2300). The callback is
     # None when tqdm isn't installed or XGBoost's callback API is unavailable,
     # in which case .fit() runs silently as before.
@@ -931,9 +894,7 @@ def train_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 5. Save
-# ---------------------------------------------------------------------------
 def save_models(
     diagnosis_model, department_model,
     diagnosis_labels, department_labels,
@@ -951,9 +912,7 @@ def save_models(
     "uncalibrated_accuracy": ..., "calibrated_accuracy": ...}`. Written to
     metadata so the audit can confirm the wrapped model is in use.
     """
-    print(f"\n{'='*60}")
     print("  Saving Doctor v3 with-nurse model artifacts")
-    print(f"{'='*60}")
 
     DOCTOR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1009,22 +968,16 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
-    print("  Doctor Agent v3 — Model Training Pipeline (with nurse data)")
+    print("  Doctor Agent v3 - Model Training Pipeline (with nurse data)")
     print("  (Catch-all excluded, full dataset, snapshot + longitudinal vitals + rhythm)")
-    print("#" * 60)
 
     # 1. Load (with catch-all filter applied inside)
     df = load_and_clean_data()
 
     # 2. v3: NO sub-sampling. Train on the full filtered set.
-    print(f"\n{'='*60}")
-    print(f"  Using full dataset (no sub-sampling) — {len(df):,} rows")
-    print(f"{'='*60}")
+    print(f"  Using full dataset (no sub-sampling) - {len(df):,} rows")
 
     # 3. Build features
     features = build_features(df)
@@ -1045,16 +998,14 @@ def main():
     print(f"  Department classes ({len(department_labels)}): {department_labels}")
 
     # 5. Split
-    print(f"\n{'='*60}")
     print("  Train/test split (80/20, stratified)")
-    print(f"{'='*60}")
     X_train, X_test, y_diag_train, y_diag_test, y_dept_train, y_dept_test = \
         train_test_split(features, y_diag, y_dept, test_size=0.2,
                          random_state=42, stratify=y_diag)
     print(f"  Train: {len(X_train):,} | Test: {len(X_test):,}")
 
     # 6a. Train diagnosis model
-    # A1 — apply tuned hyperparameters if scripts/tune_doctor_v3.py has
+    # A1 - apply tuned hyperparameters if scripts/tune_doctor_v3.py has
     # already produced a tuned_params.json (the macro-F1-optimal config
     # from the Optuna sweep). Falls back silently to hand-picked defaults
     # if the file is absent.
@@ -1074,7 +1025,7 @@ def main():
     diag_acc = accuracy_score(y_diag_test, _predict_labels(diag_model, X_test))
 
     # 6b. Train department model (cascading)
-    # A3 — cascade the diagnosis SOFTMAX (13 probability columns) into the
+    # A3 - cascade the diagnosis SOFTMAX (13 probability columns) into the
     # department model instead of the single argmax integer. The dept model
     # can then weight "this complaint is 38% Circulatory, 32% Respiratory"
     # honestly instead of hard-locking to the top-1 diagnosis. Column names
@@ -1084,7 +1035,7 @@ def main():
     X_train_dept = _attach_diag_cascade(X_train, diag_model, diag_cascade_cols)
     X_test_dept = _attach_diag_cascade(X_test, diag_model, diag_cascade_cols)
 
-    # A4 — isotonic calibration. Hold out 10% of the train split as a
+    # A4 - isotonic calibration. Hold out 10% of the train split as a
     # calibration set so the underlying XGBoost never sees it during fit,
     # then wrap with CalibratedClassifierCV(prefit) to learn one isotonic
     # regressor per class on the held-out probabilities. The wrapped object
@@ -1105,7 +1056,7 @@ def main():
         y_dept_test, _predict_labels(dept_model_raw, X_test_dept),
     )
 
-    # A4 — calibrate. Isotonic over softmax outputs is a monotone transform
+    # A4 - calibrate. Isotonic over softmax outputs is a monotone transform
     # that sharpens the probability ordering; expected top-1 lift is small
     # (+0.1-0.3pp) but downstream "trustworthy probabilities" matters for UX.
     print(f"\n  A4: fitting isotonic calibration (one regressor per class)...")
@@ -1155,12 +1106,9 @@ def main():
         ),
     )
 
-    print(f"\n{'#'*60}")
-    print("  TRAINING COMPLETE! (v3 with nurse data, Phase A)")
-    print(f"{'#'*60}")
+    print("Training complete (v3 with nurse data, Phase A).")
     print(f"  Diagnosis v3 accuracy:  {diag_acc:.4f}  ({len(diagnosis_labels)} classes)")
     print(f"  Department v3 accuracy: {dept_acc:.4f}  ({len(department_labels)} classes)")
-    print(f"{'#'*60}\n")
 
 
 if __name__ == "__main__":

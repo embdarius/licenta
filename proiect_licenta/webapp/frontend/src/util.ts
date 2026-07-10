@@ -12,8 +12,8 @@ export function fmtPct(v: string | number | undefined | null, digits = 1): strin
   return `${pct(v).toFixed(digits)}%`;
 }
 
-// ESI level → standard triage palette, in solid tones with adequate contrast on
-// a light surface (not neon). `bg`/`border` are light fills for level tags.
+// ESI level to triage palette, in solid tones with adequate contrast on a light
+// surface. `bg`/`border` are light fills for level tags.
 export const ESI_COLORS: Record<
   number,
   { name: string; hex: string; bg: string; border: string; text: string }

@@ -1,11 +1,8 @@
-"""
-Doctor Prediction Tool v2 — Enhanced with Nurse Data (Vitals + Medications)
+"""Doctor prediction tool (v2): adds nurse vitals and medications.
 
-Uses XGBoost models for diagnosis + department prediction, incorporating
-vital signs and medication features collected by the Nurse Agent.
-
-Feature vector: triage features (2023) + triage predictions (2) +
-                vital signs (20) + medications (11) = 2056 features
+XGBoost models for diagnosis + department, adding the vital signs and medication
+features the nurse collects. Feature vector: triage features (2023) + triage
+predictions (2) + vitals (20) + medications (11) = 2056.
 """
 
 import json
@@ -18,11 +15,9 @@ import pandas as pd
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
 # Doctor v2 also reuses triage v1 base artifacts (for cascading-feature parity
 # with how doctor v2 was trained in training/train_nurse.py).
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR as MODELS_DIR,
     DOCTOR_V2_DIR as DOCTOR_MODELS_DIR,
@@ -30,9 +25,7 @@ from proiect_licenta.paths import (
 
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
 
-# ---------------------------------------------------------------------------
-# Medication classification — shared vocabulary with the training pipeline
-# ---------------------------------------------------------------------------
+# Medication classification - shared vocabulary with the training pipeline
 # The drug-name and class-keyword maps live in `tools.med_vocab` so that the
 # training pipeline (training/train_nurse.py) and this inference tool cannot
 # drift apart. See `med_vocab.py` for the lists and the audit that motivated
@@ -83,9 +76,7 @@ def classify_medications(medications_raw: str) -> dict:
     return {"n_medications": n_meds, "meds_unknown": 0, **flags}
 
 
-# ---------------------------------------------------------------------------
 # Lazy model loading
-# ---------------------------------------------------------------------------
 _doctor_v2_cache = None
 
 
@@ -115,9 +106,7 @@ def get_doctor_v2_models():
     return _doctor_v2_cache
 
 
-# ---------------------------------------------------------------------------
 # Department names
-# ---------------------------------------------------------------------------
 DEPARTMENT_NAMES = {
     "MED": "General Medicine",
     "CMED": "Cardiac Medicine",
@@ -133,9 +122,7 @@ DEPARTMENT_NAMES = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Tool Input Schema
-# ---------------------------------------------------------------------------
 class DoctorV2Input(BaseModel):
     """Input schema for the Doctor v2 Prediction Tool (with nurse data)."""
     chief_complaints: str = Field(
@@ -188,9 +175,7 @@ class DoctorV2Input(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # CrewAI Tool
-# ---------------------------------------------------------------------------
 class DoctorPredictionToolV2(BaseTool):
     name: str = "doctor_prediction_tool_v2"
     description: str = (
@@ -239,20 +224,20 @@ class DoctorPredictionToolV2(BaseTool):
         diagnosis_labels = metadata["diagnosis_labels"]
         department_labels = metadata["department_labels"]
 
-        # ── 1. Normalize complaint text ──
+        # 1. Normalize complaint text
         complaint_text = normalize_complaint_text(chief_complaints)
         raw_complaints = [c.strip() for c in chief_complaints.split(",") if c.strip()]
         n_complaints = len(raw_complaints)
         complaint_length = len(complaint_text)
 
-        # ── 2. TF-IDF ──
+        # 2. TF-IDF
         tfidf_matrix = tfidf.transform([complaint_text])
         tfidf_df = pd.DataFrame(
             tfidf_matrix.toarray(),
             columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
         )
 
-        # ── 3. Severity priors ──
+        # 3. Severity priors
         words = complaint_text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
         min_sev = min(severities) if severities else 3.0
@@ -260,14 +245,14 @@ class DoctorPredictionToolV2(BaseTool):
         max_sev = max(severities) if severities else 3.0
         std_sev = float(np.std(severities)) if len(severities) > 1 else 0.0
 
-        # ── 4. Pain ──
+        # 4. Pain
         pain_val = max(-1, min(10, pain_score))
         pain_missing = 1 if pain_val < 0 else 0
         pain_low = 1 if 0 <= pain_val <= 3 else 0
         pain_mid = 1 if 4 <= pain_val <= 6 else 0
         pain_high = 1 if 7 <= pain_val <= 10 else 0
 
-        # ── 5. Demographics ──
+        # 5. Demographics
         age_val = max(0, min(120, age))
         age_bins = [0, 18, 35, 50, 65, 80, 120]
         age_bin = 2
@@ -283,7 +268,7 @@ class DoctorPredictionToolV2(BaseTool):
         arrival_helicopter = 1 if at == "helicopter" else 0
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
 
-        # ── 6. Interaction features ──
+        # 6. Interaction features
         pain_clipped = max(0, pain_val) if pain_val >= 0 else 0
         age_ambulance = age_val * arrival_ambulance
         pain_x_min_severity = pain_clipped * (5 - min_sev)
@@ -292,7 +277,7 @@ class DoctorPredictionToolV2(BaseTool):
         elderly = 1 if age_val >= 65 else 0
         elderly_ambulance = elderly * arrival_ambulance
 
-        # ── 7. Assemble triage feature vector ──
+        # 7. Assemble triage feature vector
         structured = pd.DataFrame({
             "pain": [pain_val],
             "pain_missing": [pain_missing],
@@ -323,7 +308,7 @@ class DoctorPredictionToolV2(BaseTool):
         triage_features["predicted_acuity"] = predicted_acuity
         triage_features["predicted_disposition"] = 1  # always admitted
 
-        # ── 8. Vital sign features ──
+        # 8. Vital sign features
         vitals_raw = {
             "temperature": temperature,
             "heartrate": heartrate,
@@ -384,7 +369,7 @@ class DoctorPredictionToolV2(BaseTool):
             "map": [map_val],
         })
 
-        # ── 9. Medication features ──
+        # 9. Medication features
         med_info = classify_medications(medications_raw)
         meds_df = pd.DataFrame({
             "n_medications": [med_info["n_medications"]],
@@ -400,10 +385,10 @@ class DoctorPredictionToolV2(BaseTool):
             "has_anticonvulsant_meds": [med_info["has_anticonvulsant_meds"]],
         })
 
-        # ── 10. Assemble full feature vector ──
+        # 10. Assemble full feature vector
         features = pd.concat([triage_features, vitals_df, meds_df], axis=1)
 
-        # ── 11. Predict diagnosis ──
+        # 11. Predict diagnosis
         diag_pred_idx = int(diagnosis_model.predict(features)[0])
         diag_proba = diagnosis_model.predict_proba(features)[0]
         diag_label = diagnosis_labels[diag_pred_idx]
@@ -415,7 +400,7 @@ class DoctorPredictionToolV2(BaseTool):
             for i in top3_diag_idx
         ]
 
-        # ── 12. Predict department (cascading) ──
+        # 12. Predict department (cascading)
         features_dept = features.copy()
         features_dept["predicted_diagnosis"] = diag_pred_idx
 
@@ -435,7 +420,7 @@ class DoctorPredictionToolV2(BaseTool):
             for i in top3_dept_idx
         ]
 
-        # ── Summarize nurse data used ──
+        # Summarize nurse data used
         vitals_provided = {
             k: v for k, v in vitals_raw.items()
             if v is not None and v >= 0
@@ -454,7 +439,7 @@ class DoctorPredictionToolV2(BaseTool):
             for cat in MED_CATEGORIES if med_info[cat] == 1
         ]
 
-        # ── Build result ──
+        # Build result
         result = {
             "patient_summary": {
                 "chief_complaints": raw_complaints,

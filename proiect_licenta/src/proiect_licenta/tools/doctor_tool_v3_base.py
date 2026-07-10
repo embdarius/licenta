@@ -1,26 +1,14 @@
-"""
-Doctor Prediction Tool v3 base — CrewAI Tool
-=============================================
+"""Doctor prediction tool (v3 base): initial pre-nurse assessment.
 
-Initial doctor assessment (pre-nurse), using the v3_base XGBoost models:
+Diagnosis category (13 classes, catch-all excluded) and hospital department
+(11 classes). Functionally identical to v1 but loads the v3_base artifacts from
+artifacts/doctor/v3_base/, trained on the full filtered admitted-patient set.
 
-  1. Diagnosis category prediction (13 classes — catch-all "Symptoms,
-     Signs, Ill-Defined" excluded)
-  2. Hospital department prediction (11 classes, for admitted patients)
-
-Functionally identical to v1 (doctor_tool.py) but loads the v3_base
-artifacts from artifacts/doctor/v3_base/. v3_base is trained on the full
-filtered admitted-patient set (no 100K sub-sample) and excludes the
-diagnosis catch-all class.
-
-Cascade source: triage v1 (matches what train_doctor_v3.py used at
-training time — see the note in train_doctor_v3.py:18). The live
-runtime triage agent uses triage v3, but the doctor v3_base + v3-nurse
-diagnosis/department models were trained against v1 cascade and must
-keep that input distribution at inference for train/inference symmetry.
-The new doctor disposition model uses triage v3 directly because it was
-trained that way; the diagnosis/department models can be retrained
-against v3 in a separate effort.
+The cascade source is triage v1, matching what train_doctor_v3.py used at
+training time. The runtime triage agent uses triage v3, but the doctor
+diagnosis/department models were trained against the v1 cascade and must keep
+that input distribution at inference for train/inference symmetry. The doctor
+disposition model uses triage v3 directly because it was trained that way.
 """
 
 import json
@@ -33,9 +21,7 @@ import pandas as pd
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
 # Paths
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR as MODELS_DIR,
     DOCTOR_V3_BASE_DIR as DOCTOR_MODELS_DIR,
@@ -43,9 +29,7 @@ from proiect_licenta.paths import (
 from proiect_licenta.tools.triage_tool import normalize_complaint_text
 
 
-# ---------------------------------------------------------------------------
 # Lazy model loading (per-process cache)
-# ---------------------------------------------------------------------------
 _doctor_cache = None
 
 
@@ -75,9 +59,7 @@ def get_doctor_models():
     return _doctor_cache
 
 
-# ---------------------------------------------------------------------------
 # Display name lookup (kept in sync with v1/v2/v3 nurse tools)
-# ---------------------------------------------------------------------------
 DEPARTMENT_NAMES = {
     "MED": "General Medicine",
     "CMED": "Cardiac Medicine",
@@ -93,9 +75,7 @@ DEPARTMENT_NAMES = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Tool Input Schema
-# ---------------------------------------------------------------------------
 class DoctorV3BaseInput(BaseModel):
     """Input schema for the Doctor v3 base prediction tool."""
     chief_complaints: str = Field(
@@ -120,9 +100,7 @@ class DoctorV3BaseInput(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # CrewAI Tool
-# ---------------------------------------------------------------------------
 class DoctorPredictionToolV3Base(BaseTool):
     name: str = "doctor_prediction_tool_v3_base"
     description: str = (
@@ -168,20 +146,20 @@ class DoctorPredictionToolV3Base(BaseTool):
         diagnosis_labels = metadata["diagnosis_labels"]
         department_labels = metadata["department_labels"]
 
-        # ── 1. Normalize complaint text ──
+        # 1. Normalize complaint text
         complaint_text = normalize_complaint_text(chief_complaints)
         raw_complaints = [c.strip() for c in chief_complaints.split(",") if c.strip()]
         n_complaints = len(raw_complaints)
         complaint_length = len(complaint_text)
 
-        # ── 2. TF-IDF ──
+        # 2. TF-IDF
         tfidf_matrix = tfidf.transform([complaint_text])
         tfidf_df = pd.DataFrame(
             tfidf_matrix.toarray(),
             columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
         )
 
-        # ── 3. Severity priors ──
+        # 3. Severity priors
         words = complaint_text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
         min_sev = min(severities) if severities else 3.0
@@ -189,14 +167,14 @@ class DoctorPredictionToolV3Base(BaseTool):
         max_sev = max(severities) if severities else 3.0
         std_sev = float(np.std(severities)) if len(severities) > 1 else 0.0
 
-        # ── 4. Pain ──
+        # 4. Pain
         pain_val = max(-1, min(10, pain_score))
         pain_missing = 1 if pain_val < 0 else 0
         pain_low = 1 if 0 <= pain_val <= 3 else 0
         pain_mid = 1 if 4 <= pain_val <= 6 else 0
         pain_high = 1 if 7 <= pain_val <= 10 else 0
 
-        # ── 5. Demographics ──
+        # 5. Demographics
         age_val = max(0, min(120, age))
         age_bins = [0, 18, 35, 50, 65, 80, 120]
         age_bin = 2
@@ -212,7 +190,7 @@ class DoctorPredictionToolV3Base(BaseTool):
         arrival_helicopter = 1 if at == "helicopter" else 0
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
 
-        # ── 6. Interaction features ──
+        # 6. Interaction features
         pain_clipped = max(0, pain_val) if pain_val >= 0 else 0
         age_ambulance = age_val * arrival_ambulance
         pain_x_min_severity = pain_clipped * (5 - min_sev)
@@ -221,7 +199,7 @@ class DoctorPredictionToolV3Base(BaseTool):
         elderly = 1 if age_val >= 65 else 0
         elderly_ambulance = elderly * arrival_ambulance
 
-        # ── 7. Assemble feature vector ──
+        # 7. Assemble feature vector
         structured = pd.DataFrame({
             "pain": [pain_val],
             "pain_missing": [pain_missing],
@@ -252,7 +230,7 @@ class DoctorPredictionToolV3Base(BaseTool):
         features["predicted_acuity"] = predicted_acuity
         features["predicted_disposition"] = 1  # always 1 (gate is is_admitted)
 
-        # ── 8. Diagnosis prediction (13 classes) ──
+        # 8. Diagnosis prediction (13 classes)
         diag_proba = diagnosis_model.predict_proba(features)[0]
         diag_pred_idx = int(np.argmax(diag_proba))
         diag_label = diagnosis_labels[diag_pred_idx]
@@ -267,7 +245,7 @@ class DoctorPredictionToolV3Base(BaseTool):
             for i in top3_diag_idx
         ]
 
-        # ── 9. Department prediction (cascading from diagnosis) ──
+        # 9. Department prediction (cascading from diagnosis)
         features_dept = features.copy()
         features_dept["predicted_diagnosis"] = diag_pred_idx
         dept_proba = department_model.predict_proba(features_dept)[0]
@@ -286,7 +264,7 @@ class DoctorPredictionToolV3Base(BaseTool):
             for i in top3_dept_idx
         ]
 
-        # ── 10. Result ──
+        # 10. Result
         result = {
             "patient_summary": {
                 "chief_complaints": raw_complaints,

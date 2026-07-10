@@ -1,7 +1,7 @@
 import { ESI_COLORS, esiColor, pct } from "../util";
 
-// ESI 1-5 acuity prediction: a level tag, the per-level probability bars, and —
-// when the top-2 are within 0.10 — a borderline note ("ESI X-Y"), matching the
+// ESI 1-5 acuity prediction: a level tag, the per-level probability bars, and -
+// when the top-2 are within 0.10 - a borderline note ("ESI X-Y"), matching the
 // live triage task's hedging rule.
 export default function AcuityGauge({ acuity }: { acuity: any }) {
   const level = acuity.predicted_esi_level as number;
@@ -37,7 +37,7 @@ export default function AcuityGauge({ acuity }: { acuity: any }) {
         <div className="label mb-2">Level probabilities</div>
         {hedge && (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            <span className="font-semibold">Borderline — ESI {sorted[0].lvl}–{sorted[1].lvl}.</span>{" "}
+            <span className="font-semibold">Borderline - ESI {sorted[0].lvl}–{sorted[1].lvl}.</span>{" "}
             Top two levels within 0.10 ({sorted[0].p.toFixed(1)}% vs {sorted[1].p.toFixed(1)}%);
             flagged for clinician review rather than hard-classified.
           </div>

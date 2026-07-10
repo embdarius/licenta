@@ -1,64 +1,24 @@
-"""
-Data Pipeline for Doctor Disposition v3 (Option B from plan section 3)
-=======================================================================
+"""Doctor disposition training pipeline (binary admit/discharge).
 
-A peer model alongside Doctor v3-nurse diagnosis + department. Unlike those,
-this one is a BINARY admit/discharge classifier and is trained on the FULL
-425K ED stays (not just the admitted-only ~102K slice), so it sees the
-positives and negatives in their real-world ratio.
+A peer model alongside the v3 diagnosis and department models, but a binary
+admit/discharge classifier trained on the full 425K ED stays (not the
+admitted-only ~102K slice), so it sees positives and negatives in their
+real-world ratio. It refines the triage-time disposition after the nurse step.
 
-The aim is to refine the triage-time disposition (triage v3 iter 2 dispo
-reference numbers from docs/agents/triage-agent.md: accuracy 77.98%,
-ROC AUC 0.8644) after the nurse step. Expected lift band per plan
-section 3: +3-6pp accuracy, +0.03-0.05 ROC AUC.
+Differences from train_nurse_v3:
+  - No admitted-only, catch-all, or diagnosis/service filter; the label is
+    admitted = 1 if disposition == 'ADMITTED' else 0.
+  - Soft cascade from triage (5 acuity softmax cols + 1 disposition prob col)
+    instead of the hard argmax cascade, so a borderline case is weighted honestly.
+  - binary:logistic with scale_pos_weight = N_neg / N_pos.
+  - Isotonic calibration on a 10% held-out slice, since disposition output is a
+    clinical-decision probability.
+  - Leakage guard kept from nurse_v3: the longitudinal vital window is
+    [intime, intime + 4h].
 
-NOTE on over/under-triage references: the figures previously cited
-inline (0.1556 / 0.1690) were the triage v3 *acuity* (ESI) model's
-over+under-triage rates and were therefore the wrong category for
-this binary admit/discharge comparison. The correct apples-to-apples
-reference is the triage v3 disposition model's own over/under-triage
-rates, which `train_disposition` now computes on the SAME held-out
-test rows by thresholding the `triage_disposition_proba_admit`
-soft-cascade column at 0.5. Those baseline numbers are printed in the
-test-metric table and persisted under `metrics.triage_v3_dispo_baseline`
-in metadata.json.
-
-Differences vs ``train_nurse_v3``:
-
-  * **No admitted-only filter, no catch-all filter, no diagnosis/service
-    join.** We keep every stay with a non-null disposition. The label is
-    ``admitted = 1 if disposition == 'ADMITTED' else 0``.
-  * **Soft cascade from triage** instead of hard cascade. Plan section 2/3
-    recommends feeding the full 5-class acuity softmax + the triage
-    disposition probability. The doctor model can then weight a "borderline
-    ESI 2-3 with abnormal vitals" case honestly rather than hard-locking
-    on the triage argmax. Six extra float columns vs the two int columns
-    used by the diagnosis/department models.
-  * **Binary:logistic objective** with ``scale_pos_weight = N_neg / N_pos``
-    (symmetric baseline per plan recommendation; threshold tuning is a
-    separate, downstream concern).
-  * **Isotonic calibration** on a 10% held-out fit slice (A4 pattern). The
-    plan calls out calibration as more important here than for diagnosis,
-    because disposition output is a clinical-decision probability — a
-    miscalibrated 0.8 hurts.
-  * **Leakage guard** kept from nurse_v3: the longitudinal vital window is
-    ``[intime, intime + 4h]`` so disposition-time vitals never leak in.
-
-Inputs (FEATURE SET, same as nurse_v3 minus diag/dept cascade):
-  - Triage structured: pain, demographics, severity priors (51 cols incl. PMH)
-  - Triage TF-IDF (2000 cols)
-  - **Triage SOFT cascade** (5 acuity softmax cols + 1 dispo prob col = 6)
-  - Snapshot vitals + clinical flags (20 cols)
-  - Medication features (24 cols: n_meds + meds_unknown + 22 categories)
-  - Longitudinal vitals + rhythm + abnormal-counts (~40 cols)
-  - PMH features (19 cols)
-
-Outputs:
-  - ``artifacts/doctor/v3/disposition_model.joblib`` — calibrated binary
-    classifier. ``predict_proba(X)[:, 1]`` is P(admit).
-  - ``artifacts/doctor/v3/metadata.json`` gains a ``disposition`` sub-block
-    with accuracy, ROC AUC, over/under-triage rates, calibration ECE, and
-    the soft-cascade column names for inference symmetry.
+Feature set is nurse_v3's minus the diag/dept cascade, plus the 6 soft-cascade
+columns. Outputs artifacts/doctor/v3/disposition_model.joblib (calibrated;
+predict_proba[:, 1] is P(admit)) and a disposition sub-block in metadata.json.
 """
 
 import json
@@ -87,9 +47,7 @@ except ImportError:  # pragma: no cover
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
-# XGBoost device / tree method — same env-var contract as the other pipelines.
-# ---------------------------------------------------------------------------
+# XGBoost device / tree method - same env-var contract as the other pipelines.
 XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
@@ -135,9 +93,7 @@ def _make_xgb_progress_callback(n_total: int, desc: str):
     return _TqdmCallback()
 
 
-# ---------------------------------------------------------------------------
 # Paths + shared helpers (reuse everything from nurse_v3 / preprocessing)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V3_DIR as TRIAGE_MODELS_DIR,
     DOCTOR_V3_DIR,
@@ -179,9 +135,7 @@ from proiect_licenta.training.train_doctor import (
 )
 
 
-# ---------------------------------------------------------------------------
-# 1. Load & clean — FULL dataset, no admitted-only filter
-# ---------------------------------------------------------------------------
+# 1. Load & clean - FULL dataset, no admitted-only filter
 @disk_cached("doctor_disposition_v3",
              [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV, MEDRECON_CSV,
               VITALSIGN_CSV, DISCHARGE_NOTES_CSV, DIAGNOSES_ICD_CSV, ADMISSIONS_CSV],
@@ -191,19 +145,17 @@ def load_and_clean_data() -> pd.DataFrame:
 
     No filter on disposition == ADMITTED (that's the label here, not a
     pre-filter). No filter on diagnosis_group (the diagnosis catch-all does
-    not affect the disposition decision — discharged patients especially
+    not affect the disposition decision - discharged patients especially
     have no primary diagnosis recorded so we'd lose them all).
     """
-    print("=" * 60)
-    print("STEP 1: Loading data (disposition v3 — FULL dataset, "
+    print("Loading data (disposition v3 - FULL dataset, "
           "no admitted-only filter)")
-    print("=" * 60)
 
     # Triage (vitals + chief complaint + acuity)
     triage = pd.read_csv(TRIAGE_CSV)
     print(f"  triage.csv: {len(triage):,} rows")
 
-    # edstays — every stay, every disposition; need full set for PMH lookups too
+    # edstays - every stay, every disposition; need full set for PMH lookups too
     edstays = pd.read_csv(
         EDSTAYS_CSV,
         usecols=["subject_id", "stay_id", "hadm_id", "intime", "gender",
@@ -218,15 +170,15 @@ def load_and_clean_data() -> pd.DataFrame:
     )
     print(f"  patients.csv: {len(patients):,} rows")
 
-    # Medications — left-joined; many stays have none
+    # Medications - left-joined; many stays have none
     print("  Loading medrecon.csv and aggregating per stay...")
     med = pd.read_csv(MEDRECON_CSV, usecols=["stay_id", "name", "etcdescription"])
     med_features = _aggregate_medications(med)
     print(f"  medrecon.csv: {len(med):,} rows -> {len(med_features):,} stay-level records")
 
-    # Disposition label — keep stays with a real disposition only. Two-class
-    # collapse: ADMITTED → 1; everything else (HOME, ELOPED, LEFT WITHOUT
-    # BEING SEEN, TRANSFER, EXPIRED, OTHER) → 0. The "discharge" label here
+    # Disposition label - keep stays with a real disposition only. Two-class
+    # collapse: ADMITTED -> 1; everything else (HOME, ELOPED, LEFT WITHOUT
+    # BEING SEEN, TRANSFER, EXPIRED, OTHER) -> 0. The "discharge" label here
     # captures every non-admission, which matches what triage's existing
     # disposition model targets.
     edstays = edstays.dropna(subset=["disposition"]).copy()
@@ -236,26 +188,26 @@ def load_and_clean_data() -> pd.DataFrame:
         print(f"    {d:30s}  {n:>7,}  ({100*n/len(edstays):.1f}%)")
     edstays["admitted"] = (edstays["disposition"] == "ADMITTED").astype(int)
 
-    # ── Merge ──
+    # Merge
     df = triage.merge(edstays, on=["subject_id", "stay_id"], how="inner")
     df = df.merge(patients, on="subject_id", how="left")
     df = df.merge(med_features, on="stay_id", how="left")
     print(f"  After triage + edstays + patients + meds merge: {len(df):,}")
 
-    # ── Age computation ──
+    # Age computation
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # ── Drop rows with missing chief complaint (the cascade needs text) ──
+    # Drop rows with missing chief complaint (the cascade needs text)
     initial = len(df)
     df = df.dropna(subset=["chiefcomplaint"]).copy()
     df = df[df["chiefcomplaint"].str.strip() != ""]
     print(f"  After dropping missing chief complaint: {len(df):,} "
           f"(dropped {initial - len(df):,})")
 
-    # ── Pain / demographics / acuity ──
+    # Pain / demographics / acuity
     df["pain_triage"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain_triage"].isna().astype(int)
     df["pain"] = df["pain_triage"].fillna(-1).astype(int)
@@ -268,7 +220,7 @@ def load_and_clean_data() -> pd.DataFrame:
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
     df["acuity"] = pd.to_numeric(df["acuity"], errors="coerce")
-    # Drop rows with missing acuity — the cascade needs a triage prediction.
+    # Drop rows with missing acuity - the cascade needs a triage prediction.
     # The triage model itself can't have been run on these in MIMIC since they
     # never received an acuity, and we don't want to pollute training with
     # null cascade values.
@@ -277,12 +229,12 @@ def load_and_clean_data() -> pd.DataFrame:
     df["acuity"] = df["acuity"].astype(int)
     print(f"  After acuity-in-[1,5] filter: {len(df):,} (dropped {before - len(df):,})")
 
-    # ── Snapshot vitals (triage.csv) ──
+    # Snapshot vitals (triage.csv)
     _clean_vitals(df)
 
-    # ── Longitudinal vitals (vitalsign.csv) — first 4h window ──
+    # Longitudinal vitals (vitalsign.csv) - first 4h window
     print("\n  Aggregating longitudinal vitals from vitalsign.csv "
-          "(window: [intime, intime + 4h] — leakage guard)...")
+          "(window: [intime, intime + 4h] - leakage guard)...")
     long_vitals = _aggregate_vitalsigns(
         df[["stay_id", "intime"]],
         VITALSIGN_CSV,
@@ -292,8 +244,8 @@ def load_and_clean_data() -> pd.DataFrame:
     coverage = (df["has_longitudinal_vitals"] == 1).mean()
     print(f"  Longitudinal vitals coverage: {100*coverage:.1f}% of full dataset")
 
-    # ── PMH (Change 1 recipe) ──
-    # PMH operates on prior encounters strictly before intime → no leakage.
+    # PMH (Change 1 recipe)
+    # PMH operates on prior encounters strictly before intime -> no leakage.
     print("\n  Aggregating PMH features from prior encounters...")
     df["complaint_text_norm"] = df["chiefcomplaint"].apply(normalize_complaint_text)
     # We need edstays_full (not the merged frame) for the prior-encounter lookups
@@ -315,7 +267,7 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(pmh_df, on="stay_id", how="left")
     fill_missing_pmh_columns(df)
 
-    # ── Fill missing medication flags ──
+    # Fill missing medication flags
     med_flag_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     for col in med_flag_cols:
         if col not in df.columns:
@@ -325,7 +277,7 @@ def load_and_clean_data() -> pd.DataFrame:
     for flag in MED_CATEGORY_KEYWORDS:
         df[flag] = df[flag].fillna(0).astype(int)
 
-    # ── Class balance report ──
+    # Class balance report
     pos = int(df["admitted"].sum())
     neg = int(len(df) - pos)
     print(f"\n  Final disposition label distribution:")
@@ -336,10 +288,8 @@ def load_and_clean_data() -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# 2. Feature engineering — same triage feature set as nurse_v3, but with
+# 2. Feature engineering - same triage feature set as nurse_v3, but with
 #    SOFT cascade (5 acuity softmax cols + 1 disposition prob col)
-# ---------------------------------------------------------------------------
 SOFT_CASCADE_COLS = [
     "triage_acuity_proba_1", "triage_acuity_proba_2",
     "triage_acuity_proba_3", "triage_acuity_proba_4",
@@ -363,7 +313,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
          model's own non-cascade use.
       3. Call ``train_triage_v3.build_features(fit=False)`` to build the
          v3 input vector (~2069 cols: 23 v1 structured + ~28 v2 vital +
-         19 PMH + 2000 TF-IDF). Single source of truth — if v3 changes
+         19 PMH + 2000 TF-IDF). Single source of truth - if v3 changes
          layout, this picks it up automatically.
       4. Compute the soft cascade:
            - ``acuity_proba``  = v3 acuity model softmax (5 cols)
@@ -377,11 +327,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
          and snapshot vitals are already included via the v3 features
          matrix (no duplication).
     """
-    print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering (triage v3 cascade)")
-    print("=" * 60)
+    print("Feature engineering (triage v3 cascade)")
 
-    # ── Load triage v3 artifacts ──
+    # Load triage v3 artifacts
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(TRIAGE_MODELS_DIR / "severity_map.joblib")
     vital_medians_v3 = joblib.load(TRIAGE_MODELS_DIR / "vital_medians.joblib")
@@ -400,10 +348,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
-    # ── Build cascade-input copy with walk-in vital masking ──
+    # Build cascade-input copy with walk-in vital masking
     # train_triage_v3.build_features sets `<col>_missing = df[col].isna()`
     # before fillna. Since `_clean_vitals` already imputed our `df`'s
-    # vital columns, NaN has been lost — we have to restore it on a copy
+    # vital columns, NaN has been lost - we have to restore it on a copy
     # for the cascade input so the `_missing` flags compute the way the
     # v3 model expects.
     df_cascade = df.copy()
@@ -414,7 +362,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     print(f"  Cascade input: re-masked vitals to NaN for "
           f"{n_walkin:,} walk-in rows ({100*n_walkin/len(df_cascade):.1f}%)")
 
-    # ── Run v3 build_features (transform mode) to get the cascade input ──
+    # Run v3 build_features (transform mode) to get the cascade input
     triage_features, _, _, _ = _build_v3_features(
         df_cascade, tfidf=tfidf, severity_map=severity_map,
         vital_medians=vital_medians_v3, fit=False,
@@ -422,7 +370,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     triage_features = triage_features.reset_index(drop=True)
     print(f"  v3 cascade input shape: {triage_features.shape}")
 
-    # ── Soft cascade — v3 acuity softmax + v3 disposition probability ──
+    # Soft cascade - v3 acuity softmax + v3 disposition probability
     print("  Generating SOFT-cascade predictions on v3 features "
           "(5-class acuity softmax + dispo probability)...")
     acuity_proba = acuity_model.predict_proba(triage_features)
@@ -432,7 +380,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
             f"got {acuity_proba.shape[1]}."
         )
     # Triage v3 disposition model expects `predicted_acuity` int alongside
-    # the v3 base vector (see train_triage_v3.py:843-846 — the v3 cascade
+    # the v3 base vector (see train_triage_v3.py:843-846 - the v3 cascade
     # contract is hard-int from acuity argmax + 1). Reproduce that input
     # here. The doctor disposition model receives the SOFT softmax, but
     # we still call the triage v3 dispo model the way it was trained.
@@ -449,19 +397,19 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     triage_features["triage_disposition_proba_admit"] = dispo_proba_admit
     assert all(c in triage_features.columns for c in SOFT_CASCADE_COLS)
 
-    # ── Medications ──
+    # Medications
     med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     meds = df[med_cols].reset_index(drop=True)
     print(f"  Medication features: {len(med_cols)}")
 
-    # ── Longitudinal vitals + rhythm ──
+    # Longitudinal vitals + rhythm
     long_vitals = df[LONG_VITAL_FEATURE_COLS].reset_index(drop=True)
     print(f"  Longitudinal + rhythm features: {len(LONG_VITAL_FEATURE_COLS)}")
 
-    # ── Assemble final feature matrix ──
+    # Assemble final feature matrix
     # v3 features (~2069: structured + v3 vitals + PMH + TF-IDF) already
     # contains structured + snapshot vitals + PMH + TF-IDF. We do NOT
-    # re-append a separate "snapshot vital block" or a "PMH block" — they
+    # re-append a separate "snapshot vital block" or a "PMH block" - they
     # are already in `triage_features`. Adding them again would create
     # duplicate column names and inflate the importance of those signals.
     features = pd.concat([triage_features, meds, long_vitals], axis=1)
@@ -477,9 +425,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return features
 
 
-# ---------------------------------------------------------------------------
 # 3. Train binary disposition model with isotonic calibration
-# ---------------------------------------------------------------------------
 def train_disposition(
     X_train, y_train, X_test, y_test, model_name="DISPOSITION v3",
 ):
@@ -496,16 +442,14 @@ def train_disposition(
           feature-importance inspection).
         - ``metrics_dict``: a dict of every reported metric on ``X_test``.
     """
-    print(f"\n{'='*60}")
     print(f"  Training {model_name}  (binary:logistic, full 425K dataset)")
-    print(f"{'='*60}")
 
     pos = int((y_train == 1).sum())
     neg = int((y_train == 0).sum())
     scale_pos_weight = float(np.sqrt(neg / max(pos, 1)))
     # Plan recommendation: SYMMETRIC baseline = sqrt(N_neg/N_pos). Using the
     # sqrt rather than the raw ratio matches the doctor-v3 sweep's near-optimal
-    # cw_exponent of 0.52 — full-ratio over-corrects for class balance and
+    # cw_exponent of 0.52 - full-ratio over-corrects for class balance and
     # leaves too much accuracy on the table on the negative class.
     print(f"  scale_pos_weight = sqrt({neg}/{pos}) = {scale_pos_weight:.4f}")
 
@@ -546,7 +490,7 @@ def train_disposition(
     except Exception:
         pass
 
-    # ── Isotonic calibration ──
+    # Isotonic calibration
     print(f"\n  Fitting isotonic calibration on held-out {len(X_cal):,} rows...")
     if _HAS_FROZEN:
         calibrated = CalibratedClassifierCV(
@@ -556,7 +500,7 @@ def train_disposition(
         calibrated = CalibratedClassifierCV(raw, method="isotonic", cv="prefit")
     calibrated.fit(X_cal, y_cal)
 
-    # ── Metrics on the held-out test set ──
+    # Metrics on the held-out test set
     proba_uncal = raw.predict_proba(X_test)[:, 1]
     proba_cal = calibrated.predict_proba(X_test)[:, 1]
     y_pred_uncal = (proba_uncal >= 0.5).astype(int)
@@ -595,7 +539,7 @@ def train_disposition(
     ece_uncal = _ece(np.asarray(y_test), proba_uncal)
     ece_cal = _ece(np.asarray(y_test), proba_cal)
 
-    # ── Triage v3 disposition baseline (the right apples-to-apples ref) ──
+    # Triage v3 disposition baseline (the right apples-to-apples ref)
     # Both models output P(admit). The triage v3 disposition prediction is
     # already in the test features as `triage_disposition_proba_admit`,
     # computed in build_features by calling the v3 disposition_model on
@@ -617,7 +561,7 @@ def train_disposition(
         tri_sens = tri_tp / max(tri_tp + tri_fn, 1)
         tri_spec = tri_tn / max(tri_tn + tri_fp, 1)
     else:
-        # Soft cascade column went missing — non-fatal here, the table just
+        # Soft cascade column went missing - non-fatal here, the table just
         # shows N/A and the benchmark catches it.
         tri_acc = tri_auc = tri_brier = tri_ece = float("nan")
         tri_over = tri_under = tri_sens = tri_spec = float("nan")
@@ -642,10 +586,9 @@ def train_disposition(
           f"{over_triage:>11.4f}  {over_triage - tri_over:>+13.4f}  (lower=better)")
     print(f"  {'Under-triage':16s}  {tri_under:>16.4f}  {'-':>14s}  "
           f"{under_triage:>11.4f}  {under_triage - tri_under:>+13.4f}  (lower=better)")
-    print(f"\n  Note: both columns are binary admit/discharge at threshold "
-          f"0.5. The 0.1556 / 0.1690 figures that previously appeared here "
-          f"were the triage v3 *acuity* (ESI) model's over+under-triage "
-          f"rates and were the wrong category for this comparison.")
+    print(f"\n  Both columns are binary admit/discharge at threshold 0.5, so "
+          f"these are the disposition model's own over/under-triage rates, not "
+          f"the acuity model's.")
     print()
     print(classification_report(
         y_test, y_pred_cal,
@@ -686,15 +629,11 @@ def train_disposition(
     return calibrated, raw, metrics
 
 
-# ---------------------------------------------------------------------------
 # 4. Save artifacts (extend existing metadata.json with a `disposition` block)
-# ---------------------------------------------------------------------------
 def save_disposition_model(
     calibrated_model, raw_model, metrics: dict, feature_cols: list,
 ):
-    print(f"\n{'='*60}")
     print("  Saving Doctor disposition v3 artifacts")
-    print(f"{'='*60}")
 
     DOCTOR_V3_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -740,7 +679,7 @@ def save_disposition_model(
             "+ non-admitted) so it sees both classes in real-world ratio. "
             "Consumes the triage SOFT cascade (5 acuity softmax + 1 "
             "disposition probability) rather than the hard cascade used by "
-            "the diagnosis/department models — softens reliance on the "
+            "the diagnosis/department models - softens reliance on the "
             "triage argmax and lets the model honestly weight borderline "
             "cases. Isotonic calibration on a 10% held-out fit slice "
             "(same A4 pattern as the department model)."
@@ -752,27 +691,19 @@ def save_disposition_model(
     print(f"  Updated metadata.json with `disposition` block")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
-    print("  Doctor disposition v3 — Model Training Pipeline")
+    print("  Doctor disposition v3 - Model Training Pipeline")
     print("  (Full 425K, soft cascade from triage, isotonic-calibrated)")
-    print("#" * 60)
 
     df = load_and_clean_data()
 
-    print(f"\n{'='*60}")
-    print(f"  Using full dataset (no sub-sampling) — {len(df):,} rows")
-    print(f"{'='*60}")
+    print(f"  Using full dataset (no sub-sampling) - {len(df):,} rows")
 
     features = build_features(df)
     y = df["admitted"].astype(int).reset_index(drop=True)
 
-    print(f"\n{'='*60}")
     print("  Train/test split (80/20, stratified on admit label)")
-    print(f"{'='*60}")
     X_train, X_test, y_train, y_test = train_test_split(
         features, y, test_size=0.20, random_state=42, stratify=y,
     )
@@ -787,9 +718,7 @@ def main():
     feature_cols = list(features.columns)
     save_disposition_model(calibrated, raw, metrics, feature_cols)
 
-    print(f"\n{'#'*60}")
     print("  Doctor disposition v3 training complete")
-    print(f"{'#'*60}")
     tri = metrics.get("triage_v3_dispo_baseline", {}) or {}
     print(f"  Headline numbers (calibrated, 0.5 threshold; "
           f"triage v3 dispo baseline computed on the SAME test rows):")

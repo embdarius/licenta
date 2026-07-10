@@ -1,5 +1,5 @@
-// Collapsible per-task chain-of-thought, available after the fact (not streamed
-// live). Populated from the step_callback reasoning captured server-side.
+// Collapsible per-task reasoning, available after the fact (not streamed live).
+// Populated from the step_callback reasoning captured server-side.
 import { useState } from "react";
 
 export default function ReasoningPanel({ steps }: { steps: string[] }) {

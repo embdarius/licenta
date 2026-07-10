@@ -1,13 +1,8 @@
-"""
-Data Pipeline for Triage Agent — MIMIC-IV Emergency Department (v3b)
+"""Triage v1 training pipeline (MIMIC-IV-ED).
 
-Features: TF-IDF (2000 word/bigram/trigram features) + pain + demographics +
-  arrival transport + severity priors + interaction features.
-Model: XGBoost with 3000 trees, lr=0.02, soft class weighting.
-
-Trains two supervised models:
-  1. Acuity: chiefcomplaint + pain + demographics + arrival → ESI 1-5
-  2. Disposition: same + predicted acuity → ADMITTED vs DISCHARGED
+Features are TF-IDF (2000 word/bigram/trigram) plus pain, demographics, arrival
+transport, severity priors, and interactions. Trains two XGBoost models: acuity
+(ESI 1-5) and disposition (admit vs discharge, cascading on predicted acuity).
 """
 
 import os
@@ -27,9 +22,7 @@ from xgboost import XGBClassifier
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V1_DIR as MODELS_DIR,
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV,
@@ -37,14 +30,10 @@ from proiect_licenta.paths import (
 from proiect_licenta.preprocessing import ABBREVIATIONS, normalize_complaint_text  # noqa: F401  (re-exported for backward compatibility)
 
 
-# ---------------------------------------------------------------------------
 # 1. Load & Clean Data
-# ---------------------------------------------------------------------------
 def load_and_clean_data() -> pd.DataFrame:
     """Load triage + edstays + patients, clean and merge."""
-    print("=" * 60)
-    print("STEP 1: Loading data...")
-    print("=" * 60)
+    print("Loading data...")
 
     # Load triage
     triage = pd.read_csv(TRIAGE_CSV)
@@ -73,13 +62,13 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(patients, on="subject_id", how="left")
     print(f"  Merged with patients: {len(df):,} rows")
 
-    # --- Compute age at visit ---
+    # Compute age at visit
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # --- Clean chief complaints ---
+    # Clean chief complaints
     initial_count = len(df)
     df = df.dropna(subset=["chiefcomplaint", "acuity"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
@@ -134,16 +123,12 @@ def load_and_clean_data() -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
 # 2. Normalize complaint text
 # (ABBREVIATIONS + normalize_complaint_text live in proiect_licenta.preprocessing
 #  and are re-exported above for backward compatibility.)
-# ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
 # 3. Feature Engineering
-# ---------------------------------------------------------------------------
 def build_features(
     df: pd.DataFrame,
     tfidf: TfidfVectorizer = None,
@@ -151,22 +136,20 @@ def build_features(
     fit: bool = True,
 ) -> tuple:
     """Build full feature matrix."""
-    print("\n" + "=" * 60)
-    print(f"STEP 2: Feature engineering ({'fitting' if fit else 'transforming'})")
-    print("=" * 60)
+    print(f"Feature engineering ({'fitting' if fit else 'transforming'})")
 
     df = df.copy()
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
 
-    # --- Count of complaints ---
+    # Count of complaints
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
 
-    # --- Complaint text length (chars) ---
+    # Complaint text length (chars)
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # --- TF-IDF ---
+    # TF-IDF
     if fit:
         tfidf = TfidfVectorizer(
             max_features=2000,
@@ -187,7 +170,7 @@ def build_features(
         index=df.index,
     )
 
-    # --- Severity Prior (vectorized for speed) ---
+    # Severity Prior (vectorized for speed)
     if fit:
         word_acuity = defaultdict(list)
         texts = df["complaint_text"].values
@@ -217,19 +200,19 @@ def build_features(
     df["max_severity_prior"] = severity_features.apply(lambda x: x[2])
     df["std_severity_prior"] = severity_features.apply(lambda x: x[3])
 
-    # --- Age bins ---
+    # Age bins
     df["age_bin"] = pd.cut(
         df["age"],
         bins=[0, 18, 35, 50, 65, 80, 120],
         labels=[0, 1, 2, 3, 4, 5],
     ).astype(float).fillna(2)
 
-    # --- Pain bins ---
+    # Pain bins
     df["pain_low"] = ((df["pain"] >= 0) & (df["pain"] <= 3)).astype(int)
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
-    # --- Interaction features ---
+    # Interaction features
     df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
     df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
     df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
@@ -237,7 +220,7 @@ def build_features(
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # --- Assemble ---
+    # Assemble
     structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
         "n_complaints", "complaint_length",
@@ -261,9 +244,7 @@ def build_features(
     return features, tfidf, severity_map
 
 
-# ---------------------------------------------------------------------------
 # 4. Train Models
-# ---------------------------------------------------------------------------
 def train_acuity_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -271,9 +252,7 @@ def train_acuity_model(
     y_test: pd.Series,
 ) -> XGBClassifier:
     """Train acuity model with tuned XGBoost + early stopping."""
-    print("\n" + "=" * 60)
-    print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
-    print("=" * 60)
+    print("Training ACUITY model (XGBoost, ESI 1-5)")
 
     # Soft class weights: sqrt of inverse frequency
     # Full inverse over-prioritizes ESI 5 (0.3%) and kills accuracy on ESI 2-3
@@ -339,9 +318,7 @@ def train_disposition_model(
     y_test: pd.Series,
 ) -> XGBClassifier:
     """Train disposition model with tuned XGBoost."""
-    print("\n" + "=" * 60)
-    print("STEP 4b: Training DISPOSITION model (XGBoost)")
-    print("=" * 60)
+    print("Training DISPOSITION model (XGBoost)")
 
     neg_count = (y_train == 0).sum()
     pos_count = (y_train == 1).sum()
@@ -390,9 +367,7 @@ def train_disposition_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 5. Save Artifacts
-# ---------------------------------------------------------------------------
 def save_models(
     acuity_model,
     disposition_model,
@@ -403,9 +378,7 @@ def save_models(
     disposition_accuracy: float,
 ):
     """Save trained models and metadata."""
-    print("\n" + "=" * 60)
-    print("STEP 5: Saving model artifacts")
-    print("=" * 60)
+    print("Saving model artifacts")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -449,22 +422,16 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
     print("  MIMIC-IV Triage Model Training Pipeline v3b")
     print("  (TF-IDF 2K + XGBoost 3K trees + Demographics + Interactions)")
-    print("#" * 60)
 
     # 1. Load
     df = load_and_clean_data()
 
     # 2. Split FIRST (prevent leakage)
-    print("\n" + "=" * 60)
-    print("STEP 3: Train/test split (80/20, stratified by acuity)")
-    print("=" * 60)
+    print("Train/test split (80/20, stratified by acuity)")
 
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
@@ -512,13 +479,10 @@ def main():
         acuity_accuracy, within_1, disp_accuracy,
     )
 
-    print("\n" + "#" * 60)
-    print("  TRAINING COMPLETE!")
-    print("#" * 60)
+    print("Training complete.")
     print(f"  Acuity accuracy (exact):    {acuity_accuracy:.4f}")
     print(f"  Acuity accuracy (within 1): {within_1:.4f}")
     print(f"  Disposition accuracy:       {disp_accuracy:.4f}")
-    print("#" * 60 + "\n")
 
 
 if __name__ == "__main__":

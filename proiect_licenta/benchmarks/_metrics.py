@@ -1,22 +1,18 @@
 """Shared metric helpers for the detailed v3 re-benchmark.
 
-Every function returns plain JSON-serializable Python (floats / ints / lists /
-dicts) so the benchmark scripts can dump one auditable JSON and build CSVs from
-the same numbers — no metric is hand-rolled twice. Functions are defensive: on a
-degenerate input (single-class subgroup, missing class) AUC-style metrics return
-``None`` rather than raising, so the small (n=250) generated-cases path and the
+Every function returns plain JSON-serializable Python so the benchmark scripts
+dump one auditable JSON and build CSVs from the same numbers. Functions are
+defensive: on a degenerate input (single-class subgroup, missing class) AUC-style
+metrics return None rather than raising, so the small generated-cases path and the
 large tabular path share the same code.
 
-Conventions
------------
-* Multiclass labels are 0-indexed integer class ids ``0..K-1`` aligned with the
-  columns of ``y_prob``. ``label_names`` (optional) gives a human string per id.
-* Binary: positive class = 1 (= "admit" for disposition). ``under_triage`` =
-  admit predicted discharge (FN rate); ``over_triage`` = discharge predicted
-  admit (FP rate).
-* Ordinal (acuity): levels are the ESI integers (default ``[1,2,3,4,5]``); a
-  LOWER number is MORE acute. ``under_triage`` = predicted less acute
-  (pred > true); ``over_triage`` = predicted more acute (pred < true).
+Conventions:
+- Multiclass labels are 0-indexed class ids 0..K-1 aligned with the columns of
+  y_prob; label_names (optional) gives a string per id.
+- Binary: positive class = 1 (admit for disposition). under_triage = admit
+  predicted discharge (FN rate); over_triage = discharge predicted admit (FP rate).
+- Ordinal (acuity): ESI integers, lower is more acute. under_triage = predicted
+  less acute (pred > true); over_triage = predicted more acute (pred < true).
 """
 
 from __future__ import annotations
@@ -29,9 +25,7 @@ from sklearn.metrics import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Low-level helpers
-# ---------------------------------------------------------------------------
 def _f(x):
     """Cast to float, mapping NaN/inf-unsafe values to None for clean JSON."""
     try:
@@ -99,9 +93,7 @@ def rank_of_true(y_true_row, prob_row):
     return int(pos[0] + 1) if len(pos) else None
 
 
-# ---------------------------------------------------------------------------
 # Calibration
-# ---------------------------------------------------------------------------
 def calibration_report(y_true, y_prob, n_bins: int = 10):
     """Reliability diagram + ECE/MCE/Brier for a binary positive-class score.
 
@@ -156,9 +148,7 @@ def ece_top_label(y_true, y_pred, y_prob, n_bins: int = 10):
     return _f(ece)
 
 
-# ---------------------------------------------------------------------------
 # Binary report (disposition heads)
-# ---------------------------------------------------------------------------
 def _binary_at_threshold(y_true, y_prob, threshold):
     y_true = np.asarray(y_true, dtype=int)
     y_pred = (np.asarray(y_prob, dtype=float) >= threshold).astype(int)
@@ -218,15 +208,13 @@ def binary_report(y_true, y_prob, thresholds=(0.5,), n_bins: int = 10):
 
 
 def threshold_sweep(y_true, y_prob, thresholds):
-    """Just the per-threshold table (list of dicts) — for CSV export."""
+    """Just the per-threshold table (list of dicts) - for CSV export."""
     y_true = np.asarray(y_true, dtype=int)
     y_prob = np.asarray(y_prob, dtype=float)
     return [_binary_at_threshold(y_true, y_prob, t) for t in thresholds]
 
 
-# ---------------------------------------------------------------------------
 # Multiclass report (diagnosis / department)
-# ---------------------------------------------------------------------------
 def per_class_table(y_true, y_pred, labels, label_names=None):
     """Per-class precision / recall / specificity / f1 / support / accuracy."""
     y_true = np.asarray(y_true, dtype=int)
@@ -349,9 +337,7 @@ def multiclass_report(y_true, y_pred, y_prob, labels, label_names=None,
     return report
 
 
-# ---------------------------------------------------------------------------
 # Ordinal report (triage acuity)
-# ---------------------------------------------------------------------------
 def ordinal_report(y_true, y_pred, y_prob=None, levels=(1, 2, 3, 4, 5),
                    critical_levels=(1, 2)):
     """Acuity (ESI) report. ``y_pred``/``y_true`` are the ESI integers; lower =
@@ -416,9 +402,7 @@ def ordinal_report(y_true, y_pred, y_prob=None, levels=(1, 2, 3, 4, 5),
     return report
 
 
-# ---------------------------------------------------------------------------
 # Simple accuracy with coverage (generated-cases heads)
-# ---------------------------------------------------------------------------
 def accuracy_with_coverage(hits, n_eligible):
     """``hits`` = list of 0/1 over produced predictions; coverage = produced /
     eligible. Returns accuracy over eligible (missing = miss) and over produced."""

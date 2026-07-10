@@ -58,7 +58,7 @@ export interface Top3Entry {
   probability_raw?: number;
 }
 
-// --- Live runtime SSE events + transcript model ---
+// Live runtime SSE events + transcript model
 export interface LiveEvent {
   seq: number;
   type:

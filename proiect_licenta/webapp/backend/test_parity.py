@@ -1,11 +1,10 @@
-"""Parity test — the web pipeline must match the trusted benchmark exactly.
+"""Parity test: the web pipeline must match the benchmark exactly.
 
-Asserts that driving a synthetic case through ``proiect_licenta.pipeline`` (the
-stage functions the FastAPI backend calls) yields the SAME acuity, triage admit,
-refined admit, diagnosis top-1 and department top-1 as the benchmark's
-``run_tool_direct`` — the reference orchestration the live crew is validated
-against. Same tool instances ⇒ identical predictions; any mismatch means the web
-wiring drifted from the crew.
+Asserts that driving a synthetic case through proiect_licenta.pipeline (the stage
+functions the FastAPI backend calls) yields the same acuity, triage admit,
+refined admit, diagnosis top-1, and department top-1 as the benchmark's
+run_tool_direct. Same tool instances give identical predictions; any mismatch
+means the web wiring drifted from the crew.
 
 Run from the repo root:
     uv run python webapp/backend/test_parity.py            # default: 12 cases
@@ -27,7 +26,7 @@ import benchmark_pipeline_e2e as B  # noqa: E402
 
 def _web_path(case: dict) -> dict:
     """Replicate exactly what the backend does for a case, no EHR lookup
-    (the plain self-report column — matches run_tool_direct's default)."""
+    (the plain self-report column - matches run_tool_direct's default)."""
     t = case["triage_inputs"]
     n = case["nurse_inputs"]
     tj = P.run_triage(
@@ -90,7 +89,7 @@ def main(n: int = 12) -> int:
     if failures:
         print("PARITY FAILED")
         return 1
-    print("PARITY OK — web pipeline is byte-identical to the crew path.")
+    print("PARITY OK: web pipeline matches the crew path.")
     return 0
 
 

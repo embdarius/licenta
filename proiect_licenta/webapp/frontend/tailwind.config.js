@@ -4,7 +4,7 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Restrained medical-blue primary used across actions and headers.
+        // Medical-blue primary used across actions and headers.
         clinical: {
           DEFAULT: "#1b5e9b",
           dark: "#164d80",

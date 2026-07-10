@@ -1,21 +1,11 @@
-"""
-Data Pipeline for Doctor Agent v3 base — MIMIC-IV Emergency Department
+"""Doctor v3 base training pipeline (MIMIC-IV-ED).
 
-Same architecture and feature set as Doctor v1, but with two changes:
-
-  1. The "Symptoms, Signs, Ill-Defined" catch-all class is excluded from
-     training and evaluation. This bucket absorbs ~33% of admitted patients
-     and ~20-28% of misclassifications from every other category. Removing
-     it reframes the task as "given a patient with a clinically meaningful
-     diagnostic category, predict the category and department" — a label
-     space of 13 classes instead of 14.
-
-  2. The 100K stratified sample cap is removed. After exclusion the dataset
-     is ~102K rows, so the pipeline trains on the full filtered set.
-
-Doctor v1 / v2 artifacts and training files are intentionally left unchanged
-so the thesis can present a four-way comparison (v1, v2, v3 base, v3 with
-nurse). Triage stays at v1 — v3 reuses TRIAGE_V1_DIR for cascading features.
+Same architecture as Doctor v1 with two changes: the "Symptoms, Signs,
+Ill-Defined" catch-all class is excluded (13 classes instead of 14, since it
+absorbs ~33% of admitted patients and a large share of misclassifications), and
+the 100K sample cap is removed so it trains on the full ~102K filtered set. v1/v2
+artifacts are left unchanged for the four-way thesis comparison. Cascading
+features use triage v1 (TRIAGE_V1_DIR).
 """
 
 import os
@@ -35,9 +25,7 @@ from xgboost import XGBClassifier
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 # Doctor v3 base reuses triage v1's tfidf/severity_map/cascading models
 # (same as v1 and v2 do) and writes artifacts to the new v3_base directory.
 from proiect_licenta.paths import (
@@ -46,9 +34,7 @@ from proiect_licenta.paths import (
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV, DIAGNOSIS_CSV, SERVICES_CSV,
 )
 
-# ---------------------------------------------------------------------------
 # Reused constants from the v1 pipeline (single source of truth)
-# ---------------------------------------------------------------------------
 from proiect_licenta.training.train_doctor import (
     CATCH_ALL_LABEL,
     DIAGNOSIS_GROUP_MAP,
@@ -56,24 +42,18 @@ from proiect_licenta.training.train_doctor import (
     DEPARTMENT_NAMES,
 )
 
-# ---------------------------------------------------------------------------
 # Shared complaint preprocessing
-# ---------------------------------------------------------------------------
 from proiect_licenta.preprocessing import normalize_complaint_text, ABBREVIATIONS  # noqa: F401
 
 
-# ---------------------------------------------------------------------------
-# 1. Load & Clean Data — Admitted patients with diagnosis + service
-# ---------------------------------------------------------------------------
+# 1. Load & Clean Data - Admitted patients with diagnosis + service
 def load_and_clean_data() -> pd.DataFrame:
     """Load triage + edstays + patients + diagnosis + services for admitted patients.
 
     Identical to train_doctor.load_and_clean_data, but filters out the
     catch-all class after applying the diagnosis grouping.
     """
-    print("=" * 60)
-    print("STEP 1: Loading data (admitted patients only, v3 — catch-all excluded)")
-    print("=" * 60)
+    print("Loading data (admitted patients only, v3 - catch-all excluded)")
 
     # Load triage
     triage = pd.read_csv(TRIAGE_CSV)
@@ -110,34 +90,34 @@ def load_and_clean_data() -> pd.DataFrame:
     )
     print(f"  services.csv (first per admission): {len(services_first):,} rows")
 
-    # ── Filter to admitted patients ──
+    # Filter to admitted patients
     admitted = edstays[edstays["disposition"] == "ADMITTED"].copy()
     print(f"\n  Admitted stays: {len(admitted):,}")
 
-    # ── Merge all tables ──
+    # Merge all tables
     df = triage.merge(admitted, on=["subject_id", "stay_id"], how="inner")
     df = df.merge(patients, on="subject_id", how="left")
     df = df.merge(diag, on="stay_id", how="inner")
     df = df.merge(services_first, on="hadm_id", how="inner")
     print(f"  After full merge (triage+edstays+patients+diag+services): {len(df):,}")
 
-    # ── Compute age ──
+    # Compute age
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # ── Clean chief complaints ──
+    # Clean chief complaints
     initial = len(df)
     df = df.dropna(subset=["chiefcomplaint", "category", "curr_service"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
     print(f"  After dropping missing data: {len(df):,} (dropped {initial - len(df):,})")
 
-    # ── Apply category groupings ──
+    # Apply category groupings
     df["diagnosis_group"] = df["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
     df["service_group"] = df["curr_service"].map(SERVICE_GROUP_MAP).fillna("OTHER")
 
-    # ── v3-specific: drop catch-all class ──
+    # v3-specific: drop catch-all class
     before = len(df)
     df = df[df["diagnosis_group"] != CATCH_ALL_LABEL].reset_index(drop=True)
     dropped = before - len(df)
@@ -145,26 +125,26 @@ def load_and_clean_data() -> pd.DataFrame:
           f"{before:,} -> {len(df):,} ({dropped:,} dropped, "
           f"{100 * dropped / before:.1f}%)")
 
-    # ── Clean pain ──
+    # Clean pain
     df["pain"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain"].isna().astype(int)
     df["pain"] = df["pain"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
 
-    # ── Encode demographics ──
+    # Encode demographics
     df["gender_male"] = (df["gender"] == "M").astype(int)
     df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
     df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
-    # ── Acuity (for ground truth reference; triage predictions will be generated) ──
+    # Acuity (for ground truth reference; triage predictions will be generated)
     df["acuity"] = pd.to_numeric(df["acuity"], errors="coerce")
     df = df[df["acuity"].between(1, 5)]
     df["acuity"] = df["acuity"].astype(int)
     df["admitted"] = 1  # all rows are admitted
 
-    # ── Print distributions ──
+    # Print distributions
     print(f"\n  Diagnosis Category Distribution (grouped, 13 classes):")
     for cat in df["diagnosis_group"].value_counts().index:
         count = (df["diagnosis_group"] == cat).sum()
@@ -181,32 +161,28 @@ def load_and_clean_data() -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
 # 2. Build features (reuses triage TF-IDF + severity map + triage predictions)
-# ---------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Build feature matrix using saved triage artifacts for cascading predictions."""
-    print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering (using saved triage artifacts)")
-    print("=" * 60)
+    print("Feature engineering (using saved triage artifacts)")
 
     df = df.copy()
 
-    # ── Load triage artifacts ──
+    # Load triage artifacts
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(TRIAGE_MODELS_DIR / "severity_map.joblib")
     acuity_model = joblib.load(TRIAGE_MODELS_DIR / "acuity_model.joblib")
     disposition_model = joblib.load(TRIAGE_MODELS_DIR / "disposition_model.joblib")
     print("  Loaded triage artifacts: tfidf, severity_map, acuity_model, disposition_model")
 
-    # ── Normalize complaint text ──
+    # Normalize complaint text
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # ── TF-IDF (transform only, using saved vectorizer) ──
+    # TF-IDF (transform only, using saved vectorizer)
     tfidf_matrix = tfidf.transform(df["complaint_text"])
     tfidf_df = pd.DataFrame(
         tfidf_matrix.toarray(),
@@ -215,7 +191,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     print(f"  TF-IDF features: {tfidf_df.shape[1]}")
 
-    # ── Severity priors ──
+    # Severity priors
     def compute_severity_priors(text: str) -> tuple:
         words = text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
@@ -230,18 +206,18 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["max_severity_prior"] = severity_features.apply(lambda x: x[2])
     df["std_severity_prior"] = severity_features.apply(lambda x: x[3])
 
-    # ── Age bins ──
+    # Age bins
     df["age_bin"] = pd.cut(
         df["age"], bins=[0, 18, 35, 50, 65, 80, 120],
         labels=[0, 1, 2, 3, 4, 5],
     ).astype(float).fillna(2)
 
-    # ── Pain bins ──
+    # Pain bins
     df["pain_low"] = ((df["pain"] >= 0) & (df["pain"] <= 3)).astype(int)
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
-    # ── Interaction features ──
+    # Interaction features
     df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
     df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
     df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
@@ -249,7 +225,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # ── Assemble triage feature vector (same order as triage pipeline) ──
+    # Assemble triage feature vector (same order as triage pipeline)
     structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
         "n_complaints", "complaint_length",
@@ -265,14 +241,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     tfidf_df = tfidf_df.reset_index(drop=True)
     triage_features = pd.concat([structured, tfidf_df], axis=1)
 
-    # ── Generate triage predictions (cascading) ──
+    # Generate triage predictions (cascading)
     print("  Generating triage predictions (acuity + disposition)...")
-    predicted_acuity = acuity_model.predict(triage_features) + 1  # 0-4 → 1-5
+    predicted_acuity = acuity_model.predict(triage_features) + 1  # 0-4 -> 1-5
     triage_features_disp = triage_features.copy()
     triage_features_disp["predicted_acuity"] = predicted_acuity
     predicted_disposition = disposition_model.predict(triage_features_disp)
 
-    # ── Add triage predictions as features for doctor model ──
+    # Add triage predictions as features for doctor model
     triage_features["predicted_acuity"] = predicted_acuity
     triage_features["predicted_disposition"] = predicted_disposition
 
@@ -283,9 +259,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return triage_features
 
 
-# ---------------------------------------------------------------------------
 # 3. Train Diagnosis Model
-# ---------------------------------------------------------------------------
 def train_diagnosis_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -294,9 +268,7 @@ def train_diagnosis_model(
     label_names: list,
 ) -> XGBClassifier:
     """Train diagnosis category model with XGBoost."""
-    print("\n" + "=" * 60)
-    print("STEP 4a: Training DIAGNOSIS CATEGORY model (XGBoost, v3 base)")
-    print("=" * 60)
+    print("Training DIAGNOSIS CATEGORY model (XGBoost, v3 base)")
 
     n_classes = len(label_names)
 
@@ -346,9 +318,7 @@ def train_diagnosis_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 4. Train Department Model
-# ---------------------------------------------------------------------------
 def train_department_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -357,9 +327,7 @@ def train_department_model(
     label_names: list,
 ) -> XGBClassifier:
     """Train department prediction model with XGBoost."""
-    print("\n" + "=" * 60)
-    print("STEP 4b: Training DEPARTMENT model (XGBoost, v3 base)")
-    print("=" * 60)
+    print("Training DEPARTMENT model (XGBoost, v3 base)")
 
     n_classes = len(label_names)
 
@@ -409,9 +377,7 @@ def train_department_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 5. Save Artifacts
-# ---------------------------------------------------------------------------
 def save_models(
     diagnosis_model,
     department_model,
@@ -423,9 +389,7 @@ def save_models(
     n_test: int,
 ):
     """Save trained doctor v3 base models and metadata."""
-    print("\n" + "=" * 60)
-    print("STEP 5: Saving doctor v3 base model artifacts")
-    print("=" * 60)
+    print("Saving doctor v3 base model artifacts")
 
     DOCTOR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -462,22 +426,16 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
-    print("  Doctor Agent — Model Training Pipeline v3 base")
+    print("  Doctor Agent - Model Training Pipeline v3 base")
     print("  (Catch-all excluded, full dataset, no nurse data)")
-    print("#" * 60)
 
     # 1. Load (with catch-all filter applied inside)
     df = load_and_clean_data()
 
     # 2. v3: NO sub-sampling. Train on the full filtered set.
-    print("\n" + "=" * 60)
-    print(f"STEP 2b: Using full dataset (no sub-sampling) — {len(df):,} rows")
-    print("=" * 60)
+    print(f"Using full dataset (no sub-sampling) - {len(df):,} rows")
 
     # 3. Build features
     features = build_features(df)
@@ -500,9 +458,7 @@ def main():
     print(f"  Department classes ({len(department_labels)}): {department_labels}")
 
     # 5. Train/test split (80/20, stratified by diagnosis)
-    print("\n" + "=" * 60)
-    print("STEP 3: Train/test split (80/20, stratified by diagnosis)")
-    print("=" * 60)
+    print("Train/test split (80/20, stratified by diagnosis)")
 
     X_train, X_test, y_diag_train, y_diag_test, y_dept_train, y_dept_test = \
         train_test_split(
@@ -537,12 +493,9 @@ def main():
         n_train=len(X_train), n_test=len(X_test),
     )
 
-    print("\n" + "#" * 60)
-    print("  TRAINING COMPLETE! (v3 base)")
-    print("#" * 60)
+    print("Training complete (v3 base).")
     print(f"  Diagnosis accuracy:   {diag_accuracy:.4f}  ({len(diagnosis_labels)} classes)")
     print(f"  Department accuracy:  {dept_accuracy:.4f}  ({len(department_labels)} classes)")
-    print("#" * 60 + "\n")
 
 
 if __name__ == "__main__":

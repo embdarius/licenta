@@ -1,10 +1,9 @@
-"""Constrained Optuna hyperparameter sweep for the Doctor v3 DEPARTMENT and
-DISPOSITION heads.
+"""Constrained Optuna sweep for the doctor v3 department and disposition heads.
 
-REPORTING-ONLY. Mirrors scripts/tune_triage_v3.py: it searches only the
-inherited "Group 2" XGBoost regularization knobs (max_depth, subsample,
-colsample_*, min_child_weight, gamma, reg_alpha, reg_lambda). Each head's
-documented "Group 1" config is FROZEN — the values are the hand-picked defaults
+Reporting-only. Mirrors scripts/tune_triage_v3.py: it searches only the inherited
+"Group 2" XGBoost regularization knobs (max_depth, subsample, colsample_*,
+min_child_weight, gamma, reg_alpha, reg_lambda). Each head's
+documented "Group 1" config is FROZEN - the values are the hand-picked defaults
 baked into the training pipelines:
 
   * department  (train_nurse_v3.train_model):
@@ -23,13 +22,13 @@ so nothing produced by the training notebooks or the older write-mode diagnosis
 sweep (scripts/tune_doctor_v3.py) is overwritten.
 
 Objective design:
-  * department  — maximize macro-F1 across the 11 service classes (matches the
+  * department  - maximize macro-F1 across the 11 service classes (matches the
                   diagnosis sweep's "useful across categories" thesis). No
                   constraint. The diagnosis-softmax cascade is built once per
                   run from a diagnosis model trained on the inner-train split
                   (using the existing tuned_params.json if present) and reused
                   across all trials, so only the department Group-2 varies.
-  * disposition — maximize ROC AUC SUBJECT TO a hard constraint: under-triage
+  * disposition - maximize ROC AUC SUBJECT TO a hard constraint: under-triage
                   rate (admit predicted as discharge, threshold 0.5) <= the
                   incumbent's. The current (hand-tuned) Group-2 values are
                   enqueued as trial 0 and define that baseline in-sample on the
@@ -53,10 +52,10 @@ Stages:
                           and write doctor_hpo_results.json (thesis table)
 
 Pre-flight:
-    --selftest            synthetic, CPU-only, no MIMIC/GPU — validates all
+    --selftest            synthetic, CPU-only, no MIMIC/GPU - validates all
                           plumbing (study + JSON log + resume + constraint flag)
                           in seconds, for BOTH heads
-    --smoke               real-data subsample, throwaway paths, fast trees —
+    --smoke               real-data subsample, throwaway paths, fast trees -
                           run on Colab GPU BEFORE committing to a full sweep
 
 Usage on Colab (after symlinking artifacts/ + data/ to Drive):
@@ -75,12 +74,10 @@ from datetime import datetime
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
 # Python 3.12 / pydantic / optuna compatibility shim (copied verbatim from
 # scripts/tune_triage_v3.py). Pydantic (via CrewAI) monkey-patches
 # warnings.warn with a filter that predates 3.12's skip_file_prefixes kwarg,
 # which optuna passes. Wrap it kwargs-tolerantly. Must run before `import optuna`.
-# ---------------------------------------------------------------------------
 import warnings as _w
 if not getattr(_w, "_optuna_compat_patched", False):
     _patched_warn = _w.warn
@@ -102,7 +99,7 @@ def _ensure_warn_shim():
     """Re-wrap ``warnings.warn`` so it tolerates Optuna's py3.12
     ``skip_file_prefixes`` kwarg. The top-level shim runs at import time, but
     building the feature caches imports the training modules, which pull in
-    crewai/pydantic — and pydantic RE-patches ``warnings.warn`` with a wrapper
+    crewai/pydantic - and pydantic RE-patches ``warnings.warn`` with a wrapper
     that rejects unknown kwargs, clobbering our shim. Calling this right before
     any ``optuna.create_study`` re-installs a tolerant wrapper around whatever
     ``warnings.warn`` is current. Idempotent (marked via ``_kwargs_tolerant``)."""
@@ -157,9 +154,7 @@ XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 DEPT_STUDY_NAME = "doctor_department_macro_f1"
 DISP_STUDY_NAME = "doctor_disposition_auc"
 
@@ -178,7 +173,7 @@ DISP_LEARNING_RATE = 0.02
 DISP_EARLY_STOPPING = 150
 
 # The current hand-tuned Group-2 values (identical across the doctor heads and
-# the triage heads — they were all inherited from v1/v2). Enqueued as trial 0
+# the triage heads - they were all inherited from v1/v2). Enqueued as trial 0
 # of each study so Optuna always evaluates the incumbent first; for disposition
 # its inner-val under-triage rate becomes the feasibility threshold.
 FROZEN_GROUP2 = {
@@ -193,10 +188,8 @@ FROZEN_GROUP2 = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Group-2 search space (regularization box; identical to
 # tune_triage_v3.suggest_group2).
-# ---------------------------------------------------------------------------
 def suggest_group2(trial) -> dict:
     return {
         "max_depth": trial.suggest_int("max_depth", 4, 12),
@@ -210,14 +203,12 @@ def suggest_group2(trial) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Group-1 search (the per-head cost/weighting config). SINGLE-OBJECTIVE per the
-# doctor Group-1 plan — lower priority than triage's, mostly a cost/fidelity
+# doctor Group-1 plan - lower priority than triage's, mostly a cost/fidelity
 # envelope (the class-weight exponent was already validated ~0.52 by the
 # diagnosis sweep). Group-2 stays frozen at FROZEN_GROUP2 throughout. Department
 # keeps the unconstrained macro-F1 objective; disposition keeps the under-triage
-# constraint — i.e. the same objectives/constraints as the Group-2 sweep.
-# ---------------------------------------------------------------------------
+# constraint - i.e. the same objectives/constraints as the Group-2 sweep.
 DEPT_G1_STUDY_NAME = "doctor_department_g1"
 DISP_G1_STUDY_NAME = "doctor_disposition_g1"
 
@@ -265,9 +256,7 @@ def _g1_disp_gcfg(base: dict, p: dict) -> dict:
     return g
 
 
-# ---------------------------------------------------------------------------
 # Per-trial XGBoost iteration progress bar (tqdm). Optional; silent fallback.
-# ---------------------------------------------------------------------------
 def _make_trial_progress_callback(n_total: int, desc: str):
     try:
         from tqdm.auto import tqdm as _tqdm
@@ -298,12 +287,10 @@ def _make_trial_progress_callback(n_total: int, desc: str):
     return _TqdmTrialCallback()
 
 
-# ---------------------------------------------------------------------------
 # Lean per-head trainers (frozen Group-1 + given Group-2; no calibration).
-# ---------------------------------------------------------------------------
 def _sqrt_inverse_weights(y_train: pd.Series, n_classes: int,
                           exponent: float) -> pd.Series:
-    """weight = (N / (K * count[c])) ** exponent — identical to
+    """weight = (N / (K * count[c])) ** exponent - identical to
     train_nurse_v3.train_model (Group-1 frozen at exponent=0.5)."""
     class_counts = y_train.value_counts()
     total = len(y_train)
@@ -369,14 +356,12 @@ def train_disposition(X_tr, y_tr, X_val, y_val, group2, gcfg, desc):
 
 
 def _predict_labels(model, X) -> np.ndarray:
-    """argmax over predict_proba — robust to the XGBoost GPU multi:softprob
+    """argmax over predict_proba - robust to the XGBoost GPU multi:softprob
     quirk where predict() can return a 2-D matrix (same helper as nurse_v3)."""
     return np.argmax(model.predict_proba(X), axis=1)
 
 
-# ---------------------------------------------------------------------------
 # Metrics
-# ---------------------------------------------------------------------------
 def department_metrics(y_true, y_pred, labels=None) -> dict:
     out = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -430,9 +415,7 @@ def disposition_metrics(y_true, y_pred, y_prob, full: bool = False) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Isotonic calibration (A4 pattern; report stage only).
-# ---------------------------------------------------------------------------
 def _calibrate(raw, X_cal, y_cal):
     if _HAS_FROZEN:
         cal = CalibratedClassifierCV(FrozenEstimator(raw), method="isotonic",
@@ -443,11 +426,9 @@ def _calibrate(raw, X_cal, y_cal):
     return cal
 
 
-# ---------------------------------------------------------------------------
 # Feature caches
-# ---------------------------------------------------------------------------
 # Department: reuse the SAME cache the older write-mode diagnosis sweep
-# (scripts/tune_doctor_v3.py) builds — `data/derived/tune_cache/`. Identical
+# (scripts/tune_doctor_v3.py) builds - `data/derived/tune_cache/`. Identical
 # filenames + columns so the parquet is shared and built only once across both
 # sweeps. If absent, build it from the nurse_v3 pipeline.
 DEPT_CACHE_DIR = DERIVED_DIR / "tune_cache"
@@ -495,7 +476,7 @@ def load_or_build_dept_cache(cache_dir: Path, rebuild: bool, subsample: int | No
         if features[c].dtype == "float64":
             features[c] = features[c].astype("float32")
 
-    # Always persist — smoke builds go to their own throwaway `*_smoke` dir
+    # Always persist - smoke builds go to their own throwaway `*_smoke` dir
     # (set in main()), so caching them just makes repeat smoke runs fast too.
     features.to_parquet(fx, index=False)
     pd.DataFrame({"y_diag": y_diag, "y_dept": y_dept}).to_parquet(fy, index=False)
@@ -541,7 +522,7 @@ def load_or_build_disp_cache(cache_dir: Path, rebuild: bool, subsample: int | No
         if features[c].dtype == "float64":
             features[c] = features[c].astype("float32")
 
-    # Always persist — smoke builds go to their own throwaway `smoke/` subdir
+    # Always persist - smoke builds go to their own throwaway `smoke/` subdir
     # (set in main()), so caching them just makes repeat smoke runs fast too.
     features.to_parquet(fx, index=False)
     pd.DataFrame({"admitted": y}).to_parquet(fy, index=False)
@@ -555,10 +536,8 @@ def load_or_build_disp_cache(cache_dir: Path, rebuild: bool, subsample: int | No
     return features, y
 
 
-# ---------------------------------------------------------------------------
-# Incremental JSON log — rewritten after every completed trial (atomic).
+# Incremental JSON log - rewritten after every completed trial (atomic).
 # (copied from tune_triage_v3.py)
-# ---------------------------------------------------------------------------
 def _atomic_write_json(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -669,9 +648,7 @@ def make_trial_logger(log_path: Path, stage: str, out_dir: Path):
     return _log
 
 
-# ---------------------------------------------------------------------------
 # tuned_params_doctor.json read/update (preserve sibling blocks across stages)
-# ---------------------------------------------------------------------------
 def _tuned_path(out_dir: Path, fname: str = "tuned_params_doctor.json") -> Path:
     return out_dir / fname
 
@@ -694,15 +671,13 @@ def _update_tuned_params(out_dir: Path, key: str, block: dict, quiet: bool = Fal
 G1_TUNED_FNAME = "tuned_params_doctor_g1.json"
 
 
-# ---------------------------------------------------------------------------
 # Diagnosis cascade (department head needs the 13 diag_proba_* columns)
-# ---------------------------------------------------------------------------
 def _build_cascade_diag_model(X_tr, y_diag_tr, X_val, y_diag_val,
                               diagnosis_labels, gcfg, cache_path=None,
                               rebuild=False):
     """Train ONE diagnosis model for the cascade (reused across all department
     trials). Uses the existing write-mode tuned diagnosis params if present
-    (artifacts/doctor/v3/tuned_params.json), else hand-picked defaults — exactly
+    (artifacts/doctor/v3/tuned_params.json), else hand-picked defaults - exactly
     as train_nurse_v3.main() does.
 
     The fitted model is cached to `cache_path` (joblib) so repeated department
@@ -737,9 +712,7 @@ def _build_cascade_diag_model(X_tr, y_diag_tr, X_val, y_diag_val,
     return model
 
 
-# ---------------------------------------------------------------------------
 # Stage: department (macro-F1)
-# ---------------------------------------------------------------------------
 def run_department_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
     from proiect_licenta.training.train_nurse_v3 import (
         build_diag_cascade_cols, _attach_diag_cascade,
@@ -804,7 +777,6 @@ def run_department_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
                    gc_after_trial=True)
 
     best = study.best_trial
-    print("\n" + "=" * 60)
     print(f"  Best department trial: #{best.number}  macro_f1={best.value:.4f}  "
           f"acc={best.user_attrs['accuracy']*100:.2f}%")
     for k, v in best.params.items():
@@ -812,9 +784,7 @@ def run_department_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
     _update_tuned_params(out_dir, "department", _dept_block(study, best))
 
 
-# ---------------------------------------------------------------------------
 # Stage: disposition (constrained ROC AUC)
-# ---------------------------------------------------------------------------
 def run_disposition_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
     X, y = load_or_build_disp_cache(
         cache_dir, rebuild=args.rebuild_features,
@@ -876,7 +846,6 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
                    gc_after_trial=True)
 
     best = best_feasible_trial(study)
-    print("\n" + "=" * 60)
     if best is None:
         print("  No feasible trial yet (none matched the under-triage baseline).")
         return
@@ -888,24 +857,22 @@ def run_disposition_stage(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
     _update_tuned_params(out_dir, "disposition", _disp_block(study, best))
 
 
-# ---------------------------------------------------------------------------
-# Stage: report — incumbent vs best on the OUTER test split.
-# ---------------------------------------------------------------------------
+# Stage: report - incumbent vs best on the OUTER test split.
 def run_report_stage(args, gcfg, optuna, out_dir, dept_cache_dir, disp_cache_dir):
     tuned = _read_tuned_params(out_dir) or {}
     results = {"generated_at": datetime.now().isoformat()}
 
-    # ---- Department ----
+    # Department
     if tuned.get("department"):
         results["department"] = _report_department(args, gcfg, tuned, dept_cache_dir)
     else:
-        print("  [department] no tuned block yet — skipping.")
+        print("  [department] no tuned block yet - skipping.")
 
-    # ---- Disposition ----
+    # Disposition
     if tuned.get("disposition"):
         results["disposition"] = _report_disposition(args, gcfg, tuned, disp_cache_dir)
     else:
-        print("  [disposition] no tuned block yet — skipping.")
+        print("  [disposition] no tuned block yet - skipping.")
 
     out = out_dir / "doctor_hpo_results.json"
     _atomic_write_json(out, results)
@@ -1031,12 +998,10 @@ def _print_report_summary(results):
                   f"under={p['delta_under_rate']*100:+.2f}pp")
 
 
-# ===========================================================================
-# Group-1 single-objective sweep — the per-head cost/weighting config.
+# Group-1 single-objective sweep - the per-head cost/weighting config.
 # Same objectives/constraints as Group-2 (department: macro-F1; disposition:
 # constrained ROC AUC); Group-2 frozen at FROZEN_GROUP2; the SEARCH varies the
 # Group-1 knobs (lr, n_estimators, class-weight / scale_pos_weight exponent).
-# ===========================================================================
 def _g1_dept_block(study, best) -> dict:
     return {
         "study_name": study.study_name,
@@ -1076,7 +1041,7 @@ def _g1_disp_block(study, best) -> dict:
 
 
 def make_trial_logger_g1(log_path: Path, stage: str, out_dir: Path):
-    """Group-1 Optuna callback — same shape as make_trial_logger but persists to
+    """Group-1 Optuna callback - same shape as make_trial_logger but persists to
     tuned_params_doctor_g1.json with the Group-1 block builders. trial.params
     carries the Group-1 knobs (lr/n_estimators/exponent)."""
     def _log(study, trial):
@@ -1191,7 +1156,6 @@ def run_department_stage_g1(args, gcfg, optuna, TPESampler, out_dir, cache_dir):
                    callbacks=[make_trial_logger_g1(log_path, "department", out_dir)],
                    gc_after_trial=True)
     best = study.best_trial
-    print("\n" + "=" * 60)
     print(f"  Best department Group-1 trial: #{best.number}  "
           f"macro_f1={best.value:.4f}  acc={best.user_attrs['accuracy']*100:.2f}%")
     for k, v in best.params.items():
@@ -1256,7 +1220,6 @@ def run_disposition_stage_g1(args, gcfg, optuna, TPESampler, out_dir, cache_dir)
                    callbacks=[make_trial_logger_g1(log_path, "disposition", out_dir)],
                    gc_after_trial=True)
     best = best_feasible_trial(study)
-    print("\n" + "=" * 60)
     if best is None:
         print("  No feasible trial yet (none matched the under-triage baseline).")
         return
@@ -1269,7 +1232,7 @@ def run_disposition_stage_g1(args, gcfg, optuna, TPESampler, out_dir, cache_dir)
                          fname=G1_TUNED_FNAME)
 
 
-# ---- Group-1 report (incumbent vs best on outer-test; live calibrated) ------
+# Group-1 report (incumbent vs best on outer-test; live calibrated)
 # Live operating point for the doctor disposition head (doctor_disposition_tool
 # DECISION_THRESHOLD; tuned from 0.50 via benchmarks/sweep_disposition_threshold).
 DISP_LIVE_THRESHOLD = 0.40
@@ -1282,11 +1245,11 @@ def run_report_stage_g1(args, gcfg, optuna, out_dir, dept_cache_dir, disp_cache_
     if tuned.get("department"):
         results["department"] = _report_department_g1(args, gcfg, tuned, dept_cache_dir)
     else:
-        print("  [department] no Group-1 block yet — skipping.")
+        print("  [department] no Group-1 block yet - skipping.")
     if tuned.get("disposition"):
         results["disposition"] = _report_disposition_g1(args, gcfg, tuned, disp_cache_dir)
     else:
-        print("  [disposition] no Group-1 block yet — skipping.")
+        print("  [disposition] no Group-1 block yet - skipping.")
     out = out_dir / "doctor_hpo_g1_results.json"
     _atomic_write_json(out, results)
     print(f"\n  Wrote {out}")
@@ -1420,13 +1383,9 @@ def _print_report_summary_g1(results):
                   f"under={p['delta_under_rate']*100:+.2f}pp")
 
 
-# ---------------------------------------------------------------------------
-# Self-test (synthetic, local, no MIMIC / no GPU) — both heads.
-# ---------------------------------------------------------------------------
+# Self-test (synthetic, local, no MIMIC / no GPU) - both heads.
 def run_selftest():
-    print("=" * 60)
-    print("  SELFTEST — synthetic data, CPU, throwaway paths (both heads)")
-    print("=" * 60)
+    print("  SELFTEST - synthetic data, CPU, throwaway paths (both heads)")
     import optuna
     from optuna.samplers import TPESampler
 
@@ -1448,7 +1407,7 @@ def run_selftest():
     tmp = Path(tempfile.mkdtemp(prefix="doctor_hpo_selftest_"))
     storage = f"sqlite:///{tmp / 'selftest.db'}"
 
-    # ---- department (macro-F1, unconstrained) ----
+    # department (macro-F1, unconstrained)
     y_dept = pd.Series(rng.integers(0, 4, n))
     Xtr, Xval, ytr, yval = train_test_split(X, y_dept, test_size=0.3, random_state=1)
     dept_log = tmp / "tuning_log_department.json"
@@ -1473,7 +1432,7 @@ def run_selftest():
     assert dl["n_complete"] >= 1, "no completed department trial"
     assert "macro_f1" in dl["trials"][0], "macro_f1 missing from dept log"
 
-    # ---- disposition (constrained ROC AUC) ----
+    # disposition (constrained ROC AUC)
     y_disp = pd.Series(rng.integers(0, 2, n))
     Xtr2, Xval2, ytr2, yval2 = train_test_split(X, y_disp, test_size=0.3, random_state=1)
     disp_log = tmp / "tuning_log_disposition.json"
@@ -1508,7 +1467,7 @@ def run_selftest():
     assert pl["n_complete"] >= 1, "no completed disposition trial"
     assert "feasible" in pl["trials"][0], "constraint/feasible flag missing"
 
-    # ---- resume + reporting-only guarantees ----
+    # resume + reporting-only guarantees
     reopened = optuna.load_study(study_name="st_disp", storage=storage)
     assert len(reopened.trials) >= 1, "study did not persist for resume"
     tp = _read_tuned_params(tmp) or {}
@@ -1532,9 +1491,7 @@ def run_selftest_g1():
     """Synthetic CPU plumbing test for the Group-1 path (both heads, single-
     objective): studies build, trials complete, tuned_params_doctor_g1.json gets
     'selected' blocks, constraint flag present, live models untouched."""
-    print("=" * 60)
-    print("  SELFTEST (Group-1) — synthetic data, CPU, throwaway paths (both heads)")
-    print("=" * 60)
+    print("  SELFTEST (Group-1) - synthetic data, CPU, throwaway paths (both heads)")
     import optuna
     from optuna.samplers import TPESampler
 
@@ -1552,7 +1509,7 @@ def run_selftest_g1():
     tmp = Path(tempfile.mkdtemp(prefix="doctor_hpo_g1_selftest_"))
     storage = f"sqlite:///{tmp / 'selftest_g1.db'}"
 
-    # ---- department (macro-F1, Group-1) ----
+    # department (macro-F1, Group-1)
     y_dept = pd.Series(rng.integers(0, 4, n))
     Xtr, Xval, ytr, yval = train_test_split(X, y_dept, test_size=0.3, random_state=1)
     dept_log = tmp / "tuning_log_department_g1.json"
@@ -1577,7 +1534,7 @@ def run_selftest_g1():
     dl = json.loads(dept_log.read_text())
     assert dl["n_complete"] >= 1 and "macro_f1" in dl["trials"][0], "dept G1 log malformed"
 
-    # ---- disposition (constrained ROC AUC, Group-1) ----
+    # disposition (constrained ROC AUC, Group-1)
     y_disp = pd.Series(rng.integers(0, 2, n))
     Xtr2, Xval2, ytr2, yval2 = train_test_split(X, y_disp, test_size=0.3, random_state=1)
     disp_log = tmp / "tuning_log_disposition_g1.json"
@@ -1660,9 +1617,7 @@ def _apply_group1_best(gcfg: dict, out_dir: Path) -> dict:
     return g
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def _make_gcfg(smoke: bool) -> dict:
     """Frozen Group-1 training config. Smoke reduces trees purely for speed
     (throwaway numbers); full runs use the documented frozen constants."""
@@ -1751,20 +1706,17 @@ def main():
         else:
             gcfg = _apply_group1_best(gcfg, out_dir)
 
-    print("=" * 60)
-    print(f"  Doctor v3 HPO — group={args.group} stage={args.stage}"
+    print(f"  Doctor v3 HPO - group={args.group} stage={args.stage}"
           f"{'  [SMOKE]' if args.smoke else ''}")
-    print("=" * 60)
     print(f"  storage:    {args.storage}")
     print(f"  out_dir:    {out_dir}")
     print(f"  dept_cache: {dept_cache}")
     print(f"  disp_cache: {disp_cache}")
     print(f"  device:     {XGB_DEVICE}  tree_method: {XGB_TREE_METHOD}")
     if XGB_DEVICE == "cpu":
-        print("  WARNING: device is CPU — training will be very slow. Set "
+        print("  WARNING: device is CPU - training will be very slow. Set "
               "XGB_DEVICE=cuda (and use a GPU runtime) before running.")
-    print(f"  REPORTING-ONLY: live models in {DOCTOR_V3_DIR} will NOT be modified.")
-    print("=" * 60)
+    print(f"  Reporting only: live models in {DOCTOR_V3_DIR} will NOT be modified.")
 
     if g1:
         if args.stage == "department":

@@ -19,7 +19,7 @@ from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Polygon
 
 OUT = Path(__file__).resolve().parent.parent / "thesis_article" / "template" / "figs"
 
-# (fill, edge) palette — soft fills, darker edges.
+# (fill, edge) palette - soft fills, darker edges.
 C = {
     "user":    ("#EAEAEA", "#555555"),
     "parser":  ("#DAE8FC", "#3B6EA5"),
@@ -83,9 +83,7 @@ def save(fig, name):
     print("wrote", p)
 
 
-# ---------------------------------------------------------------------------
-# 1. Cap. 2 — obiective_flux.png : patient-journey overview (user perspective)
-# ---------------------------------------------------------------------------
+# 1. Cap. 2 - obiective_flux.png : patient-journey overview (user perspective)
 def fig_obiective_flux():
     fig, ax = plt.subplots(figsize=(12, 4.6))
     ax.set_xlim(0, 100); ax.set_ylim(0, 46); ax.axis("off")
@@ -119,9 +117,7 @@ def fig_obiective_flux():
     save(fig, "obiective_flux.png")
 
 
-# ---------------------------------------------------------------------------
-# 2. Cap. 4 — arhitectura_logica.png : agents, 6 tasks, prediction cascade
-# ---------------------------------------------------------------------------
+# 2. Cap. 4 - arhitectura_logica.png : agents, 6 tasks, prediction cascade
 def fig_arhitectura_logica():
     fig, ax = plt.subplots(figsize=(12.5, 6.4))
     ax.set_xlim(0, 100); ax.set_ylim(0, 64); ax.axis("off")
@@ -188,9 +184,7 @@ def fig_arhitectura_logica():
     save(fig, "arhitectura_logica.png")
 
 
-# ---------------------------------------------------------------------------
-# 3. Cap. 5 — arhitectura_pachet.png : on-disk package structure
-# ---------------------------------------------------------------------------
+# 3. Cap. 5 - arhitectura_pachet.png : on-disk package structure
 def fig_arhitectura_pachet():
     fig, ax = plt.subplots(figsize=(12, 7.2))
     ax.set_xlim(0, 100); ax.set_ylim(0, 72); ax.axis("off")
@@ -237,9 +231,7 @@ def fig_arhitectura_pachet():
     save(fig, "arhitectura_pachet.png")
 
 
-# ---------------------------------------------------------------------------
-# 4. Cap. 5 — flux_executie.png : UML-ish sequence of the 6 tasks
-# ---------------------------------------------------------------------------
+# 4. Cap. 5 - flux_executie.png : UML-ish sequence of the 6 tasks
 def fig_flux_executie():
     fig, ax = plt.subplots(figsize=(12.5, 8.4))
     ax.set_xlim(0, 100); ax.set_ylim(0, 84); ax.axis("off")
@@ -288,9 +280,7 @@ def fig_flux_executie():
     save(fig, "flux_executie.png")
 
 
-# ---------------------------------------------------------------------------
-# 5. Cap. 5 — diagrama_clase_tools.png : UML class diagram of the tools
-# ---------------------------------------------------------------------------
+# 5. Cap. 5 - diagrama_clase_tools.png : UML class diagram of the tools
 def fig_diagrama_clase_tools():
     fig, ax = plt.subplots(figsize=(13, 7.6))
     ax.set_xlim(0, 130); ax.set_ylim(0, 76); ax.axis("off")
@@ -348,9 +338,7 @@ def fig_diagrama_clase_tools():
     save(fig, "diagrama_clase_tools.png")
 
 
-# ---------------------------------------------------------------------------
-# 6. Cap. 5 — model_date.png : MIMIC tables -> feature blocks -> labels
-# ---------------------------------------------------------------------------
+# 6. Cap. 5 - model_date.png : MIMIC tables -> feature blocks -> labels
 def fig_model_date():
     fig, ax = plt.subplots(figsize=(12.5, 8.2))
     ax.set_xlim(0, 100); ax.set_ylim(0, 82); ax.axis("off")
@@ -407,9 +395,7 @@ def fig_model_date():
     save(fig, "model_date.png")
 
 
-# ---------------------------------------------------------------------------
-# 7. Cap. 5 — interfata_web.png : browser <-> FastAPI <-> crew thread
-# ---------------------------------------------------------------------------
+# 7. Cap. 5 - interfata_web.png : browser <-> FastAPI <-> crew thread
 def fig_interfata_web():
     fig, ax = plt.subplots(figsize=(13, 6.6))
     ax.set_xlim(0, 130); ax.set_ylim(0, 66); ax.axis("off")

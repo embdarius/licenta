@@ -1,14 +1,9 @@
-"""
-Confirm Intake Tool — CrewAI Tool
+"""Confirm-intake tool: a human-in-the-loop checkpoint before triage.
 
-The NLP Parser calls this as its final step with the structured intake JSON it
-assembled. Behind the web UI an injected ``channel`` surfaces the parsed fields
-to the user as an editable form; the user can correct any extraction error, and
-the (possibly edited) JSON is returned for the parser to emit verbatim — a
-human-in-the-loop checkpoint before triage runs.
-
-At the terminal (no channel) it is a no-op: it returns the JSON unchanged, so
-the CLI flow (`uv run run_crew`) is unaffected.
+The NLP parser calls this last with its structured intake JSON. Behind the web UI
+an injected channel surfaces the parsed fields as an editable form; the user can
+correct any extraction error and the edited JSON is returned for the parser to
+emit. At the terminal (no channel) it returns the JSON unchanged.
 """
 
 import json
@@ -37,7 +32,7 @@ class ConfirmIntakeTool(BaseTool):
         "Present the structured intake you have assembled to the patient/clinician "
         "for confirmation and correction BEFORE triage. Call this once, as your "
         "final step, passing your assembled intake as a JSON string. It returns "
-        "the confirmed (possibly user-corrected) JSON — output exactly what it "
+        "the confirmed (possibly user-corrected) JSON - output exactly what it "
         "returns as your final answer, with no further changes."
     )
     args_schema: Type[BaseModel] = ConfirmIntakeInput

@@ -1,27 +1,15 @@
-"""
-Shared longitudinal-vitals builder for runtime inference.
-=========================================================
+"""Longitudinal-vitals builder for runtime inference.
 
-Training (`train_nurse_v3._aggregate_vitalsigns` + `_fill_longitudinal_vitals`)
-turns the multiple `vitalsign.csv` readings within `[intime, intime + 4h]` into
-the 41-column longitudinal feature block the doctor v3 + disposition models
-consume: per-vital min/max/last/delta, abnormal-reading counts, rhythm one-hot,
-`rhythm_irregular`, and `has_longitudinal_vitals`.
-
-At inference the runtime historically had only ONE vital snapshot, so the doctor
-tools collapsed the block to `min == max == last == snapshot`, `delta == 0`,
-counts == the 0/1 snapshot flag, and `has_longitudinal_vitals == 0`. That
-degraded representation systematically lowers the disposition model's admit
-probability (measured: mean P(admit) 0.624 → 0.486 on the validation admits).
-
-This module builds the SAME block from *multiple* readings when the nurse
-collects a short trajectory, so the runtime features match the training
-distribution. With ≥1 real reading per vital it also sets
-`has_longitudinal_vitals = 1` — matching how training treated any stay with
-`vitalsign.csv` coverage.
-
-The thresholds, clip ranges, rhythm bucketing, and column order are imported
-from `train_nurse_v3` so training and inference cannot drift.
+Training turns the multiple vitalsign.csv readings within [intime, intime + 4h]
+into the 41-column longitudinal block the doctor v3 and disposition models
+consume (per-vital min/max/last/delta, abnormal-reading counts, rhythm one-hot,
+rhythm_irregular, has_longitudinal_vitals). At inference the runtime historically
+had only one snapshot, collapsing the block and systematically lowering the
+disposition model's admit probability (mean P(admit) 0.624 to 0.486 on the
+validation admits). This module builds the same block from multiple readings when
+the nurse collects a short trajectory, so inference features match training. The
+thresholds, clip ranges, rhythm bucketing, and column order are imported from
+train_nurse_v3 so training and inference cannot drift.
 """
 
 from __future__ import annotations
@@ -48,7 +36,7 @@ _CLIP = {
 }
 
 # Abnormal-reading thresholds (mirror _aggregate_vitalsigns / _clean_vitals).
-# (count_col, vital, op, threshold) — op ">" or "<".
+# (count_col, vital, op, threshold) with op ">" or "<".
 _ABNORMAL = [
     ("n_fever_readings", "temperature", ">", 100.4),
     ("n_tachycardia_readings", "heartrate", ">", 100),
@@ -78,9 +66,11 @@ def _clip(vital: str, value: float) -> float:
 
 
 def _clean_readings(readings: Optional[dict]) -> dict:
-    """Coerce {vital: [raw, ...]} into {vital: [clipped float, ...]}, dropping
-    non-numeric / None entries and clipping to plausible ranges. Order (assumed
-    chronological) is preserved so `last` and `delta` are time-correct."""
+    """Coerce {vital: [raw, ...]} into {vital: [clipped float, ...]}.
+
+    Drops non-numeric/None entries and clips to plausible ranges. Chronological
+    order is preserved so `last` and `delta` are time-correct.
+    """
     out = {v: [] for v in _VITAL_COLS_LONG}
     if not readings:
         return out
@@ -103,36 +93,19 @@ def build_longitudinal_block(
 ) -> dict:
     """Build the 41-column longitudinal feature block.
 
-    Parameters
-    ----------
-    snapshot : dict {vital: float}
-        The single current/imputed vital values (already clipped — the doctor
-        tools' ``vital_values``). Used as the fallback for any vital with no
-        trajectory readings, mirroring ``_fill_longitudinal_vitals``.
-    readings : dict {vital: [float, ...]} | None
-        Multiple chronological readings per vital (the trajectory). Empty/None
-        for any vital falls back to ``snapshot`` for that vital.
-    rhythm : str
-        Free-text cardiac rhythm (single reading). Used when ``rhythm_readings``
-        is not supplied. Bucketed via the shared ``_normalize_rhythm``.
-    rhythm_readings : list[str] | None
-        Multiple rhythm strings collected during the stay. When supplied, the
-        block is built the SAME way training aggregates the ``vitalsign.csv``
-        rhythm column (``_aggregate_vitalsigns``): the one-hot is the MODE
-        (most common bucket) and ``rhythm_irregular`` is 1 if ANY reading is
-        non-sinus. A single ``rhythm`` string is the degenerate one-reading
-        case of this, so the two paths agree.
-
-    Returns
-    -------
-    dict with exactly the keys in ``LONG_VITAL_FEATURE_COLS``.
+    snapshot supplies the single current/imputed vital values, used as the
+    fallback for any vital with no trajectory readings. readings holds multiple
+    chronological readings per vital. rhythm is a single free-text rhythm;
+    rhythm_readings is multiple. When multiple rhythms are given the block is
+    built the same way training aggregates the vitalsign.csv rhythm column: the
+    one-hot is the mode and rhythm_irregular is 1 if any reading is non-sinus.
+    Returns a dict with exactly the keys in LONG_VITAL_FEATURE_COLS.
     """
     cleaned = _clean_readings(readings)
     block: dict = {}
 
     any_reading = any(len(cleaned[v]) > 0 for v in _VITAL_COLS_LONG)
 
-    # ── Per-vital min/max/last/delta ──
     for vital in _VITAL_COLS_LONG:
         vals = cleaned[vital]
         if vals:
@@ -147,7 +120,6 @@ def build_longitudinal_block(
             block[f"{vital}_last"] = snap
             block[f"{vital}_delta"] = 0.0
 
-    # ── Abnormal-reading counts ──
     for count_col, vital, op, thr in _ABNORMAL:
         vals = cleaned[vital]
         if vals:
@@ -158,9 +130,8 @@ def build_longitudinal_block(
         else:
             block[count_col] = int(_SNAPSHOT_FLAG[count_col](snapshot))
 
-    # ── Rhythm one-hot ── (mirror train_nurse_v3._aggregate_vitalsigns: bucket
-    # every reading, one-hot the MODE, rhythm_irregular = ANY non-sinus.) A
-    # single `rhythm` string is the one-reading degenerate case of this.
+    # Rhythm one-hot: bucket every reading, one-hot the mode, rhythm_irregular =
+    # any non-sinus. Mirrors train_nurse_v3._aggregate_vitalsigns.
     if rhythm_readings:
         buckets = [_normalize_rhythm(r) for r in rhythm_readings]
     elif rhythm:
@@ -179,8 +150,8 @@ def build_longitudinal_block(
             any(b not in ("sinus", "") for b in buckets)
         )
 
-    # ── Coverage flag ── 1 if we had any real reading (matches training's
-    # "stay had vitalsign.csv coverage"); 0 = pure snapshot fallback.
+    # Coverage flag: 1 if we had any real reading (matches training's "stay had
+    # vitalsign.csv coverage"), 0 for pure snapshot fallback.
     block["has_longitudinal_vitals"] = 1 if any_reading else 0
 
     # Guarantee exact column coverage / order.

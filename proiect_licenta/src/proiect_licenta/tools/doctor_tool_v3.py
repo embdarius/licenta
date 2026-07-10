@@ -1,25 +1,14 @@
-"""
-Doctor Prediction Tool v3 — 13-class label space with longitudinal vitals + rhythm
+"""Doctor prediction tool (v3): 13-class label space with longitudinal vitals.
 
-Same role as DoctorPredictionToolV2 but loads the v3 with-nurse model
-artifacts (DOCTOR_V3_DIR) and exposes the new feature set:
-
-  v3 base feature vector
-    triage features (TF-IDF + structured) + cascading triage predictions
-  + snapshot vitals + clinical flags + medications  (Phase A nurse data)
-  + longitudinal vitals (min/max/last/delta per vital + abnormal-reading
-    counts) + cardiac rhythm one-hot bucket + rhythm_irregular flag
-                                              (Phase B nurse data)
-
-The nurse only collects a single vital snapshot at inference time. We
-synthesize the trajectory features as if min == max == last == snapshot
-and delta == 0; the model was trained against this same fallback for
-stays without vitalsign.csv coverage, so the inference behavior is
-consistent with training.
-
-The catch-all class ("Symptoms, Signs, Ill-Defined") is excluded from the
-v3 label space, so this tool can never output it. If you need a model
-that can output the catch-all, keep using DoctorPredictionToolV2.
+Loads the v3 with-nurse artifacts (DOCTOR_V3_DIR). Feature vector = the v3 base
+features (TF-IDF + structured + cascading triage predictions) plus snapshot
+vitals, clinical flags, and medications, plus longitudinal vitals
+(min/max/last/delta per vital + abnormal-reading counts), cardiac rhythm one-hot,
+and rhythm_irregular. When the nurse collects only a single snapshot the
+trajectory features fall back to min == max == last == snapshot, delta == 0, the
+same fallback the model was trained against for stays without vitalsign.csv
+coverage. The catch-all class is excluded from the v3 label space, so this tool
+never outputs it.
 """
 
 import json
@@ -32,9 +21,7 @@ import pandas as pd
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 # Doctor v3 reuses triage v1 base artifacts (for cascading-feature parity
 # with how doctor v3 was trained in training/train_nurse_v3.py).
 from proiect_licenta.paths import (
@@ -48,18 +35,14 @@ from proiect_licenta.tools.triage_tool import normalize_complaint_text
 # gracefully skipped if the artifact hasn't been built (uv run train_icd_resolver).
 from proiect_licenta import icd_resolution as icdr
 
-# ---------------------------------------------------------------------------
-# Medication classification — shared vocabulary with the training pipeline
-# ---------------------------------------------------------------------------
+# Medication classification - shared vocabulary with the training pipeline
 from proiect_licenta.tools.med_vocab import (
     DRUG_NAME_MAP, MED_CLASS_KEYWORDS, MED_CATEGORIES, MED_FEATURE_COLS,
     flags_from_name, flags_from_text,
     parse_med_lookup, med_self_report_discrepancy,
 )
 
-# ---------------------------------------------------------------------------
 # Reuse rhythm bucketing from the training pipeline (single source of truth)
-# ---------------------------------------------------------------------------
 # Importing the training-side normalizer guarantees that the same string
 # (e.g., "afib", "Atrial Fibrillation", "AF") buckets to the same label
 # at training and inference. Same approach as med_vocab.flags_from_row.
@@ -77,7 +60,7 @@ from proiect_licenta.tools.vital_trajectory_io import (
     parse_vital_trajectory, parse_rhythm_readings,
 )
 
-# PMH vocabulary — same map used at training time. Free-text the patient
+# PMH vocabulary - same map used at training time. Free-text the patient
 # gives us is parsed against the same keywords so training/inference share
 # the feature space (same parity constraint as med_vocab.py for meds).
 from proiect_licenta.pmh_vocab import (
@@ -100,7 +83,7 @@ VITAL_MEDIANS = {
 def classify_medications(medications_raw: str) -> dict:
     """Classify patient-reported medications into category flags.
 
-    Same logic as DoctorPredictionToolV2.classify_medications — kept here
+    Same logic as DoctorPredictionToolV2.classify_medications - kept here
     rather than imported so this tool has no runtime dependency on the v2
     tool (which targets a different model directory).
     """
@@ -128,9 +111,7 @@ def classify_medications(medications_raw: str) -> dict:
     return {"n_medications": n_meds, "meds_unknown": 0, **flags}
 
 
-# ---------------------------------------------------------------------------
 # Lazy model loading
-# ---------------------------------------------------------------------------
 _doctor_v3_cache = None
 
 
@@ -148,7 +129,7 @@ def get_doctor_v3_models():
         with open(DOCTOR_MODELS_DIR / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
-        # Stage-2 exact-ICD resolver — optional. Absent until built via
+        # Stage-2 exact-ICD resolver - optional. Absent until built via
         # `uv run train_icd_resolver`; the tool degrades gracefully (no
         # exact-diagnosis block) rather than failing when it's missing.
         try:
@@ -169,9 +150,7 @@ def get_doctor_v3_models():
     return _doctor_v3_cache
 
 
-# ---------------------------------------------------------------------------
 # Stage-2 exact-ICD resolution (within-category code ranking)
-# ---------------------------------------------------------------------------
 def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
                              complaint_text, tfidf, physio_values=None,
                              pmh_values=None, has_pmh=False,
@@ -255,16 +234,14 @@ def _resolve_exact_diagnoses(resolver, diag_proba, diagnosis_labels,
         "method": method,
         "used_vitals": used_vitals,
         "used_pmh": used_pmh,
-        "disclaimer": "Experimental, advisory only — does not change the "
+        "disclaimer": "Experimental, advisory only - does not change the "
                       "category/department predictions above.",
         "top_per_category": per_category,
         "flat_ranking": flat_top,
     }
 
 
-# ---------------------------------------------------------------------------
 # Department names
-# ---------------------------------------------------------------------------
 DEPARTMENT_NAMES = {
     "MED": "General Medicine",
     "CMED": "Cardiac Medicine",
@@ -280,9 +257,7 @@ DEPARTMENT_NAMES = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Tool Input Schema
-# ---------------------------------------------------------------------------
 class DoctorV3Input(BaseModel):
     """Input schema for the Doctor v3 Prediction Tool (with full nurse data)."""
     chief_complaints: str = Field(
@@ -393,9 +368,7 @@ class DoctorV3Input(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # CrewAI Tool
-# ---------------------------------------------------------------------------
 class DoctorPredictionToolV3(BaseTool):
     name: str = "doctor_prediction_tool_v3"
     description: str = (
@@ -450,20 +423,20 @@ class DoctorPredictionToolV3(BaseTool):
         diagnosis_labels = metadata["diagnosis_labels"]
         department_labels = metadata["department_labels"]
 
-        # ── 1. Normalize complaint text ──
+        # 1. Normalize complaint text
         complaint_text = normalize_complaint_text(chief_complaints)
         raw_complaints = [c.strip() for c in chief_complaints.split(",") if c.strip()]
         n_complaints = len(raw_complaints)
         complaint_length = len(complaint_text)
 
-        # ── 2. TF-IDF ──
+        # 2. TF-IDF
         tfidf_matrix = tfidf.transform([complaint_text])
         tfidf_df = pd.DataFrame(
             tfidf_matrix.toarray(),
             columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
         )
 
-        # ── 3. Severity priors ──
+        # 3. Severity priors
         words = complaint_text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
         min_sev = min(severities) if severities else 3.0
@@ -471,14 +444,14 @@ class DoctorPredictionToolV3(BaseTool):
         max_sev = max(severities) if severities else 3.0
         std_sev = float(np.std(severities)) if len(severities) > 1 else 0.0
 
-        # ── 4. Pain ──
+        # 4. Pain
         pain_val = max(-1, min(10, pain_score))
         pain_missing = 1 if pain_val < 0 else 0
         pain_low = 1 if 0 <= pain_val <= 3 else 0
         pain_mid = 1 if 4 <= pain_val <= 6 else 0
         pain_high = 1 if 7 <= pain_val <= 10 else 0
 
-        # ── 5. Demographics ──
+        # 5. Demographics
         age_val = max(0, min(120, age))
         age_bins = [0, 18, 35, 50, 65, 80, 120]
         age_bin = 2
@@ -494,7 +467,7 @@ class DoctorPredictionToolV3(BaseTool):
         arrival_helicopter = 1 if at == "helicopter" else 0
         arrival_walk_in = 1 if at in ("walk_in", "walkin", "walk") else 0
 
-        # ── 6. Interaction features ──
+        # 6. Interaction features
         pain_clipped = max(0, pain_val) if pain_val >= 0 else 0
         age_ambulance = age_val * arrival_ambulance
         pain_x_min_severity = pain_clipped * (5 - min_sev)
@@ -503,7 +476,7 @@ class DoctorPredictionToolV3(BaseTool):
         elderly = 1 if age_val >= 65 else 0
         elderly_ambulance = elderly * arrival_ambulance
 
-        # ── 7. Assemble triage feature vector ──
+        # 7. Assemble triage feature vector
         structured = pd.DataFrame({
             "pain": [pain_val],
             "pain_missing": [pain_missing],
@@ -534,7 +507,7 @@ class DoctorPredictionToolV3(BaseTool):
         triage_features["predicted_acuity"] = predicted_acuity
         triage_features["predicted_disposition"] = 1  # always admitted
 
-        # ── 8. Snapshot vital sign features ──
+        # 8. Snapshot vital sign features
         vitals_raw = {
             "temperature": temperature,
             "heartrate": heartrate,
@@ -595,7 +568,7 @@ class DoctorPredictionToolV3(BaseTool):
             "map": [map_val],
         })
 
-        # ── 9. Medication features — EHR lookup (preferred) OR self-report ──
+        # 9. Medication features - EHR lookup (preferred) OR self-report
         # If patient_history_lookup_tool returned a med_block (returning patient
         # with a prior reconciled home-med list), it OVERRIDES the self-reported
         # medications; otherwise parse the patient-reported med text. Mirrors the
@@ -612,11 +585,11 @@ class DoctorPredictionToolV3(BaseTool):
         )
         meds_df = pd.DataFrame({col: [med_info[col]] for col in MED_FEATURE_COLS})
 
-        # ── 10. Longitudinal vitals ──
+        # 10. Longitudinal vitals
         # If the nurse supplied a multi-reading trajectory, build REAL
         # min/max/last/delta + abnormal-reading counts from it (and set
         # has_longitudinal_vitals=1). Otherwise fall back to the single
-        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) — the
+        # snapshot (min==max==last, delta=0, has_longitudinal_vitals=0) - the
         # historical degraded path. Shared builder = same aggregation as
         # train_nurse_v3, so training and inference can't drift.
         clinical_flags = {
@@ -642,11 +615,11 @@ class DoctorPredictionToolV3(BaseTool):
             {col: [long_data[col]] for col in LONG_VITAL_FEATURE_COLS}
         )
 
-        # ── 10b. PMH features (Change 1) ──
+        # 10b. PMH features (Change 1)
         # EHR lookup (preferred) OR ask-the-patient fallback. If
         # patient_history_lookup_tool found a returning patient, its real
-        # prior-encounter block — including days_since_last_admission /
-        # same_complaint_as_prior, which a patient can't report at the bedside —
+        # prior-encounter block - including days_since_last_admission /
+        # same_complaint_as_prior, which a patient can't report at the bedside -
         # overrides the self-report. Otherwise parse the free-text history
         # through the training-time PMH vocabulary and zero-fill the
         # unrecoverable numerics to the first-time-patient sentinels.
@@ -672,13 +645,13 @@ class DoctorPredictionToolV3(BaseTool):
             else:
                 pmh_flags_active = pmh_flags_from_text(pmh_text)
                 # If the nurse asked but the patient said "no prior admissions",
-                # that's still no_history=1 — vocab gave us zero flags and the
+                # that's still no_history=1 - vocab gave us zero flags and the
                 # patient self-reports no history.
                 pmh_no_history = 0
 
             # n_prior_admissions: if the nurse didn't ask, fall back to 0 +
             # no_history; if the patient reported a number, use it. The same
-            # applies to days_since_last_admission / days_since_last_ed — we
+            # applies to days_since_last_admission / days_since_last_ed - we
             # can't ask the patient for an exact date, so we always zero-fill
             # those at inference (the no_history=1 training pattern).
             if n_prior_admissions is None or n_prior_admissions < 0:
@@ -715,13 +688,13 @@ class DoctorPredictionToolV3(BaseTool):
             {col: [pmh_data[col]] for col in PMH_FEATURE_COLS}
         )
 
-        # ── 11. Assemble full feature vector ──
+        # 11. Assemble full feature vector
         features = pd.concat(
             [triage_features, vitals_df, meds_df, long_df, pmh_df],
             axis=1,
         )
 
-        # ── 12. Predict diagnosis ──
+        # 12. Predict diagnosis
         diag_pred_idx = int(diagnosis_model.predict(features)[0])
         diag_proba = diagnosis_model.predict_proba(features)[0]
         diag_label = diagnosis_labels[diag_pred_idx]
@@ -733,7 +706,7 @@ class DoctorPredictionToolV3(BaseTool):
             for i in top3_diag_idx
         ]
 
-        # ── 12b. Stage-2: exact ICD diagnoses within the top-5 categories ──
+        # 12b. Stage-2: exact ICD diagnoses within the top-5 categories
         # Optional retrieval stage (TF-IDF prototype cosine + vitals + prevalence).
         # Advisory only; surfaces likely exact diagnoses without changing the
         # category/department predictions. Skipped if the resolver isn't built.
@@ -758,7 +731,7 @@ class DoctorPredictionToolV3(BaseTool):
             pmh_values=pmh_data, has_pmh=(pmh_no_history == 0),
         )
 
-        # ── 13. Predict department (cascading) ──
+        # 13. Predict department (cascading)
         # A3: cascade the full diagnosis softmax (13 probability columns)
         # instead of the single argmax integer. metadata["diag_cascade_cols"]
         # gives the canonical column names trained against; we rebuild the
@@ -788,7 +761,7 @@ class DoctorPredictionToolV3(BaseTool):
             for i in top3_dept_idx
         ]
 
-        # ── Summarize nurse data used ──
+        # Summarize nurse data used
         vitals_provided = {
             k: v for k, v in vitals_raw.items()
             if v is not None and v >= 0
@@ -807,7 +780,7 @@ class DoctorPredictionToolV3(BaseTool):
             for cat in MED_CATEGORIES if med_info[cat] == 1
         ]
 
-        # ── Build result ──
+        # Build result
         result = {
             "patient_summary": {
                 "chief_complaints": raw_complaints,

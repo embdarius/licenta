@@ -34,7 +34,7 @@ md("intro-md", """# A1 - Optuna Hyperparameter Tuning (v3 nurse diagnosis) on Co
 
 Macro-F1 sweep over 9 XGBoost hyperparameters + a class-weight exponent, for
 the v3-nurse 13-class diagnosis model. Persistent SQLite study on Drive
-means **you can run trials in chunks and resume across Colab sessions**
+means you can run trials in chunks and resume across Colab sessions
 without losing progress.
 
 ## How resume works
@@ -53,21 +53,21 @@ Every trial's params + result are committed to that SQLite file before the
 next trial starts. The file lives in `artifacts/doctor/v3/` which is
 symlinked to your Drive, so:
 
-- **Ctrl-C mid-trial:** the failing trial is marked FAIL by Optuna; the next
+- Ctrl-C mid-trial: the failing trial is marked FAIL by Optuna; the next
   invocation skips it and continues.
-- **Colab session reclaimed:** the SQLite file survives on Drive. Open a
+- Colab session reclaimed: the SQLite file survives on Drive. Open a
   fresh session, re-run Cells 1-5 (mount, clone, symlink, install, GPU
   check), then Cell 6 (tune) - Optuna picks up where it left off.
-- **Inspecting progress:** Cell 7 prints the current study state without
+- Inspecting progress: Cell 7 prints the current study state without
   running new trials.
 
-Recommended total budget: **30-50 trials**. The plan's expected lift is
-**+0.5 to +1.5pp diagnosis top-1**, more on minority recall (Infectious /
+Recommended total budget: 30-50 trials. The plan's expected lift is
++0.5 to +1.5pp diagnosis top-1, more on minority recall (Infectious /
 Other / Blood) because the class-weight exponent is in the search space.
 
 ## Prereq: Colab GPU runtime
 
-Runtime menu -> Change runtime type -> **T4 GPU** (free) or L4/A100 (Pro).
+Runtime menu -> Change runtime type -> T4 GPU (free) or L4/A100 (Pro).
 
 ## Prereq: Drive + repo
 
@@ -89,8 +89,7 @@ deeper / less-regularized trees take longer. Optuna's TPE sampler doesn't
 care about wall-clock cost, so a few outlier trials will run long.""")
 
 
-md("section1-md", """---
-## Section 1 - Setup
+md("section1-md", """## Setup
 """)
 
 
@@ -175,15 +174,14 @@ m.fit(X, y)
 print('XGBoost GPU smoke test PASSED')""")
 
 
-md("section2-md", """---
-## Section 2 - Run Optuna trials (resumable)
+md("section2-md", """## Run Optuna trials (resumable)
 
 Set `N_TRIALS_THIS_SESSION` to how many trials you want this Colab session
 to run, then run Cell 6. Each invocation of Cell 6 appends that many
 trials to the existing study.
 
 The first time you run Cell 6, the feature cache is built (~30 min) from
-raw data. **Subsequent runs reuse the cached parquet files in seconds.**
+raw data. Subsequent runs reuse the cached parquet files in seconds.
 
 You can also use `TIMEOUT_SECONDS` as an alternative termination - whichever
 limit hits first stops the loop. Useful when you want to bound the session
@@ -232,8 +230,7 @@ finally:
     sys.argv = _saved_argv""")
 
 
-md("section3-md", """---
-## Section 3 - Study state
+md("section3-md", """## Study state
 
 Cell 7 reads the SQLite file directly (no extra trials run) and prints the
 current state: how many trials are complete, best macro-F1, top 5 trials,
@@ -287,8 +284,7 @@ else:
     print(f'\\ntuned_params.json not present yet - run Cell 6 to write it')""")
 
 
-md("section4-md", """---
-## Section 4 - When you're done tuning
+md("section4-md", """## When you're done tuning
 
 When the best macro-F1 has plateaued (typically after 30-50 trials), the
 file `artifacts/doctor/v3/tuned_params.json` already contains the

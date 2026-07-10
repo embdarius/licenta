@@ -1,27 +1,13 @@
-"""
-Shared PMH (Past Medical History) vocabulary for Doctor v3 nurse — Change 1.
+"""Shared PMH (Past Medical History) vocabulary.
 
 Maps PMH condition keywords (CHF, T2DM, COPD, etc.) to the 13 diagnosis_group
-labels of Doctor v3 (catch-all "Symptoms, Signs, Ill-Defined" excluded — those
-are presenting symptoms, not chronic conditions).
+labels of Doctor v3. Training (train_nurse_v3, train_triage_v3) and inference
+(doctor_tool_v3) must use the same vocabulary so PMH flags occupy the same
+feature space, the parity constraint med_vocab.py enforces for medications.
 
-Used by:
-    training/train_nurse_v3.py (training: PMH section of prior discharge notes
-                                + free-text labels of prior ICD codes)
-    tools/doctor_tool_v3.py    (inference: patient-reported chronic conditions
-                                via the Nurse Agent's prior_history prompt)
-
-Both sides must use the same vocabulary so training-time PMH flags and
-inference-time PMH flags occupy the same feature space — the same parity
-constraint that med_vocab.py enforces for medication flags.
-
-Matching rules (parallel to med_vocab.py):
-  - Keywords are matched with word boundaries to avoid spurious hits
-    ("ckd" must not match "chickenpox", "afib" must not match "kafibola").
-  - Plural forms via trailing optional `s` (e.g. "seizures" matches "seizure").
-  - Negations like "no history of", "denies", "negative for", "ruled out",
-    "no prior" are neutralized inside a 0-6 word window so they don't trip
-    the bare keyword that follows.
+Matching uses word boundaries (so "ckd" won't match "chickenpox"), optional
+trailing plural, and a 0-6 word negation window ("no history of", "denies",
+"ruled out", ...) so a negated condition doesn't trip the bare keyword.
 """
 
 import re
@@ -47,15 +33,13 @@ PMH_CATEGORIES = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # PMH keyword -> diagnosis_group(s)
-# ---------------------------------------------------------------------------
 # A keyword value may be a single category string or a tuple of categories.
 # Multi-category conditions: stroke is both Circulatory (cause) and Nervous
 # System (effect); DVT is Circulatory but is also a Blood disorder context;
 # cancer maps to "Other" (where Neoplasms lives in DIAGNOSIS_GROUP_MAP).
 PMH_KEYWORD_MAP = {
-    # ── Circulatory ──
+    # Circulatory
     # Coronary / heart failure / structural heart disease
     "chf": "Circulatory",
     "congestive heart failure": "Circulatory",
@@ -121,7 +105,7 @@ PMH_KEYWORD_MAP = {
     "thoracic aortic aneurysm": "Circulatory",
     "carotid stenosis": "Circulatory",
     "carotid artery disease": "Circulatory",
-    # Stroke / CVA — also Nervous System
+    # Stroke / CVA - also Nervous System
     "stroke": ("Circulatory", "Nervous System and Sense Organs"),
     "cva": ("Circulatory", "Nervous System and Sense Organs"),
     "cerebrovascular accident": ("Circulatory", "Nervous System and Sense Organs"),
@@ -135,7 +119,7 @@ PMH_KEYWORD_MAP = {
     "vte": "Circulatory",
     "venous thromboembolism": "Circulatory",
 
-    # ── Respiratory ──
+    # Respiratory
     "copd": "Respiratory",
     "chronic obstructive pulmonary disease": "Respiratory",
     "emphysema": "Respiratory",
@@ -158,7 +142,7 @@ PMH_KEYWORD_MAP = {
     "chronic respiratory failure": "Respiratory",
     "home oxygen": "Respiratory",
 
-    # ── Endocrine, Nutritional, Metabolic ──
+    # Endocrine, Nutritional, Metabolic
     "diabetes": "Endocrine, Nutritional, Metabolic",
     "diabetes mellitus": "Endocrine, Nutritional, Metabolic",
     "dm": "Endocrine, Nutritional, Metabolic",
@@ -195,7 +179,7 @@ PMH_KEYWORD_MAP = {
     "b12 deficiency": ("Endocrine, Nutritional, Metabolic",
                         "Blood and Blood-Forming Organs"),
 
-    # ── Mental Disorders ──
+    # Mental Disorders
     "depression": "Mental Disorders",
     "major depressive disorder": "Mental Disorders",
     "mdd": "Mental Disorders",
@@ -236,7 +220,7 @@ PMH_KEYWORD_MAP = {
     "self harm": "Mental Disorders",
     "deliberate self harm": "Mental Disorders",
 
-    # ── Genitourinary ──
+    # Genitourinary
     "chronic kidney disease": "Genitourinary",
     "ckd": "Genitourinary",
     "esrd": "Genitourinary",
@@ -271,7 +255,7 @@ PMH_KEYWORD_MAP = {
     "renal transplant": "Genitourinary",
     "kidney transplant": "Genitourinary",
 
-    # ── Digestive ──
+    # Digestive
     "gerd": "Digestive",
     "gastroesophageal reflux": "Digestive",
     "reflux disease": "Digestive",
@@ -323,7 +307,7 @@ PMH_KEYWORD_MAP = {
     "hcv": ("Digestive", "Infectious and Parasitic"),
     "chronic hepatitis": ("Digestive", "Infectious and Parasitic"),
 
-    # ── Musculoskeletal ──
+    # Musculoskeletal
     "osteoarthritis": "Musculoskeletal",
     "oa": "Musculoskeletal",
     "rheumatoid arthritis": "Musculoskeletal",
@@ -348,7 +332,7 @@ PMH_KEYWORD_MAP = {
     "osteoporosis": "Musculoskeletal",
     "osteopenia": "Musculoskeletal",
 
-    # ── Skin and Subcutaneous Tissue ──
+    # Skin and Subcutaneous Tissue
     "psoriasis": "Skin and Subcutaneous Tissue",
     "eczema": "Skin and Subcutaneous Tissue",
     "atopic dermatitis": "Skin and Subcutaneous Tissue",
@@ -363,7 +347,7 @@ PMH_KEYWORD_MAP = {
     "mrsa colonization": ("Skin and Subcutaneous Tissue",
                            "Infectious and Parasitic"),
 
-    # ── Nervous System and Sense Organs ──
+    # Nervous System and Sense Organs
     "seizure disorder": "Nervous System and Sense Organs",
     "seizures": "Nervous System and Sense Organs",
     "epilepsy": "Nervous System and Sense Organs",
@@ -397,7 +381,7 @@ PMH_KEYWORD_MAP = {
     "hearing loss": "Nervous System and Sense Organs",
     "tinnitus": "Nervous System and Sense Organs",
 
-    # ── Blood and Blood-Forming Organs ──
+    # Blood and Blood-Forming Organs
     "anemia": "Blood and Blood-Forming Organs",
     "iron deficiency anemia": "Blood and Blood-Forming Organs",
     "ida": "Blood and Blood-Forming Organs",
@@ -420,7 +404,7 @@ PMH_KEYWORD_MAP = {
     "polycythemia": "Blood and Blood-Forming Organs",
     "essential thrombocytosis": "Blood and Blood-Forming Organs",
 
-    # ── Infectious and Parasitic ──
+    # Infectious and Parasitic
     "hiv": "Infectious and Parasitic",
     "aids": "Infectious and Parasitic",
     "human immunodeficiency virus": "Infectious and Parasitic",
@@ -443,7 +427,7 @@ PMH_KEYWORD_MAP = {
     "neutropenia": ("Infectious and Parasitic",
                      "Blood and Blood-Forming Organs"),
 
-    # ── Injury and Poisoning ──
+    # Injury and Poisoning
     "tbi": "Injury and Poisoning",
     "traumatic brain injury": "Injury and Poisoning",
     "concussion": "Injury and Poisoning",
@@ -455,7 +439,7 @@ PMH_KEYWORD_MAP = {
     "motor vehicle accident": "Injury and Poisoning",
     "motor vehicle collision": "Injury and Poisoning",
 
-    # ── Other (neoplasms / pregnancy / congenital — keep parity with
+    # ── Other (neoplasms / pregnancy / congenital - keep parity with
     # the "Other" bucket in DIAGNOSIS_GROUP_MAP) ──
     "cancer": "Other",
     "carcinoma": "Other",
@@ -491,17 +475,12 @@ PMH_KEYWORD_MAP = {
     "trisomy": "Other",
     "congenital heart disease": ("Other", "Circulatory"),
 
-    # ──────────────────────────────────────────────────────────────────
-    # A2 VOCABULARY EXPANSION (2026-05-22)
-    # ──────────────────────────────────────────────────────────────────
-    # Targets gaps identified in the post-Change-1 audit (doctor-agent.md):
-    # `s/p` surgical histories, abbreviation variants, brand-name drugs as
-    # PMH condition proxies. Drug names are only matched inside the PMH
-    # section (extract_pmh_section bounds them above the Medications block),
-    # so they don't leak from Medications-on-Admission.
-    # ──────────────────────────────────────────────────────────────────
+    # s/p surgical histories, abbreviation variants, and brand-name drugs as PMH
+    # condition proxies. Drug names are only matched inside the PMH section
+    # (extract_pmh_section bounds them above the Medications block), so they don't
+    # leak from Medications-on-Admission.
 
-    # ── Circulatory: s/p surgical histories and abbreviations ──
+    # Circulatory: s/p surgical histories and abbreviations
     "s/p cabg": "Circulatory",
     "s/p stent": "Circulatory",
     "s/p pci": "Circulatory",
@@ -525,7 +504,7 @@ PMH_KEYWORD_MAP = {
     "acute on chronic chf": "Circulatory",
     "decompensated chf": "Circulatory",
 
-    # ── Circulatory: rhythm / conduction variants ──
+    # Circulatory: rhythm / conduction variants
     "paf": "Circulatory",
     "paroxysmal atrial fibrillation": "Circulatory",
     "chronic afib": "Circulatory",
@@ -541,7 +520,7 @@ PMH_KEYWORD_MAP = {
     "wolff-parkinson-white": "Circulatory",
     "wpw": "Circulatory",
 
-    # ── Endocrine: diabetes variants ──
+    # Endocrine: diabetes variants
     "dm-ii": "Endocrine, Nutritional, Metabolic",
     "dm-i": "Endocrine, Nutritional, Metabolic",
     "dm type 2": "Endocrine, Nutritional, Metabolic",
@@ -553,7 +532,7 @@ PMH_KEYWORD_MAP = {
     "prediabetes": "Endocrine, Nutritional, Metabolic",
     "insulin dependent": "Endocrine, Nutritional, Metabolic",
 
-    # ── Genitourinary: CKD staging ──
+    # Genitourinary: CKD staging
     "ckd 3": "Genitourinary",
     "ckd 4": "Genitourinary",
     "ckd 5": "Genitourinary",
@@ -568,7 +547,7 @@ PMH_KEYWORD_MAP = {
     "stage 5 ckd": "Genitourinary",
     "transplant recipient": "Genitourinary",
 
-    # ── Respiratory: exacerbation patterns and home-O2 dependence ──
+    # Respiratory: exacerbation patterns and home-O2 dependence
     "copd exacerbation": "Respiratory",
     "asthma exacerbation": "Respiratory",
     "pulmonary nodule": "Respiratory",
@@ -577,7 +556,7 @@ PMH_KEYWORD_MAP = {
     "home o2": "Respiratory",
     "on oxygen": "Respiratory",
 
-    # ── Digestive: chronic liver disease variants ──
+    # Digestive: chronic liver disease variants
     "chronic gerd": "Digestive",
     "liver disease": "Digestive",
     "chronic liver disease": "Digestive",
@@ -587,7 +566,7 @@ PMH_KEYWORD_MAP = {
     "end stage liver disease": "Digestive",
     "end-stage liver disease": "Digestive",
 
-    # ── Mental: SI/HI, mood-disorder variants ──
+    # Mental: SI/HI, mood-disorder variants
     "mood disorder": "Mental Disorders",
     "borderline personality": "Mental Disorders",
     "bpd": "Mental Disorders",
@@ -595,7 +574,7 @@ PMH_KEYWORD_MAP = {
     "chronic anxiety": "Mental Disorders",
     "chronic depression": "Mental Disorders",
 
-    # ── Nervous System ──
+    # Nervous System
     "chronic migraine": "Nervous System and Sense Organs",
     "chronic headache": "Nervous System and Sense Organs",
     "essential tremor": "Nervous System and Sense Organs",
@@ -604,7 +583,7 @@ PMH_KEYWORD_MAP = {
     "diabetic neuropathy": ("Nervous System and Sense Organs",
                              "Endocrine, Nutritional, Metabolic"),
 
-    # ── Musculoskeletal ──
+    # Musculoskeletal
     "chronic back pain": "Musculoskeletal",
     "chronic low back pain": "Musculoskeletal",
     "degenerative joint disease": "Musculoskeletal",
@@ -612,12 +591,12 @@ PMH_KEYWORD_MAP = {
     "chronic pain syndrome": "Musculoskeletal",
     "chronic pain": "Musculoskeletal",
 
-    # ── Injury (recurrent falls, prior trauma) ──
+    # Injury (recurrent falls, prior trauma)
     "s/p fall": "Injury and Poisoning",
     "recurrent falls": "Injury and Poisoning",
     "history of trauma": "Injury and Poisoning",
 
-    # ── Infectious (covid, hepA, on ART) ──
+    # Infectious (covid, hepA, on ART)
     "hepatitis a": "Infectious and Parasitic",
     "hav": "Infectious and Parasitic",
     "hiv positive": "Infectious and Parasitic",
@@ -627,12 +606,12 @@ PMH_KEYWORD_MAP = {
     "post-covid": "Infectious and Parasitic",
     "long covid": "Infectious and Parasitic",
 
-    # ── Blood ──
+    # Blood
     "hemolytic anemia": "Blood and Blood-Forming Organs",
     "aplastic anemia": "Blood and Blood-Forming Organs",
     "pernicious anemia": "Blood and Blood-Forming Organs",
 
-    # ── Other (oncology / OB-GYN history) ──
+    # Other (oncology / OB-GYN history)
     "history of cancer": "Other",
     "prior malignancy": "Other",
     "hospice care": "Other",
@@ -645,8 +624,8 @@ PMH_KEYWORD_MAP = {
     "thyroid cancer": ("Other", "Endocrine, Nutritional, Metabolic"),
     "head and neck cancer": "Other",
 
-    # ── Brand-name drug proxies ──
-    # Statins → cardiovascular + lipid disorder
+    # Brand-name drug proxies
+    # Statins -> cardiovascular + lipid disorder
     "atorvastatin": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
     "lipitor": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
     "simvastatin": ("Circulatory", "Endocrine, Nutritional, Metabolic"),
@@ -740,10 +719,8 @@ PMH_KEYWORD_MAP = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Compile one regex per category. Multi-word keys are matched as phrases
 # (so "heart failure" matches the bigram, not "heart" alone).
-# ---------------------------------------------------------------------------
 # Build per-category keyword lists (inverting the {keyword: cat-or-tuple} map).
 _cat_keywords: dict[str, list[str]] = {c: [] for c in PMH_CATEGORIES}
 for kw, cat in PMH_KEYWORD_MAP.items():
@@ -754,7 +731,7 @@ for kw, cat in PMH_KEYWORD_MAP.items():
             _cat_keywords[c].append(kw)
 
 # Longer phrases first so "heart failure" wins over "heart" if both were in
-# the same category (defensive — we don't currently have such overlap).
+# the same category (defensive - we don't currently have such overlap).
 for c in _cat_keywords:
     _cat_keywords[c].sort(key=lambda s: (-len(s), s))
 
@@ -816,9 +793,7 @@ def flags_from_text(text) -> set:
     return flags
 
 
-# ---------------------------------------------------------------------------
 # Discharge-note section extraction
-# ---------------------------------------------------------------------------
 # MIMIC-IV discharge notes have a stable set of section headers. The PMH
 # section is bounded above by a header line containing "Past Medical
 # History" / "PMH" / "PMHx", and bounded below by the next recognized

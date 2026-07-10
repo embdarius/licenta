@@ -1,20 +1,10 @@
-"""
-Triage Prediction Tool v3 — CrewAI Tool
+"""Triage prediction tool (v3).
 
-Uses TF-IDF + XGBoost models with demographics, vital signs, and PMH
-(Past Medical History) features for triage predictions. Takes chief
-complaints, pain score, age, gender, arrival transport, optional vitals,
-and optional patient-reported prior history. Returns ESI acuity level
-(1-5), admission/discharge, confidence scores.
-
-Loads models from artifacts/triage/v3/ (triage pipeline v3 iter 2: v2 features
-+ 19-column PMH block + longer training + ordinal-aware acuity weighting).
-
-PMH inputs (`prior_history`, `n_prior_admissions`) are collected by the NLP
-Parser during patient intake and passed through here. If the patient
-skips them, the tool zero-fills with `no_history=1` — the exact pattern
-used by ~39% of v3 training rows (first-time MIMIC patients), so the model
-learned to handle missing PMH gracefully.
+TF-IDF + XGBoost over complaints, demographics, vitals, and PMH features. Returns
+ESI acuity (1-5), admit/discharge, and confidence. Loads models from
+artifacts/triage/v3/. When the patient skips PMH inputs the tool zero-fills with
+no_history=1, the pattern ~39% of training rows (first-time patients) used, so the
+model handles missing PMH gracefully.
 """
 
 import json
@@ -29,28 +19,22 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import TRIAGE_V3_DIR as MODELS_DIR
 
 
-# ---------------------------------------------------------------------------
-# Complaint text normalization — shared with training pipelines.
+# Complaint text normalization - shared with training pipelines.
 # Re-exported here so doctor_tool / doctor_tool_v2 can keep importing
 # `normalize_complaint_text` from triage_tool.
-# ---------------------------------------------------------------------------
 from proiect_licenta.preprocessing import (  # noqa: F401
     ABBREVIATIONS,
     normalize_complaint_text,
 )
 
 
-# ---------------------------------------------------------------------------
-# PMH (Past Medical History) — shared with training pipeline.
+# PMH (Past Medical History) - shared with training pipeline.
 # Same imports and same vocabulary the doctor v3 tool uses, so inference-side
 # parsing matches training-side feature construction.
-# ---------------------------------------------------------------------------
 from proiect_licenta.pmh_features import (
     PMH_FEATURE_COLS, PMH_NO_PRIOR_DAYS,
     parse_pmh_lookup as _parse_pmh_lookup,
@@ -62,7 +46,7 @@ from proiect_licenta.pmh_vocab import (
 )
 
 
-# Patient inputs that should be treated as "no history" / "skip" — matches
+# Patient inputs that should be treated as "no history" / "skip" - matches
 # the doctor_tool_v3.py vocabulary to keep the two tools' behavior consistent.
 _PMH_SKIP_TOKENS = {
     "", "skip", "unknown", "no", "none", "n/a", "na", "-",
@@ -71,9 +55,7 @@ _PMH_SKIP_TOKENS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Vital sign constants (must match training/train_triage_v2.py)
-# ---------------------------------------------------------------------------
 VITAL_COLS = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
 
 VITAL_CLIP_RANGES = {
@@ -97,36 +79,19 @@ ABNORMALITY_THRESHOLDS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Pickle-resolution shim — neg_quadratic_kappa
-# ---------------------------------------------------------------------------
-# The v3 acuity model was trained with `eval_metric=neg_quadratic_kappa`
-# as a custom callable (section 1.2). When training runs via
-# `runpy.run_path(..., run_name='__main__')` (the Colab flow), pickle
-# records the callable's qualified name as `__main__.neg_quadratic_kappa`.
-# At load time pickle needs that name to exist on sys.modules['__main__'].
-# At runtime, sys.modules['__main__'] is the host script (e.g.
-# `run_crew.exe.__main__`), so the lookup fails with:
-#
-#   AttributeError: Can't get attribute 'neg_quadratic_kappa' on <module '__main__' ...>
-#
-# `save_models()` in train_triage_v3.py was fixed to strip eval_metric
-# before joblib.dump (commit on 2026-05-29), but that fix only protects
-# artifacts trained AFTER the fix landed. To keep the runtime resilient
-# to pre-fix artifacts already on disk / on Drive, we inject a shim
-# function into __main__ before any model load.
-#
-# The shim is never actually called at inference — eval_metric only
-# matters during .fit(). It just needs to exist with the right name so
-# pickle's by-name lookup succeeds.
+# Pickle-resolution shim. The v3 acuity model was trained with a custom
+# eval_metric callable; artifacts trained before the save-time fix pickled it as
+# __main__.neg_quadratic_kappa, so joblib.load needs that name to exist on
+# __main__. We inject this shim before any model load to stay resilient to those
+# older artifacts. It is never called at inference (eval_metric only matters
+# during .fit()); it just needs the right name.
 
 def neg_quadratic_kappa(y_true, y_pred):
-    """Inference-side shim of the training-time eval_metric callable.
+    """Inference-side shim of the training eval_metric.
 
-    Same signature as `train_triage_v3.neg_quadratic_kappa`. Returns
-    -κ (XGBoost convention: lower is better). Never invoked at inference
-    — exists so `joblib.load` can resolve `__main__.neg_quadratic_kappa`
-    on pre-fix v3 artifacts.
+    Same signature as train_triage_v3.neg_quadratic_kappa. Never invoked at
+    inference; exists so joblib.load can resolve __main__.neg_quadratic_kappa on
+    older artifacts.
     """
     from sklearn.metrics import cohen_kappa_score
     y_pred_class = np.argmax(y_pred, axis=1)
@@ -134,10 +99,7 @@ def neg_quadratic_kappa(y_true, y_pred):
 
 
 def _ensure_pickle_compat_in_main():
-    """Inject `neg_quadratic_kappa` into sys.modules['__main__'] so that
-    pre-fix v3 acuity artifacts (which pickled the callable with
-    __module__='__main__') can be loaded via joblib.load without raising
-    AttributeError.
+    """Inject neg_quadratic_kappa into __main__ so older v3 acuity artifacts load.
 
     Idempotent. No-op if __main__ already has the attribute (e.g. when
     running under the training script itself).
@@ -147,16 +109,14 @@ def _ensure_pickle_compat_in_main():
         main_mod.neg_quadratic_kappa = neg_quadratic_kappa
 
 
-# ---------------------------------------------------------------------------
 # Lazy model loading
-# ---------------------------------------------------------------------------
 _models_cache = None
 
 
 def get_models():
     global _models_cache
     if _models_cache is None:
-        # Must run BEFORE joblib.load on the acuity model — see the
+        # Must run BEFORE joblib.load on the acuity model - see the
         # _ensure_pickle_compat_in_main docstring above.
         _ensure_pickle_compat_in_main()
 
@@ -182,9 +142,7 @@ def get_models():
     return _models_cache
 
 
-# ---------------------------------------------------------------------------
 # Acuity level descriptions
-# ---------------------------------------------------------------------------
 ACUITY_DESCRIPTIONS = {
     1: "Resuscitation -- Immediate life-saving intervention required",
     2: "Emergent -- High risk, confused/lethargic, severe pain/distress",
@@ -194,9 +152,7 @@ ACUITY_DESCRIPTIONS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Tool Input Schema
-# ---------------------------------------------------------------------------
 class TriageInput(BaseModel):
     """Input schema for the Triage Prediction Tool v2."""
     chief_complaints: str = Field(
@@ -266,8 +222,8 @@ class TriageInput(BaseModel):
         description="Optional JSON `pmh_block` from the patient_history_lookup_tool "
                     "(EHR lookup for a RETURNING patient with an MRN). When provided "
                     "for a known patient, it supplies the REAL prior-encounter record "
-                    "— PMH flags PLUS the days-since-last-visit / same-complaint "
-                    "numerics a patient can't report at the bedside — and OVERRIDES "
+                    "- PMH flags PLUS the days-since-last-visit / same-complaint "
+                    "numerics a patient can't report at the bedside - and OVERRIDES "
                     "the self-reported prior_history / n_prior_admissions. Copy the "
                     "lookup tool's `pmh_block` (or its full output) here verbatim. "
                     "Leave empty for first-time/unknown patients (subject_id -1) or "
@@ -276,9 +232,7 @@ class TriageInput(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # CrewAI Tool
-# ---------------------------------------------------------------------------
 class TriagePredictionTool(BaseTool):
     name: str = "triage_prediction_tool"
     description: str = (
@@ -290,12 +244,12 @@ class TriagePredictionTool(BaseTool):
         "temperature (°F), heartrate (bpm), resprate, o2sat (%), sbp, dbp (mmHg), "
         "prior_history (free-text chronic conditions, '' if unknown), "
         "n_prior_admissions (int, -1 if unknown). "
-        "Vital signs default to -1 (unknown) — provide them when available "
+        "Vital signs default to -1 (unknown) - provide them when available "
         "(e.g., ambulance/helicopter patients with EMS vitals). "
         "PMH inputs (prior_history, n_prior_admissions) default to skip-equivalents "
         "and zero-fill to first-time-patient pattern when the patient doesn't report. "
         "Uses XGBoost v3 models (acuity 67.55% / disposition 77.98% on the 83K MIMIC-IV "
-        "test set; under-triage rate 15.56%, ESI 5 recall 26.82% — kept iteration 2 "
+        "test set; under-triage rate 15.56%, ESI 5 recall 26.82% - kept iteration 2 "
         "stack: PMH features + longer training + ordinal-aware ESI weighting)."
     )
     args_schema: Type[BaseModel] = TriageInput
@@ -375,7 +329,7 @@ class TriagePredictionTool(BaseTool):
         elderly = 1 if age_val >= 65 else 0
         elderly_ambulance = elderly * arrival_ambulance
 
-        # 8. Vital signs — resolve missing values
+        # 8. Vital signs - resolve missing values
         raw_vitals = {
             "temperature": temperature,
             "heartrate": heartrate,
@@ -423,13 +377,13 @@ class TriagePredictionTool(BaseTool):
         hypoxic_elderly = hypoxic * elderly
         hypotensive_elderly = hypotensive * elderly
 
-        # 10b. PMH features (v3) — EHR lookup (preferred) OR ask-the-patient
+        # 10b. PMH features (v3) - EHR lookup (preferred) OR ask-the-patient
         # fallback, mirroring doctor_tool_v3.py / doctor_disposition_tool.py so
         # triage and doctor share the same inference-time PMH logic. If the
         # patient gave an MRN and patient_history_lookup_tool found a returning
-        # patient, its real prior-encounter block — including the
+        # patient, its real prior-encounter block - including the
         # days_since_last_* / same_complaint_as_prior numerics a patient can't
-        # report at the bedside — OVERRIDES the self-report. Otherwise we parse
+        # report at the bedside - OVERRIDES the self-report. Otherwise we parse
         # the free-text history and zero-fill the unrecoverable numerics to the
         # first-time-patient sentinels (the no_history=1 pattern the model saw
         # on ~39% of training rows).
@@ -452,9 +406,9 @@ class TriagePredictionTool(BaseTool):
                 pmh_flags_active = pmh_flags_from_text(pmh_text)
                 pmh_no_history = 0
 
-            # n_prior_admissions: if not collected (-1) → 0 + no_history=1.
+            # n_prior_admissions: if not collected (-1) -> 0 + no_history=1.
             # days_since_last_* are not collectable from the patient at the
-            # bedside, so we always zero-fill (PMH_NO_PRIOR_DAYS sentinel) — the
+            # bedside, so we always zero-fill (PMH_NO_PRIOR_DAYS sentinel) - the
             # model saw the same pattern on first-time-patient training rows.
             if n_prior_admissions is None or n_prior_admissions < 0:
                 n_prior_adm_val = 0
@@ -512,21 +466,21 @@ class TriagePredictionTool(BaseTool):
             "high_pain_ambulance": [high_pain_ambulance],
             "elderly": [elderly],
             "elderly_ambulance": [elderly_ambulance],
-            # v2 — raw vitals
+            # v2 - raw vitals
             "temperature": [vital_values["temperature"]],
             "heartrate": [vital_values["heartrate"]],
             "resprate": [vital_values["resprate"]],
             "o2sat": [vital_values["o2sat"]],
             "sbp": [vital_values["sbp"]],
             "dbp": [vital_values["dbp"]],
-            # v2 — missing flags
+            # v2 - missing flags
             "temperature_missing": [vital_missing_flags["temperature_missing"]],
             "heartrate_missing": [vital_missing_flags["heartrate_missing"]],
             "resprate_missing": [vital_missing_flags["resprate_missing"]],
             "o2sat_missing": [vital_missing_flags["o2sat_missing"]],
             "sbp_missing": [vital_missing_flags["sbp_missing"]],
             "dbp_missing": [vital_missing_flags["dbp_missing"]],
-            # v2 — abnormality flags
+            # v2 - abnormality flags
             "fever": [abnormality_flags["fever"]],
             "hypothermic": [abnormality_flags["hypothermic"]],
             "tachycardic": [tachycardic],
@@ -535,20 +489,20 @@ class TriagePredictionTool(BaseTool):
             "hypoxic": [hypoxic],
             "hypertensive": [abnormality_flags["hypertensive"]],
             "hypotensive": [hypotensive],
-            # v2 — abnormal count
+            # v2 - abnormal count
             "abnormal_vital_count": [abnormal_vital_count],
-            # v2 — vital-transport interactions
+            # v2 - vital-transport interactions
             "tachycardic_ambulance": [tachycardic_ambulance],
             "hypoxic_ambulance": [hypoxic_ambulance],
             "hypotensive_ambulance": [hypotensive_ambulance],
             "fever_ambulance": [fever_ambulance],
-            # v2 — vital-age interactions
+            # v2 - vital-age interactions
             "tachycardic_elderly": [tachycardic_elderly],
             "hypoxic_elderly": [hypoxic_elderly],
             "hypotensive_elderly": [hypotensive_elderly],
         })
 
-        # v3 — PMH block. Built from the patient-reported prior_history /
+        # v3 - PMH block. Built from the patient-reported prior_history /
         # n_prior_admissions; column order = PMH_FEATURE_COLS so it matches
         # the position used by train_triage_v3.build_features (right after
         # v2 vital cols, before TF-IDF).
@@ -603,7 +557,7 @@ class TriagePredictionTool(BaseTool):
             "pmh_categories_fired": sorted(pmh_flags_active),
             "pmh_category_count": len(pmh_flags_active),
             # EHR lookup: True when the PMH block came from the real prior
-            # record (patient_history_lookup_tool) rather than self-report —
+            # record (patient_history_lookup_tool) rather than self-report -
             # including the days-since / same-complaint numerics below.
             "used_history_lookup": bool(used_history_lookup),
             "history_lookup_numerics": ({

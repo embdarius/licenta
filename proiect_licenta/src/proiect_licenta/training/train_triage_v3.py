@@ -1,27 +1,11 @@
-"""
-Data Pipeline for Triage Agent v3 — MIMIC-IV Emergency Department
+"""Triage v3 training pipeline (MIMIC-IV-ED).
 
-Builds on v2 (v1 features + triage vital signs masked-for-walk-ins) by adding
-the 19-feature PMH (Past Medical History) block first introduced by Doctor v3
-nurse Change 1:
-
-  - 13 binary pmh_<diagnosis_group> flags derived from the "Past Medical
-    History" section of prior MIMIC discharge summaries (OR'd with prior-
-    admission ICD codes via categorized_diagnosis.csv).
-  - 6 prior-encounter numerics: n_prior_admissions, n_prior_ed_visits,
-    days_since_last_admission, days_since_last_ed, same_complaint_as_prior,
-    no_history.
-
-Aggregation is delegated to `proiect_licenta.pmh_features.aggregate_pmh`, the
-same helper used by `train_nurse_v3.py`. Leakage is zero by construction:
-prior-admission and prior-ED filters use `prior_*time < current_intime`.
-
-Trains two supervised models on the full triage dataset (~334K stays):
-  1. Acuity model: ESI 1-5 (multi:softprob)
-  2. Disposition model: ADMITTED vs DISCHARGED (binary:logistic, cascading on
-     predicted_acuity)
-
-Models saved to artifacts/triage/v3/ — v1 and v2 artifacts remain untouched.
+Adds the 19-feature PMH block to v2: 13 binary pmh_<diagnosis_group> flags (from
+prior discharge-note PMH sections OR'd with prior-admission ICD codes) plus 6
+prior-encounter numerics. Aggregation is delegated to pmh_features.aggregate_pmh,
+the same helper train_nurse_v3 uses. Leakage is zero by construction
+(prior_*time < current_intime). Trains the acuity and disposition models on the
+full triage dataset and saves to artifacts/triage/v3/.
 """
 
 import os
@@ -42,7 +26,7 @@ from xgboost import XGBClassifier
 from proiect_licenta.preprocessing import normalize_complaint_text, ABBREVIATIONS  # noqa: F401
 from proiect_licenta.loader_cache import disk_cached
 
-# PMH aggregator extracted from train_nurse_v3 — same feature set, same
+# PMH aggregator extracted from train_nurse_v3 - same feature set, same
 # leakage guarantees. Triage v3 reuses it on the FULL ED dataset (not just
 # admitted), so the model sees PMH lift on both acuity and disposition.
 from proiect_licenta.pmh_features import (
@@ -51,7 +35,7 @@ from proiect_licenta.pmh_features import (
     aggregate_pmh,
     fill_missing_pmh_columns,
 )
-# The PMH aggregator needs the ICD → diagnosis_group mapping from the doctor
+# The PMH aggregator needs the ICD -> diagnosis_group mapping from the doctor
 # pipeline (it's the canonical mapping; pmh_features doesn't redefine it).
 from proiect_licenta.training.train_doctor import (
     CATCH_ALL_LABEL,
@@ -60,21 +44,17 @@ from proiect_licenta.training.train_doctor import (
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
-# XGBoost device / tree method — env-var-driven so the same pipeline runs on
+# XGBoost device / tree method - env-var-driven so the same pipeline runs on
 # Colab GPU without code changes. Defaults reproduce the CPU runtime exactly.
 #   XGB_DEVICE       "cpu" (default) | "cuda" | "cuda:0" ...
 #   XGB_TREE_METHOD  "hist" (default; works on both CPU and GPU in xgboost >= 2.0)
 # Set both via `os.environ` (or `export`) before `uv run train_triage_v3`.
-# ---------------------------------------------------------------------------
 XGB_DEVICE = os.environ.get("XGB_DEVICE", "cpu")
 XGB_TREE_METHOD = os.environ.get("XGB_TREE_METHOD", "hist")
 
-# ---------------------------------------------------------------------------
 # Optional progress bars (tqdm.auto picks Jupyter widgets in Colab, plain bar
 # in a terminal). If tqdm isn't installed, fall back to a no-op wrapper so
 # local `uv run train_triage_v3` still works without an extra dependency.
-# ---------------------------------------------------------------------------
 try:
     from tqdm.auto import tqdm as _tqdm  # type: ignore
 
@@ -126,20 +106,18 @@ def _make_xgb_progress_callback(n_total: int, desc: str):
     return _TqdmCallback()
 
 
-# ---------------------------------------------------------------------------
-# Section 1.2 — ordinal-aware acuity weighting
-# ---------------------------------------------------------------------------
+# Section 1.2 - ordinal-aware acuity weighting
 # Multiply the existing sqrt-balanced sample weights by these per-class
 # factors to push the acuity head to pay more attention to clinically critical
 # / rare extremes. The plain `multi:softprob` objective treats every misclass-
 # ification the same; sample-weighting biases the gradient updates toward the
 # classes we care about most.
 #
-#   ESI 1  (resuscitation, ~1.1% of stays):  1.5x — critical; under-triage = death risk
-#   ESI 2  (emergent, ~33% of stays):        1.3x — most clinically dangerous to miss
-#   ESI 3  (urgent, dominant class):         1.0x — baseline
-#   ESI 4  (less urgent):                    1.0x — baseline
-#   ESI 5  (non-urgent, ~0.3% of stays):     2.0x — current recall 14% on v3 base
+#   ESI 1  (resuscitation, ~1.1% of stays):  1.5x - critical; under-triage = death risk
+#   ESI 2  (emergent, ~33% of stays):        1.3x - most clinically dangerous to miss
+#   ESI 3  (urgent, dominant class):         1.0x - baseline
+#   ESI 4  (less urgent):                    1.0x - baseline
+#   ESI 5  (non-urgent, ~0.3% of stays):     2.0x - current recall 14% on v3 base
 #
 # Combined with the QWK eval metric below (which steers early stopping toward
 # ordinal-friendly iterations), this gives the acuity head a soft ordinal
@@ -153,26 +131,24 @@ def neg_quadratic_kappa(y_true, y_pred):
     XGBoost minimizes its eval metric by default. Returning -κ means "lowest
     -κ" = "highest κ", so early stopping picks the iteration with the best
     ordinal agreement. Used as the acuity model's eval_metric in place of
-    plain mlogloss — early stopping now optimizes for the ordinal structure
+    plain mlogloss - early stopping now optimizes for the ordinal structure
     of ESI 1-5 rather than treating every class-confusion identically.
 
-    y_pred has shape (n_samples, n_classes) — softmax probabilities. argmax
+    y_pred has shape (n_samples, n_classes) - softmax probabilities. argmax
     gives the predicted 0-indexed class; y_true is also 0-indexed at fit-time
-    (we shift ESI 1-5 → 0-4 before calling .fit()), so κ comparisons are
+    (we shift ESI 1-5 -> 0-4 before calling .fit()), so κ comparisons are
     consistent. κ is invariant to label-set shifts anyway.
     """
     y_pred_class = np.argmax(y_pred, axis=1)
     return -cohen_kappa_score(y_true, y_pred_class, weights="quadratic")
 
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 TRAIN_CAP = None  # None = use full dataset
 
-# Section 1.1 — train both heads longer with a lower learning rate. The v3
+# Section 1.1 - train both heads longer with a lower learning rate. The v3
 # baseline hit best_iteration = 2999/3000 (acuity) and 2983/3000 (disposition)
-# — neither head had converged. Halving lr and giving the booster more trees
+# - neither head had converged. Halving lr and giving the booster more trees
 # lets it actually find a minimum.
 ACUITY_N_ESTIMATORS = 5000
 ACUITY_LEARNING_RATE = 0.01
@@ -182,9 +158,7 @@ DISP_N_ESTIMATORS = 5000
 DISP_LEARNING_RATE = 0.01
 DISP_EARLY_STOPPING_ROUNDS = 150
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V3_DIR as MODELS_DIR,
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV,
@@ -192,9 +166,7 @@ from proiect_licenta.paths import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Vital sign constants (shared with v2)
-# ---------------------------------------------------------------------------
 VITAL_CLIP_RANGES = {
     "temperature": (90.0, 110.0),
     "heartrate":   (20.0, 250.0),
@@ -218,9 +190,7 @@ ABNORMALITY_THRESHOLDS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # 1. Load & Clean Data
-# ---------------------------------------------------------------------------
 @disk_cached("triage_v3", [TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV,
                            DIAGNOSES_ICD_CSV, ADMISSIONS_CSV,
                            DISCHARGE_NOTES_CSV, DIAGNOSIS_CSV], version=1)
@@ -232,14 +202,12 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     columns merged in. `edstays_full` is returned only so callers (e.g.
     benchmarks) can re-run the same train/test split deterministically.
     """
-    print("=" * 60)
-    print("STEP 1: Loading data (v3 — v2 features + PMH)...")
-    print("=" * 60)
+    print("Loading data (v3 - v2 features + PMH)...")
 
     triage = pd.read_csv(TRIAGE_CSV)
     print(f"  triage.csv: {len(triage):,} rows")
 
-    # Load FULL edstays — aggregate_pmh needs every ED visit per subject
+    # Load FULL edstays - aggregate_pmh needs every ED visit per subject
     # for n_prior_ed_visits and same_complaint_as_prior. The "current"
     # working set is derived after merging with triage; the prior-encounter
     # lookups walk the unfiltered table.
@@ -260,13 +228,13 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     df = df.merge(patients, on="subject_id", how="left")
     print(f"  Merged: {len(df):,} rows")
 
-    # --- Compute age ---
+    # Compute age
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # --- Clean chief complaints & acuity ---
+    # Clean chief complaints & acuity
     initial_count = len(df)
     df = df.dropna(subset=["chiefcomplaint", "acuity"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
@@ -276,21 +244,21 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     df["acuity"] = df["acuity"].astype(int)
     df = df[df["acuity"].between(1, 5)]
 
-    # --- Clean pain ---
+    # Clean pain
     df["pain"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain"].isna().astype(int)
     df["pain"] = df["pain"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
 
-    # --- Gender / arrival / disposition ---
+    # Gender / arrival / disposition
     df["gender_male"] = (df["gender"] == "M").astype(int)
     df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
     df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
     df["admitted"] = (df["disposition"] == "ADMITTED").astype(int)
 
-    # --- Clean vital signs (same physiological clipping as v2) ---
+    # Clean vital signs (same physiological clipping as v2)
     print(f"\n  Vital sign processing:")
     for col in VITAL_COLS:
         raw_missing = df[col].isna().sum()
@@ -301,7 +269,7 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
         print(f"    {col}: {raw_missing:,} raw NaN + {out_of_range:,} out-of-range "
               f"-> {total_missing:,} total missing ({100*total_missing/len(df):.1f}%)")
 
-    # --- Mask vitals for non-ambulance/helicopter patients ---
+    # Mask vitals for non-ambulance/helicopter patients
     walkin_mask = ~df["arrival_transport"].isin(["AMBULANCE", "HELICOPTER"])
     n_masked = walkin_mask.sum()
     print(f"\n  Masking vitals for non-ambulance/helicopter patients:")
@@ -309,7 +277,7 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     for col in VITAL_COLS:
         df.loc[walkin_mask, col] = np.nan
 
-    # --- Cap rows ---
+    # Cap rows
     if TRAIN_CAP and len(df) > TRAIN_CAP:
         print(f"\n  Capping to {TRAIN_CAP:,} rows (stratified by acuity)...")
         df, _ = train_test_split(
@@ -335,7 +303,7 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     df = df.merge(pmh_df, on="stay_id", how="left")
     fill_missing_pmh_columns(df)
 
-    # --- Distributions ---
+    # Distributions
     print(f"\n  Acuity distribution:")
     for level in sorted(df["acuity"].unique()):
         count = (df["acuity"] == level).sum()
@@ -350,15 +318,13 @@ def load_and_clean_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     pmh_any = (df[[c for c in PMH_FEATURE_COLS if c.startswith("pmh_")]].sum(axis=1) > 0).mean()
     has_prior = (df["no_history"] == 0).mean()
     print(f"\n  PMH coverage:")
-    print(f"    Stays with ≥1 PMH flag:    {100*pmh_any:.1f}%")
-    print(f"    Stays with ≥1 prior visit: {100*has_prior:.1f}%")
+    print(f"    Stays with >=1 PMH flag:    {100*pmh_any:.1f}%")
+    print(f"    Stays with >=1 prior visit: {100*has_prior:.1f}%")
 
     return df, edstays
 
 
-# ---------------------------------------------------------------------------
 # 2. Feature Engineering
-# ---------------------------------------------------------------------------
 def build_features(
     df: pd.DataFrame,
     tfidf: TfidfVectorizer = None,
@@ -367,9 +333,7 @@ def build_features(
     fit: bool = True,
 ) -> tuple:
     """Build full feature matrix: v1 structured + v2 vitals + v3 PMH + TF-IDF."""
-    print("\n" + "=" * 60)
-    print(f"STEP 2: Feature engineering ({'fitting' if fit else 'transforming'})")
-    print("=" * 60)
+    print(f"Feature engineering ({'fitting' if fit else 'transforming'})")
 
     df = df.copy()
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
@@ -379,7 +343,7 @@ def build_features(
     )
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # --- TF-IDF ---
+    # TF-IDF
     if fit:
         tfidf = TfidfVectorizer(
             max_features=2000,
@@ -400,7 +364,7 @@ def build_features(
         index=df.index,
     )
 
-    # --- Severity Priors ---
+    # Severity Priors
     if fit:
         word_acuity = defaultdict(list)
         texts = df["complaint_text"].values
@@ -449,7 +413,7 @@ def build_features(
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # --- v2 vital sign features ---
+    # v2 vital sign features
     for col in VITAL_COLS:
         df[f"{col}_missing"] = df[col].isna().astype(int)
 
@@ -477,9 +441,7 @@ def build_features(
     df["hypoxic_elderly"] = df["hypoxic"] * df["elderly"]
     df["hypotensive_elderly"] = df["hypotensive"] * df["elderly"]
 
-    # ===================================================================
     # Assemble feature vector
-    # ===================================================================
     v1_structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
         "n_complaints", "complaint_length",
@@ -520,9 +482,7 @@ def build_features(
     return features, tfidf, severity_map, vital_medians
 
 
-# ---------------------------------------------------------------------------
 # 3. Train Models
-# ---------------------------------------------------------------------------
 def train_acuity_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -534,16 +494,14 @@ def train_acuity_model(
     v3 PMH-augmented feature set.
 
     Hyperparameters vs the initial v3 iteration:
-      n_estimators       3000 → 5000        (section 1.1)
-      learning_rate      0.02 → 0.01        (section 1.1)
-      early_stopping     100  → 150         (section 1.1)
+      n_estimators       3000 -> 5000        (section 1.1)
+      learning_rate      0.02 -> 0.01        (section 1.1)
+      early_stopping     100  -> 150         (section 1.1)
       sample_weight      sqrt-balanced × ESI_EXTREME_BOOST  (section 1.2)
-      eval_metric        mlogloss → neg_quadratic_kappa     (section 1.2)
+      eval_metric        mlogloss -> neg_quadratic_kappa     (section 1.2)
     """
-    print("\n" + "=" * 60)
-    print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
+    print("Training ACUITY model (XGBoost, ESI 1-5)")
     print(f"         Section 1.1 (longer training) + Section 1.2 (ordinal weights + QWK)")
-    print("=" * 60)
 
     class_counts = y_train.value_counts()
     total = len(y_train)
@@ -597,7 +555,7 @@ def train_acuity_model(
           f"lr={ACUITY_LEARNING_RATE}, early stopping={ACUITY_EARLY_STOPPING_ROUNDS}; "
           f"device={XGB_DEVICE}, tree_method={XGB_TREE_METHOD}, eval=neg_qwk)...")
     # verbose=100 prints a one-line update every 100 boosting iterations
-    # in addition to the tqdm bar — gives the user a textual progress trail
+    # in addition to the tqdm bar - gives the user a textual progress trail
     # in the notebook output even if the tqdm widget didn't render.
     model.fit(
         X_train, y_train_shifted,
@@ -609,7 +567,7 @@ def train_acuity_model(
     print(f"  Best iteration: {model.best_iteration}  "
           f"(eval metric was -κ, so best = highest κ)")
 
-    # Strip the tqdm callback so joblib.dump can pickle the model — the bar
+    # Strip the tqdm callback so joblib.dump can pickle the model - the bar
     # holds an open file handle that pickle chokes on. Only matters during
     # .fit(); .predict() / .predict_proba() never touch it.
     try:
@@ -639,17 +597,15 @@ def train_disposition_model(
 ) -> XGBClassifier:
     """Train the disposition head with section 1.1 (longer training).
 
-    Section 1.2 (ordinal weights, QWK eval) is acuity-only — disposition is
+    Section 1.2 (ordinal weights, QWK eval) is acuity-only - disposition is
     binary and admit/discharge has no ordinal structure.
 
     Hyperparameters vs the initial v3 iteration:
-      n_estimators       3000 → 5000        (section 1.1)
-      learning_rate      0.02 → 0.01        (section 1.1)
-      early_stopping     100  → 150         (section 1.1)
+      n_estimators       3000 -> 5000        (section 1.1)
+      learning_rate      0.02 -> 0.01        (section 1.1)
+      early_stopping     100  -> 150         (section 1.1)
     """
-    print("\n" + "=" * 60)
-    print("STEP 4b: Training DISPOSITION model (XGBoost) — Section 1.1 longer training")
-    print("=" * 60)
+    print("Training DISPOSITION model (XGBoost) - Section 1.1 longer training")
 
     neg_count = (y_train == 0).sum()
     pos_count = (y_train == 1).sum()
@@ -712,9 +668,7 @@ def train_disposition_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 4. Save Artifacts
-# ---------------------------------------------------------------------------
 def save_models(
     acuity_model,
     disposition_model,
@@ -726,9 +680,7 @@ def save_models(
     disposition_accuracy: float,
     n_features: int,
 ):
-    print("\n" + "=" * 60)
-    print("STEP 5: Saving model artifacts")
-    print("=" * 60)
+    print("Saving model artifacts")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -738,7 +690,7 @@ def save_models(
     # the callable gets pickled with __module__="__main__". At load time pickle
     # cannot resolve __main__.neg_quadratic_kappa unless the caller manually
     # injects it. Stripping eval_metric here makes the saved model loadable
-    # cleanly via plain joblib.load() — eval_metric is fit-time only and is
+    # cleanly via plain joblib.load() - eval_metric is fit-time only and is
     # never consulted at predict() / predict_proba() time anyway.
     try:
         acuity_model.set_params(eval_metric=None)
@@ -801,21 +753,15 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
     print("  MIMIC-IV Triage Model Training Pipeline v3")
     cap_str = f"{TRAIN_CAP:,}" if TRAIN_CAP else "full dataset"
     print(f"  (v2 features + PMH, {cap_str} rows)")
-    print("#" * 60)
 
     df, _edstays = load_and_clean_data()
 
-    print("\n" + "=" * 60)
-    print("STEP 3: Train/test split (80/20, stratified by acuity)")
-    print("=" * 60)
+    print("Train/test split (80/20, stratified by acuity)")
 
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
@@ -863,15 +809,12 @@ def main():
         n_features=X_train.shape[1],
     )
 
-    print("\n" + "#" * 60)
-    print("  TRAINING COMPLETE!")
-    print("#" * 60)
+    print("Training complete.")
     print(f"  Training rows (before split): {len(df):,}")
     print(f"  Total features: {X_train.shape[1]}")
     print(f"  Acuity accuracy (exact):    {acuity_accuracy:.4f}")
     print(f"  Acuity accuracy (within 1): {within_1:.4f}")
     print(f"  Disposition accuracy:       {disp_accuracy:.4f}")
-    print("#" * 60 + "\n")
 
 
 if __name__ == "__main__":

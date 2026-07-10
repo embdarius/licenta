@@ -62,7 +62,7 @@ export default function RichResultCard({
       return (
         <Frame title="Assessment">
           <p className="text-sm text-slate-600">
-            {output.message || "Discharge recommended — no admission diagnosis generated."}
+            {output.message || "Discharge recommended - no admission diagnosis generated."}
           </p>
         </Frame>
       );

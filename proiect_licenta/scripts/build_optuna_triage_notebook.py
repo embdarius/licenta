@@ -3,7 +3,7 @@
 Edit cell sources here, then run `python scripts/build_optuna_triage_notebook.py`.
 
 The notebook runs `scripts/tune_triage_v3.py` in chunks on Colab GPU. It is a
-REPORTING-ONLY, constrained Group-2 hyperparameter sweep for the triage v3
+reporting-only, constrained Group-2 hyperparameter sweep for the triage v3
 acuity + disposition heads: it never overwrites the live triage v3 model
 joblibs (everything lands in `artifacts/triage/v3/hpo/`), and every trial is
 persisted to a SQLite study on Drive so runs resume across Colab sessions.
@@ -34,29 +34,29 @@ def code(cell_id: str, src: str) -> None:
 
 md("intro-md", """# Triage v3 - Constrained Optuna HPO (Colab GPU, resumable, reporting-only)
 
-A **constrained** search over only the inherited **Group-2** XGBoost
+A constrained search over only the inherited Group-2 XGBoost
 regularization knobs (`max_depth`, `subsample`, `colsample_bytree`,
 `colsample_bylevel`, `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`).
-The documented **Group-1** clinical-safety choices (`lr=0.01`,
+The documented Group-1 clinical-safety choices (`lr=0.01`,
 `n_estimators=5000`, `early_stopping=150`, `ESI_EXTREME_BOOST`,
-`neg_quadratic_kappa`) are **frozen**.
+`neg_quadratic_kappa`) are frozen.
 
-**This is reporting-only.** Nothing here overwrites your existing Drive
+This is reporting-only. Nothing here overwrites your existing Drive
 artifacts:
 
-- the live triage v3 joblibs in `artifacts/triage/v3/` are only ever **read**;
+- the live triage v3 joblibs in `artifacts/triage/v3/` are only ever read;
 - all sweep outputs land in a new `artifacts/triage/v3/hpo/` subdir;
 - the feature cache is a triage-only `data/derived/triage_tune_cache/`
   (separate from the doctor sweep's `tune_cache/`);
 - the Optuna study DB is `hpo/optuna_triage.db` (distinct from the doctor's).
 
 ## Objective
-- **Acuity:** maximize quadratic-weighted kappa (QWK) **subject to** a hard
+- Acuity: maximize quadratic-weighted kappa (QWK) subject to a hard
   constraint - under-triage rate must not exceed the incumbent's. The current
-  hand-tuned config is enqueued as **trial 0** and defines that baseline. So
+  hand-tuned config is enqueued as trial 0 and defines that baseline. So
   the search can only *hold or improve* under-triage; it can never trade it
   away for headline accuracy.
-- **Disposition:** maximize ROC AUC (binary; no safety constraint).
+- Disposition: maximize ROC AUC (binary; no safety constraint).
 
 ## How resume works
 Every trial is committed to `hpo/optuna_triage.db` on Drive before the next
@@ -66,21 +66,20 @@ human-readable `hpo/tuning_log_{stage}.json` is rewritten after every trial.
 
 ## Order of operations
 1. Setup (Cells 1-5): mount, clone, symlink, install, GPU smoke.
-2. **Self-test** (Cell 6) - synthetic plumbing check, seconds.
-3. **Smoke** (Cell 7) - real-data subsample, 2 trials, throwaway paths. Proves
+2. Self-test (Cell 6) - synthetic plumbing check, seconds.
+3. Smoke (Cell 7) - real-data subsample, 2 trials, throwaway paths. Proves
    it runs + saves + resumes BEFORE the full sweep.
-4. **Acuity** (Cell 8) - run in 10-trial chunks.
-5. **Disposition** (Cell 9) - after acuity is finalized.
-6. **State** (Cell 10) - read-only study inspection between chunks.
-7. **Report** (Cell 11) - incumbent vs best-feasible on the outer-test split ->
+4. Acuity (Cell 8) - run in 10-trial chunks.
+5. Disposition (Cell 9) - after acuity is finalized.
+6. State (Cell 10) - read-only study inspection between chunks.
+7. Report (Cell 11) - incumbent vs best-feasible on the outer-test split ->
    `hpo/triage_hpo_results.json` (the thesis table).
 
 ## Prereq: Colab GPU runtime
-Runtime menu -> Change runtime type -> **T4 GPU** (free) or L4/A100 (Pro).""")
+Runtime menu -> Change runtime type -> T4 GPU (free) or L4/A100 (Pro).""")
 
 
-md("section1-md", """---
-## Section 1 - Setup
+md("section1-md", """## Setup
 """)
 
 
@@ -165,8 +164,7 @@ m.fit(X, y)
 print('XGBoost GPU smoke test PASSED')""")
 
 
-md("section2-md", """---
-## Section 2 - Pre-flight (run BEFORE the full sweep)
+md("section2-md", """## Pre-flight (run BEFORE the full sweep)
 
 These two cells prove the pipeline runs and saves correctly without committing
 to a multi-hour run. Both write only to throwaway paths.""")
@@ -203,15 +201,14 @@ finally:
     sys.argv = _saved""")
 
 
-md("section3-md", """---
-## Section 3 - Run the sweep (resumable, full Group-1 config)
+md("section3-md", """## Run the sweep (resumable, full Group-1 config)
 
 Set `N_TRIALS_THIS_SESSION` and run. Each run appends trials to the same study.
-**Recommended total budget: 40-60 trials per head.** The first real run builds
+Recommended total budget: 40-60 trials per head. The first real run builds
 the full feature cache (slow, parses the 3.3 GB discharge.csv); later runs load
 it in seconds.
 
-Run **acuity to completion first** (the disposition stage needs the best acuity
+Run acuity to completion first (the disposition stage needs the best acuity
 config to build its `predicted_acuity` cascade feature).""")
 
 
@@ -266,8 +263,7 @@ finally:
     sys.argv = _saved""")
 
 
-md("section4-md", """---
-## Section 4 - Inspect & report
+md("section4-md", """## Inspect & report
 """)
 
 
@@ -337,28 +333,27 @@ for f in ('acuity_model.joblib', 'disposition_model.joblib'):
         print(f'  live {f}: mtime {os.path.getmtime(p)} (unchanged by HPO)')""")
 
 
-md("section5-md", """---
-## Section 5 - Group-1 study (the clinical-safety levers; MULTI-OBJECTIVE)
+md("section5-md", """## Group-1 study (the clinical-safety levers; MULTI-OBJECTIVE)
 
-A separate study over the **Group-1** knobs that Sections 3-4 held frozen: the
+A separate study over the Group-1 knobs that Sections 3-4 held frozen: the
 `ESI_EXTREME_BOOST` vector, `learning_rate`/`n_estimators`, and the disposition
 `scale_pos_weight` + decision threshold. Because these *are* the clinical-safety
-levers, this is a **multi-objective Pareto** search (NSGA-II), not a constrained
+levers, this is a multi-objective Pareto search (NSGA-II), not a constrained
 single-objective one:
 
-- **Acuity:** jointly maximize (exact accuracy, ESI-5 recall) and minimize
-  under-triage. Reports the **Pareto frontier**; the incumbent is enqueued as
+- Acuity: jointly maximize (exact accuracy, ESI-5 recall) and minimize
+  under-triage. Reports the Pareto frontier; the incumbent is enqueued as
   trial 0 and sits on the curve.
-- **Disposition:** jointly maximize accuracy and minimize under-triage over the
+- Disposition: jointly maximize accuracy and minimize under-triage over the
   `scale_pos_weight` exponent, `lr`/`n_estimators`, and the decision threshold.
 
-Group-2 stays frozen at the incumbent throughout. Everything lands in **separate**
+Group-2 stays frozen at the incumbent throughout. Everything lands in separate
 files (`optuna_triage_g1.db`, `tuning_log_*_g1.json`, `tuned_params_triage_g1.json`,
 `triage_hpo_g1_results.json`) so the Group-2 study above is untouched. Still
-**reporting-only**.
+reporting-only.
 
 After you inspect the frontier and confirm a deployed point (the `selected`
-block in `tuned_params_triage_g1.json`), you can optionally re-run the **Group-2**
+block in `tuned_params_triage_g1.json`), you can optionally re-run the Group-2
 cells above with `--use-group1-best` to search the regularization on top of the
 confirmed Group-1 config.""")
 
@@ -475,15 +470,14 @@ from proiect_licenta.paths import TRIAGE_V3_HPO_DIR
 print('\\nResults JSON:', TRIAGE_V3_HPO_DIR / 'triage_hpo_g1_results.json')""")
 
 
-md("done-md", """---
-## Done
+md("done-md", """## Done
 
 `artifacts/triage/v3/hpo/` now holds:
 
 - `optuna_triage.db` - the persistent Optuna study (acuity + disposition).
 - `tuning_log_acuity.json`, `tuning_log_disposition.json` - per-trial running
   logs (every completed trial + feasibility flag). Use the acuity log to plot
-  **QWK vs under-triage** across trials - a clean thesis figure showing the
+  QWK vs under-triage across trials - a clean thesis figure showing the
   trade-off the constraint refuses to make.
 - `tuned_params_triage.json` - best-feasible acuity + best disposition Group-2.
 - `triage_hpo_results.json` - incumbent vs best-feasible on the outer-test
@@ -493,11 +487,11 @@ The live triage v3 model is untouched. Most likely the search confirms the
 inherited Group-2 values are near-optimal - itself a reportable, honest
 defensibility result. The same recipe then extends to the doctor + nurse heads.
 
-**Section 5 (Group-1)** adds the sibling multi-objective study; it writes the
+Section 5 (Group-1) adds the sibling multi-objective study; it writes the
 parallel `*_g1` files (`optuna_triage_g1.db`, `tuning_log_*_g1.json`,
 `tuned_params_triage_g1.json` with a `pareto_front` + `selected` block per head,
-and `triage_hpo_g1_results.json`). Use the acuity frontier to plot **exact
-accuracy vs under-triage vs ESI-5 recall** - the clinical trade-off the deployed
+and `triage_hpo_g1_results.json`). Use the acuity frontier to plot exact
+accuracy vs under-triage vs ESI-5 recall - the clinical trade-off the deployed
 point must be justified against.""")
 
 

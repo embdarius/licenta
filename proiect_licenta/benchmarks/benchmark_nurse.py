@@ -1,5 +1,4 @@
-"""
-Benchmark: Doctor v1 vs v2 Comparison
+"""Benchmark: Doctor v1 vs v2 Comparison
 
 Evaluates both model sets on the same held-out test data to quantify
 the impact of adding vital signs and medication features (nurse data).
@@ -42,9 +41,7 @@ from proiect_licenta.training.train_doctor import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def evaluate_model(model, X_test, y_test, labels, model_name, cascading_model=None, X_test_base=None):
@@ -75,19 +72,13 @@ def evaluate_model(model, X_test, y_test, labels, model_name, cascading_model=No
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  DOCTOR v1 vs v2 BENCHMARK COMPARISON")
     print("  Impact of vital signs + medication features")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
-    # 1. Load data (v2 superset — includes vitals + meds)
-    # ------------------------------------------------------------------
+    # 1. Load data (v2 superset - includes vitals + meds)
     df = load_v2_data()
 
-    # ------------------------------------------------------------------
     # 2. Sample 100K (same seed as both training pipelines)
-    # ------------------------------------------------------------------
     print_section("SAMPLING 100K + BUILDING FEATURES")
     if len(df) > 100_000:
         df, _ = train_test_split(
@@ -105,9 +96,7 @@ def main():
     features_v2 = build_v2_features(df)
     print(f"  v2 features: {features_v2.shape[1]}")
 
-    # ------------------------------------------------------------------
     # 3. Encode labels + split (same seed)
-    # ------------------------------------------------------------------
     meta_v1 = json.loads((DOCTOR_V1_DIR / "metadata.json").read_text())
     meta_v2 = json.loads((DOCTOR_V2_DIR / "metadata.json").read_text())
 
@@ -132,9 +121,7 @@ def main():
 
     print(f"  Train: {len(X1_train):,} | Test: {len(X1_test):,}")
 
-    # ------------------------------------------------------------------
     # 4. Load models
-    # ------------------------------------------------------------------
     print_section("LOADING MODELS")
     v1_diag = joblib.load(DOCTOR_V1_DIR / "diagnosis_model.joblib")
     v1_dept = joblib.load(DOCTOR_V1_DIR / "department_model.joblib")
@@ -143,10 +130,8 @@ def main():
     print(f"  v1 trained: {meta_v1['trained_at']}")
     print(f"  v2 trained: {meta_v2['trained_at']}")
 
-    # ------------------------------------------------------------------
     # 5. Evaluate DIAGNOSIS models
-    # ------------------------------------------------------------------
-    print_section("DIAGNOSIS CATEGORY — v1 vs v2")
+    print_section("DIAGNOSIS CATEGORY - v1 vs v2")
 
     d1 = evaluate_model(v1_diag, X1_test, y_diag_test, diagnosis_labels, "Diagnosis v1")
     d2 = evaluate_model(v2_diag, X2_test, y_diag_test, diagnosis_labels, "Diagnosis v2")
@@ -182,10 +167,8 @@ def main():
         target_names=short_diag, digits=4, zero_division=0,
     ))
 
-    # ------------------------------------------------------------------
     # 6. Evaluate DEPARTMENT models
-    # ------------------------------------------------------------------
-    print_section("DEPARTMENT — v1 vs v2")
+    print_section("DEPARTMENT - v1 vs v2")
 
     # Department models use cascading diagnosis prediction
     X1_test_dept = X1_test.copy()
@@ -239,10 +222,8 @@ def main():
         target_names=department_labels, digits=4, zero_division=0,
     ))
 
-    # ------------------------------------------------------------------
-    # 7. Feature importance — v2 top features (new features only)
-    # ------------------------------------------------------------------
-    print_section("TOP 20 FEATURE IMPORTANCES — v2 DIAGNOSIS MODEL")
+    # 7. Feature importance - v2 top features (new features only)
+    print_section("TOP 20 FEATURE IMPORTANCES - v2 DIAGNOSIS MODEL")
     tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.joblib")
     tfidf_vocab_inv = {v: k for k, v in tfidf.vocabulary_.items()}
     feature_names = list(X2_test.columns)
@@ -278,9 +259,7 @@ def main():
         if name in nurse_features:
             print(f"    #{rank:>2}: {name:<35s}  importance={importances[idx]:.5f}")
 
-    # ------------------------------------------------------------------
     # 8. Baseline comparisons
-    # ------------------------------------------------------------------
     print_section("BASELINE COMPARISONS")
 
     diag_majority = y_diag_train.mode()[0]
@@ -296,9 +275,7 @@ def main():
     print(f"  Department v1:                 {dp1_acc:.4f}  (+{dp1_acc-dept_majority_acc:.4f})")
     print(f"  Department v2:                 {dp2_acc:.4f}  (+{dp2_acc-dept_majority_acc:.4f})")
 
-    # ------------------------------------------------------------------
     # 9. Summary
-    # ------------------------------------------------------------------
     print_section("BENCHMARK SUMMARY")
     print(f"  Test set size:          {len(y_diag_test):,}")
     print(f"  v1 features:            {features_v1.shape[1]}")
@@ -316,9 +293,7 @@ def main():
     print(f"    {'Top-3 accuracy':<20s}  {dp1_top3:>7.2%}  {dp2_top3:>7.2%}  {dp2_top3-dp1_top3:>+7.2%}")
     print(f"    {'Cohen kappa':<20s}  {dp1_kappa:>7.4f}  {dp2_kappa:>7.4f}  {dp2_kappa-dp1_kappa:>+7.4f}")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 70 + "\n")
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

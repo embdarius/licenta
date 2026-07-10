@@ -1,38 +1,30 @@
 """Stage-by-stage orchestration of the live inference pipeline.
 
-Single source of truth for driving the four prediction tools the same way the
-live CrewAI crew does — extracted from the proven, deterministic wiring in
-``benchmarks/benchmark_pipeline_e2e.py`` (``run_tool_direct`` / ``_lookup_blocks``
-/ ``_llm_parse_triage``). The web backend (``webapp/backend``) calls these stage
-functions one at a time and accumulates session state, so the website's
-predictions are byte-identical to the crew's: the SAME tool instances, the SAME
-argument wiring, the SAME "disposition gates the reassessment" gating, and the
-SAME MRN/EHR-lookup override. Only the stdin/LLM-ask *interactivity* is replaced
-by web-native collection.
-
-Nothing here touches the trained models or the tools — it just calls them.
+Drives the four prediction tools the same way the CrewAI crew does, so the web
+backend's predictions match the crew path: the same tool instances, the same
+argument wiring, the same "disposition gates the reassessment" gating, and the
+same MRN lookup override. Only the stdin/LLM interactivity is replaced by
+web-native collection. Nothing here touches the trained models; it just calls
+the tools.
 """
 from __future__ import annotations
 
 import json
 import re
 
-# The six snapshot vitals, in the tool's expected order. Hardcoded (rather than
-# imported from case_generation) to avoid pulling the heavy MIMIC loaders at
+# The six snapshot vitals in the tool's expected order. Hardcoded rather than
+# imported from case_generation to avoid pulling the heavy MIMIC loaders at
 # import time; this list is the stable tool contract.
 VITAL_COLS = ("temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp")
 
-# ---------------------------------------------------------------------------
-# Tool singletons (mirror benchmark _direct_tools)
-# ---------------------------------------------------------------------------
 _TOOLS: dict = {}
 
 
 def get_pipeline_tools() -> dict:
-    """Lazily construct and cache the five live tool instances.
+    """Construct and cache the five live tool instances.
 
-    Construction loads the joblib model artifacts, so we build them once and
-    reuse across requests (same pattern as the benchmark's ``_direct_tools``).
+    Construction loads the joblib artifacts, so build them once and reuse
+    across requests.
     """
     if not _TOOLS:
         from proiect_licenta.tools.triage_tool import TriagePredictionTool
@@ -64,20 +56,15 @@ def _ems(ems_vitals: dict | None) -> dict:
     return base
 
 
-# ---------------------------------------------------------------------------
-# EHR / MRN lookup (mirror benchmark _lookup_blocks, but with the live 'now'
-# anchor instead of a historical intime — matches tasks.yaml step 1b/2b).
-# ---------------------------------------------------------------------------
 def lookup_blocks(subject_id: int, chief_complaints: str,
                   current_intime: str = "now") -> tuple[str, str]:
     """Return ``(pmh_json, med_json)`` for a returning patient, else ``("","")``.
 
-    A live patient is arriving *now*, so we anchor the leakage cutoff to the
-    subject's most recent recorded encounter ("now" sentinel — see
-    ``PatientHistoryLookupTool._run``). Each block is the lookup's `pmh_block` /
-    `med_block` serialized to a JSON string (empty when not on record / index
-    not built), ready to pass straight into the prediction tools as their
-    ``pmh_lookup_json`` / ``med_lookup_json`` overrides.
+    A live patient arrives now, so the leakage cutoff is anchored to the
+    subject's most recent recorded encounter (the "now" sentinel in
+    PatientHistoryLookupTool). Each block is the lookup's pmh_block / med_block
+    as a JSON string, ready to pass into the prediction tools as their
+    pmh_lookup_json / med_lookup_json overrides.
     """
     if subject_id is None or int(subject_id) < 0:
         return "", ""
@@ -94,19 +81,15 @@ def lookup_blocks(subject_id: int, chief_complaints: str,
     return pmh_json, med_json
 
 
-# ---------------------------------------------------------------------------
-# Stage 1 — Triage (acuity + screening disposition)
-# ---------------------------------------------------------------------------
 def run_triage(chief_complaints: str, pain_score: int, age: int, gender: str,
                arrival_transport: str, ems_vitals: dict | None = None,
                prior_history: str = "", n_prior_admissions: int = -1,
                pmh_lookup_json: str = "") -> dict:
-    """``TriagePredictionTool`` with EMS vitals + PMH self-report / EHR override.
+    """Stage 1 triage: acuity plus screening disposition.
 
-    EMS vitals are only meaningful for ambulance/helicopter patients; pass
-    ``ems_vitals=None`` for walk-ins (the tool treats -1 as missing/masked).
-    ``pmh_lookup_json`` (when non-empty) OVERRIDES the self-reported PMH with the
-    real prior-encounter record. Mirrors benchmark lines 236-244.
+    EMS vitals only matter for ambulance/helicopter patients; pass
+    ems_vitals=None for walk-ins (the tool treats -1 as missing). A non-empty
+    pmh_lookup_json overrides the self-reported PMH with the real record.
     """
     tools = get_pipeline_tools()
     ems = _ems(ems_vitals)
@@ -130,16 +113,13 @@ def triage_admit_of(triage_json: dict) -> bool:
     return "ADMIT" in s and "NOT ADMIT" not in s and "DISCHARGE" not in s
 
 
-# ---------------------------------------------------------------------------
-# Stage 2 — Doctor initial assessment (v3_base, pre-nurse)
-# ---------------------------------------------------------------------------
 def run_doctor_initial(chief_complaints: str, pain_score: int, age: int,
                        gender: str, arrival_transport: str,
                        predicted_acuity: int, is_admitted: bool) -> dict:
-    """``DoctorPredictionToolV3Base`` — initial top-3 diagnosis + department.
+    """Stage 2 initial doctor assessment (v3_base): top-3 diagnosis and department.
 
-    The tool itself short-circuits to a NOT_ADMITTED payload when
-    ``is_admitted`` is False, matching the live crew's gating.
+    The tool short-circuits to a NOT_ADMITTED payload when is_admitted is False,
+    matching the crew's gating.
     """
     tools = get_pipeline_tools()
     return json.loads(tools["base"]._run(
@@ -149,20 +129,14 @@ def run_doctor_initial(chief_complaints: str, pain_score: int, age: int,
     ))
 
 
-# ---------------------------------------------------------------------------
-# Stage 4 — Doctor disposition refinement (calibrated, post-nurse)
-# ---------------------------------------------------------------------------
 def run_disposition(chief_complaints: str, pain_score: int, age: int,
                     gender: str, arrival_transport: str, predicted_acuity: int,
                     triage_is_admitted: bool, nurse: dict,
                     pmh_lookup_json: str = "", med_lookup_json: str = "") -> dict:
-    """``DoctorDispositionTool`` with all post-nurse signals.
+    """Stage 4 calibrated disposition refinement with all post-nurse signals.
 
-    ``nurse`` is the dict from ``build_nurse_payload`` (vital_signs,
-    vital_trajectory, rhythm, medications_raw, prior_history,
-    n_prior_admissions). Always called — both for triage-admit and
-    triage-discharge — because the model can flip either way. Mirrors benchmark
-    lines 253-264.
+    ``nurse`` is the dict from build_nurse_payload. Always called, for both
+    triage-admit and triage-discharge, because the model can flip either way.
     """
     tools = get_pipeline_tools()
     nv = nurse["vital_signs"]
@@ -187,18 +161,15 @@ def refined_admit_of(dispo_json: dict) -> bool:
     return bool(dispo_json["disposition_prediction"]["is_admitted"])
 
 
-# ---------------------------------------------------------------------------
-# Stage 5 — Doctor enhanced reassessment (v3 nurse). Gated on REFINED admit.
-# ---------------------------------------------------------------------------
 def run_reassessment(chief_complaints: str, pain_score: int, age: int,
                      gender: str, arrival_transport: str, predicted_acuity: int,
                      refined_is_admitted: bool, nurse: dict,
                      pmh_lookup_json: str = "", med_lookup_json: str = "") -> dict:
-    """``DoctorPredictionToolV3`` — enhanced diagnosis + department + exact-ICD.
+    """Stage 5 enhanced reassessment (v3 nurse): diagnosis, department, exact-ICD.
 
-    Gated on the REFINED disposition verdict (``refined_is_admitted``), NOT the
-    triage one. The tool returns a NOT_ADMITTED payload when False. Same nurse +
-    lookup args as the disposition stage. Mirrors benchmark lines 269-280.
+    Gated on the refined disposition verdict, not the triage one. The tool
+    returns a NOT_ADMITTED payload when False. Same nurse and lookup args as the
+    disposition stage.
     """
     tools = get_pipeline_tools()
     nv = nurse["vital_signs"]
@@ -219,11 +190,8 @@ def run_reassessment(chief_complaints: str, pain_score: int, age: int,
     ))
 
 
-# ---------------------------------------------------------------------------
-# Stage 0 — LLM intake parse (free text -> structured fields)
-# ---------------------------------------------------------------------------
-# Same lay->clinical ED-terminology steering as the live parser (tasks.yaml
-# parse_symptoms_task) and the benchmark's parser-llm mode (_PARSE_PROMPT).
+# Stage 0 LLM intake parse (free text to structured fields). Same lay-to-clinical
+# ED-terminology steering as the live parser (tasks.yaml parse_symptoms_task).
 _PARSE_PROMPT = """You are a clinical intake parser. Read the patient's free-text \
 description and extract ONLY what is stated. Respond with a single JSON object and \
 nothing else, using exactly these keys:
@@ -254,14 +222,11 @@ def _coerce_int(v):
 
 
 def parse_intake(narrative: str) -> dict:
-    """One direct LLM completion -> normalized intake fields (best-effort).
+    """One LLM completion to normalized intake fields (best-effort).
 
-    Returns a dict with keys ``chief_complaints`` (str), ``age`` (int|None),
-    ``gender`` ("m"/"f"/None), ``arrival_transport`` (walk_in/ambulance/
-    helicopter), ``pain_score`` (int, -1 if unstated). The web form pre-fills
-    from this and lets the user correct anything. Reuses ``get_parse_llm`` so it
-    respects ``LLM_BACKEND`` (Flash by default). Normalization matches the
-    benchmark's ``run_parser_llm_bypass`` (lines 454-474).
+    Returns a dict with chief_complaints, age, gender, arrival_transport, and
+    pain_score. The web form pre-fills from this and lets the user correct
+    anything. Reuses get_parse_llm so it respects LLM_BACKEND (Flash by default).
     """
     from proiect_licenta.llm_config import get_parse_llm
 

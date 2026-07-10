@@ -37,14 +37,13 @@ md("intro-md", """# Doctor v3 Nurse - Tier A Training (A2+A3+A4) on Colab GPU
 Trains `artifacts/doctor/v3/` from the current HEAD of the repo, on Colab GPU. As of this notebook the v3-nurse pipeline produces:
 
 - The original v3-nurse models - 13-class diagnosis + 11-class cascading department, on TF-IDF + structured triage + cascading triage predictions + snapshot vitals + medication flags + longitudinal vitals + cardiac rhythm.
-- **Change 1 (PMH features)** - 19 feature columns from prior discharge-note PMH sections + ICD-derived fallback + repeat-visit numerics.
-- **A2 (expanded PMH vocabulary)** - 597 keywords (up from 397) covering s/p surgical histories, abbreviation variants, CKD staging, and brand-name drugs as condition proxies.
-- **A3 (diagnosis softmax cascade)** - the department model now consumes 13 `diag_proba_<category>` columns instead of a single argmax integer, so it can weight ambiguous diagnoses honestly.
-- **A4 (isotonic department calibration)** - department model wrapped with `CalibratedClassifierCV(method='isotonic')` using a 10% held-out calibration set, for trustworthy displayed probabilities.
+- Change 1 (PMH features) - 19 feature columns from prior discharge-note PMH sections + ICD-derived fallback + repeat-visit numerics.
+- A2 (expanded PMH vocabulary) - 597 keywords (up from 397) covering s/p surgical histories, abbreviation variants, CKD staging, and brand-name drugs as condition proxies.
+- A3 (diagnosis softmax cascade) - the department model now consumes 13 `diag_proba_<category>` columns instead of a single argmax integer, so it can weight ambiguous diagnoses honestly.
+- A4 (isotonic department calibration) - department model wrapped with `CalibratedClassifierCV(method='isotonic')` using a 10% held-out calibration set, for trustworthy displayed probabilities.
 
-All XGBoost training runs on **GPU (CUDA)** via XGBoost 2.x's `device="cuda"` API. The env vars `XGB_DEVICE=cuda` + `XGB_TREE_METHOD=hist` are set in Cell 8 before training kicks off - read by `train_nurse_v3.py:XGB_DEVICE`.
+All XGBoost training runs on GPU (CUDA) via XGBoost 2.x's `device="cuda"` API. The env vars `XGB_DEVICE=cuda` + `XGB_TREE_METHOD=hist` are set in Cell 8 before training kicks off - read by `train_nurse_v3.py:XGB_DEVICE`.
 
----
 
 ## Repo layout assumption
 
@@ -63,13 +62,11 @@ licenta/                                    <- git repo root (cloned to /content
 
 If your fork is flatter (project files at the git root), edit `PROJECT_PATH` in Cell 2.
 
----
 
 ## Prereq: Colab runtime must have GPU
 
-Runtime menu -> Change runtime type -> **T4 GPU** (free tier) or L4/A100 (Colab Pro). Cell 5 (GPU smoke test) refuses to continue if `nvidia-smi` doesn't see a device.
+Runtime menu -> Change runtime type -> T4 GPU (free tier) or L4/A100 (Colab Pro). Cell 5 (GPU smoke test) refuses to continue if `nvidia-smi` doesn't see a device.
 
----
 
 ## One-Time Drive Setup (do this before running any cells)
 
@@ -106,7 +103,6 @@ MyDrive/proiect_licenta/
 
 Use the [Google Drive desktop app](https://www.google.com/drive/download/) for the 3.3 GB discharge.csv - the browser uploader times out.
 
----
 
 ## Estimated runtimes (Colab T4 GPU)
 
@@ -114,7 +110,7 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 |------|------|
 | Setup + install | ~3 min |
 | GPU smoke test + file checks + PMH vocab smoke | < 1 min |
-| `train_nurse_v3` total | **~35-55 min** |
+| `train_nurse_v3` total | ~35-55 min |
 | &nbsp;&nbsp;discharge.csv PMH parse (CPU, A2 vocab makes this slightly slower) | ~15-25 min |
 | &nbsp;&nbsp;longitudinal vitals aggregate (CPU) | ~3-5 min |
 | &nbsp;&nbsp;XGBoost diagnosis (GPU) | ~5-8 min |
@@ -127,8 +123,7 @@ Use the [Google Drive desktop app](https://www.google.com/drive/download/) for t
 > The CPU-bound PMH parse dominates. XGBoost on GPU is roughly 4-6x faster than CPU on this workload.""")
 
 
-md("section1-md", """---
-## Section 1 - Environment Setup
+md("section1-md", """## Environment Setup
 *Run these cells at the start of every Colab session.*""")
 
 
@@ -202,15 +197,14 @@ pip('scikit-learn>=1.6.0')                   # FrozenEstimator for A4 calibratio
 print('All dependencies installed.')""")
 
 
-md("section-gpu-md", """---
-## Section 2 - Verify GPU + Environment
+md("section-gpu-md", """## Verify GPU + Environment
 
-Cell 5 is the **gate** for the rest of the notebook:
+Cell 5 is the gate for the rest of the notebook:
 1. Confirms `nvidia-smi` sees a CUDA device.
 2. Confirms XGBoost >= 2.0 can build a small model on the GPU end-to-end (catches mismatched CUDA / driver setups before we burn 30 min on a CPU fallback).
 3. Confirms all required MIMIC-IV files and pre-trained artifacts are reachable through the symlinks set up in Cell 3.
 
-**If any check fails, stop and fix it before proceeding** - the long training run will either fall back to CPU silently or crash mid-way.""")
+If any check fails, stop and fix it before proceeding - the long training run will either fall back to CPU silently or crash mid-way.""")
 
 
 code("cell-gpu-smoke", """# Cell 5: GPU + XGBoost CUDA smoke test
@@ -299,10 +293,9 @@ if missing_required:
 print('All required checks passed. Ready to train.')""")
 
 
-md("section3-md", """---
-## Section 3 - PMH Vocabulary Smoke Test (A2)
+md("section3-md", """## PMH Vocabulary Smoke Test (A2)
 
-Sanity check on `pmh_vocab.py` before training. Verifies positive matching, negation handling, and the discharge-note section extractor. Also confirms the **A2 expansion** is present (~600 keywords, up from ~400) with new s/p / brand-drug entries. A silent failure here corrupts the PMH columns and makes the trained model worse than v3 base.""")
+Sanity check on `pmh_vocab.py` before training. Verifies positive matching, negation handling, and the discharge-note section extractor. Also confirms the A2 expansion is present (~600 keywords, up from ~400) with new s/p / brand-drug entries. A silent failure here corrupts the PMH columns and makes the trained model worse than v3 base.""")
 
 
 code("cell-pmh-smoke", """# Cell 7: PMH vocab smoke test (Change 1 + A2 expansion)
@@ -350,25 +343,24 @@ for text, expected in a2_cases:
 print('\\nPMH vocab smoke test PASSED (Change 1 + A2 expansion).')""")
 
 
-md("section4-md", """---
-## Section 4 - Train Doctor v3 Nurse (GPU, Change 1 + A2 + A3 + A4)
+md("section4-md", """## Train Doctor v3 Nurse (GPU, Change 1 + A2 + A3 + A4)
 
 Trains the v3-nurse pipeline on GPU. Heavy steps inside this single cell:
 
 1. Load & merge all ED + hospital tables (~1 min).
-2. **A2 + Change 1:** stream `discharge.csv` (3.3 GB) in chunks, parse PMH sections against the expanded vocabulary, build the per-stay flag matrix (~15-25 min, CPU-bound).
+2. A2 + Change 1: stream `discharge.csv` (3.3 GB) in chunks, parse PMH sections against the expanded vocabulary, build the per-stay flag matrix (~15-25 min, CPU-bound).
 3. Aggregate longitudinal vitals from `vitalsign.csv` (~3-5 min, CPU).
 4. Build the ~2116-feature matrix and split 80/20 (random_state=42, stratified on diagnosis).
-5. **Train diagnosis model on GPU** (~5-8 min).
-6. **A3:** cascade diagnosis softmax (13 cols) into the department feature matrix.
-7. **A4:** hold out 10% of train as a calibration set; fit the department model on the remaining 90%.
-8. **Train uncalibrated department model on GPU** (~5-8 min).
-9. **A4:** wrap with isotonic calibration on the held-out 10%.
+5. Train diagnosis model on GPU (~5-8 min).
+6. A3: cascade diagnosis softmax (13 cols) into the department feature matrix.
+7. A4: hold out 10% of train as a calibration set; fit the department model on the remaining 90%.
+8. Train uncalibrated department model on GPU (~5-8 min).
+9. A4: wrap with isotonic calibration on the held-out 10%.
 10. Save artifacts to Drive via the symlink (`artifacts/doctor/v3/`).
 
-**Outputs:**
+Outputs:
 - `diagnosis_model.joblib` - 13-class XGBoost, unchanged by A3/A4.
-- `department_model.joblib` - **CalibratedClassifierCV** wrapping the cascading 11-class XGBoost.
+- `department_model.joblib` - CalibratedClassifierCV wrapping the cascading 11-class XGBoost.
 - `metadata.json` with `diag_cascade_cols` (A3) and `department_calibration` (A4) blocks.
 
 `doctor_tool_v3.py` auto-detects the A3 cascade from metadata and rebuilds the same column layout at inference. The A4 wrapper is interface-compatible with `XGBClassifier` so no further inference change is needed.
@@ -444,13 +436,12 @@ print(f'  uncal -> cal top-1 = {cal["uncalibrated_accuracy"]:.4f} -> {cal["calib
       f'(delta {cal["calibrated_accuracy"] - cal["uncalibrated_accuracy"]:+.4f})')""")
 
 
-md("section5-md", """---
-## Section 5 - Benchmark v3 Base vs v3 Nurse
+md("section5-md", """## Benchmark v3 Base vs v3 Nurse
 
-Compares **v3 base (reused from Drive, no Tier A)** vs **v3 nurse (just trained, with A2+A3+A4)** on the same held-out 20% test split (seed=42).
+Compares v3 base (reused from Drive, no Tier A) vs v3 nurse (just trained, with A2+A3+A4) on the same held-out 20% test split (seed=42).
 
-**What to look for:**
-- v3 base -> v3 nurse top-1 delta. Pre-A2/A3/A4 baseline was **+4.07pp** diagnosis / **+7.96pp** department. With A2 we expect another **+0.3-0.5pp** diagnosis; with A3 another **+0.3-0.8pp** department; with A4 another **+0.1-0.3pp** department.
+What to look for:
+- v3 base -> v3 nurse top-1 delta. Pre-A2/A3/A4 baseline was +4.07pp diagnosis / +7.96pp department. With A2 we expect another +0.3-0.5pp diagnosis; with A3 another +0.3-0.8pp department; with A4 another +0.1-0.3pp department.
 - Per-class recall: A2 should help Infectious / Endocrine / Blood / Genitourinary (where prior history matters most). A3 should help any department where the diagnosis decision was ambiguous (top-1 vs top-3 close).
 - Feature importance: at least one `diag_proba_*` column (A3) and the PMH-related columns (A2 / Change 1) should appear in the dept model's top features.
 
@@ -464,12 +455,11 @@ runpy.run_path(
 )""")
 
 
-md("section6-md", """---
-## Section 6 - Compare All Versions
+md("section6-md", """## Compare All Versions
 
 Four-way accuracy table across v1 / v2 / v3 base / v3 nurse. Reads `metadata.json` from each artifact directory.
 
-> v1 / v2 use 14-class diagnosis (catch-all included); v3 base / v3 nurse use 13 (catch-all excluded). Accuracy across the two label spaces is **not directly comparable** and the script flags this.""")
+> v1 / v2 use 14-class diagnosis (catch-all included); v3 base / v3 nurse use 13 (catch-all excluded). Accuracy across the two label spaces is not directly comparable and the script flags this.""")
 
 
 code("cell-compare-all", """# Cell 11: Compare all versions
@@ -479,20 +469,19 @@ runpy.run_path(
 )""")
 
 
-md("section7-md", """---
-## Section 7 - Audit (A2 + A3 + A4)
+md("section7-md", """## Audit (A2 + A3 + A4)
 
 Fail-fast verification gates. Failing any of these should block trusting the new artifacts.
 
-**A2 (PMH vocab expansion):**
+A2 (PMH vocab expansion):
 - PMH keyword count must be > 500 (Change 1 baseline was 397).
 - At least one PMH-related column must have non-zero `gain` in the diagnosis model. Zero everywhere = silent merge failure.
 
-**A3 (diagnosis softmax cascade):**
+A3 (diagnosis softmax cascade):
 - 13 `diag_proba_*` columns must be present in the department model's feature_names.
 - At least one of them must rank in the dept model's top 30 by gain.
 
-**A4 (isotonic department calibration):**
+A4 (isotonic department calibration):
 - The saved `department_model.joblib` must be a `CalibratedClassifierCV` wrapper, not a bare `XGBClassifier`.
 - Calibrated top-1 must be >= uncalibrated top-1 - 0.005 (allow 0.5pp downside; isotonic is monotone on probabilities, so the argmax should change very little).""")
 
@@ -503,10 +492,8 @@ from sklearn.calibration import CalibratedClassifierCV
 
 meta = json.loads((DOCTOR_V3_DIR / 'metadata.json').read_text())
 
-# ---- A2 audit ----
-print('=' * 60)
+# A2 audit
 print('A2: PMH vocab expansion audit')
-print('=' * 60)
 from proiect_licenta import pmh_vocab as p
 print(f'  PMH keywords: {len(p.PMH_KEYWORD_MAP)} (Change 1 baseline 397, A2 target >500)')
 assert len(p.PMH_KEYWORD_MAP) >= 500
@@ -523,10 +510,9 @@ non_zero_pmh = [f for f in pmh_cols if importances[f] > 0]
 print(f'  PMH-related columns: {len(pmh_cols)}; with non-zero gain: {len(non_zero_pmh)}')
 assert len(non_zero_pmh) > 0, 'ZERO PMH features have non-zero gain - silent merge failure.'
 
-# ---- A3 audit ----
+# A3 audit
 print('\\n' + '=' * 60)
 print('A3: diagnosis softmax cascade audit')
-print('=' * 60)
 diag_cascade_cols = meta.get('diag_cascade_cols')
 assert diag_cascade_cols, 'A3 diag_cascade_cols missing from metadata.'
 print(f'  Recorded cascade columns: {len(diag_cascade_cols)}')
@@ -562,10 +548,9 @@ if not cascade_in_top30:
     print('  WARNING: no cascade column reached the top 30. A3 may be contributing through '
           'many small interactions (similar to PMH); not necessarily a bug.')
 
-# ---- A4 audit ----
+# A4 audit
 print('\\n' + '=' * 60)
 print('A4: isotonic department calibration audit')
-print('=' * 60)
 assert isinstance(dept_model, CalibratedClassifierCV), (
     f'Expected CalibratedClassifierCV wrapper but got {type(dept_model).__name__}. '
     'A4 wiring broken?'
@@ -586,8 +571,7 @@ assert delta >= -0.005, (
 print(f'\\nAll audits PASSED.')""")
 
 
-md("section-optional-md", """---
-## (Optional) Section 8 - Retrain v3 Base
+md("section-optional-md", """## (Optional) Section 8 - Retrain v3 Base
 
 Skip unless you suspect `artifacts/doctor/v3_base/` is stale. v3 base does NOT use Tier A features - retraining it produces equivalent artifacts.
 

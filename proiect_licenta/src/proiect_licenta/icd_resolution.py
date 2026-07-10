@@ -1,29 +1,18 @@
 """Stage-2 exact-ICD resolution within a predicted diagnosis category.
 
-The Doctor v3 diagnosis model predicts a diagnosis *category* (one of 13
-ICD-chapter groups). This module adds a second stage that, given a category,
-ranks the exact ICD diagnoses inside it and surfaces the top-k codes.
+The Doctor v3 diagnosis model predicts a category (one of 13 ICD-chapter groups).
+This module ranks the exact ICD codes inside a given category and surfaces the
+top-k. The candidate pool per category is the ICD codes seen in that category in
+the training split (no test leakage), built at 3-char rollup and full-code
+granularity. Each candidate carries a prototype centroid (mean of the
+L2-normalized TF-IDF complaint vectors of the training stays with that code) and
+a prevalence prior. Ranking blends them:
 
-Design (see plan + docs/agents/doctor-agent.md):
+    score = alpha * minmax(cosine) + (1 - alpha) * minmax(prevalence)
 
-  - Candidate pool per category = the ICD codes observed in that category in
-    the Doctor v3 **training split** (no test leakage). Built at two
-    granularities: 3-char rollup (ICD-10 rubric / ICD-9 3-digit — the headline
-    target) and full code (secondary/stretch).
-  - Each candidate carries:
-      * a **prototype centroid** = mean of the L2-normalized TF-IDF chief-
-        complaint vectors of the training stays that received that code
-        (symptom->symptom matching, sidesteps the complaint-vs-ICD-title gap);
-      * a **prevalence prior** = the code's frequency within its category.
-  - Ranking blends the two:
-        score = alpha * minmax(cosine) + (1 - alpha) * minmax(prevalence)
-    with cosine = centroid . query (both L2-normalized, so a plain dot). alpha
-    is tuned offline on a held-out train slice and stored in the resolver.
-
-This module is dependency-light (reuses the existing TF-IDF vectorizer +
-numpy/sklearn already in the stack). It does NOT load any MIMIC data itself —
-the builder (`training/train_icd_resolver.py`) feeds it the train rows, and the
-benchmark / runtime feed it query vectors.
+with cosine = centroid . query. alpha is tuned offline and stored in the
+resolver. This module loads no MIMIC data itself; the builder feeds it train
+rows and the caller feeds it query vectors.
 """
 from __future__ import annotations
 
@@ -50,16 +39,14 @@ PHYSIO_FLAGS = ["fever", "tachycardia", "bradycardia", "tachypnea",
 PHYSIO_COLS = PHYSIO_CONT + PHYSIO_FLAGS
 
 
-# ---------------------------------------------------------------------------
 # ICD code rollup
-# ---------------------------------------------------------------------------
 def rollup_icd(code, version) -> str:
     """Roll an ICD code up to its 3-char category (the headline target).
 
     ICD-9 (version == "9"):
       - E-codes (external causes) use a 4-char rubric: ``E932`` <- ``E9320``.
       - Numeric and V-codes use the first 3 chars: ``458`` <- ``4589``,
-        ``070`` <- ``07070`` (leading zeros preserved — pass codes as str),
+        ``070`` <- ``07070`` (leading zeros preserved - pass codes as str),
         ``V76`` <- ``V7644``.
     ICD-10 (everything else): the first 3 chars are the category rubric,
       e.g. ``I21`` <- ``I2109``.
@@ -72,9 +59,7 @@ def rollup_icd(code, version) -> str:
     return c[:3]
 
 
-# ---------------------------------------------------------------------------
 # Query vectorization
-# ---------------------------------------------------------------------------
 def vectorize_queries(texts, tfidf):
     """TF-IDF transform + L2 row-normalize a list of normalized complaint texts.
 
@@ -90,15 +75,13 @@ def vectorize_query(text, tfidf) -> np.ndarray:
     return np.asarray(vectorize_queries([text], tfidf).todense()).ravel()
 
 
-# ---------------------------------------------------------------------------
 # Index construction
-# ---------------------------------------------------------------------------
 def build_index(vectors_l2, codes, titles, categories, physio=None) -> dict:
     """Build a per-category candidate index from train-split rows.
 
     Parameters
     ----------
-    vectors_l2 : sparse (n, V) — L2-normalized TF-IDF complaint vectors.
+    vectors_l2 : sparse (n, V) - L2-normalized TF-IDF complaint vectors.
     codes      : length-n sequence of ICD code keys (already rolled up to the
                  desired granularity by the caller).
     titles     : length-n sequence of human-readable ICD titles.
@@ -160,9 +143,7 @@ def build_index(vectors_l2, codes, titles, categories, physio=None) -> dict:
     return index
 
 
-# ---------------------------------------------------------------------------
 # Physiology (vitals) standardization + similarity (Stage-2 v2)
-# ---------------------------------------------------------------------------
 def build_standardizer(df, cols=None) -> dict:
     """Fit a z-score standardizer over `cols` (default PHYSIO_COLS) from rows.
 
@@ -190,7 +171,7 @@ def physio_matrix(df, standardizer) -> np.ndarray:
 def physio_vector(values: dict, standardizer) -> np.ndarray:
     """Standardize a single patient's physiology dict into a (P,) vector.
 
-    Missing entries fall back to the training mean (→ z-score 0, "average"),
+    Missing entries fall back to the training mean (-> z-score 0, "average"),
     matching how the doctor model imputes unknown vitals.
     """
     cols, mean, std = standardizer["cols"], standardizer["mean"], standardizer["std"]
@@ -202,7 +183,7 @@ def physio_vector(values: dict, standardizer) -> np.ndarray:
 
 
 def _neg_euclidean(queries, centroids) -> np.ndarray:
-    """Negative Euclidean distance — higher = closer. Supports (P,) or (N,P)."""
+    """Negative Euclidean distance - higher = closer. Supports (P,) or (N,P)."""
     q = np.asarray(queries, dtype=np.float32)
     c = np.asarray(centroids, dtype=np.float32)
     if q.ndim == 1:
@@ -238,7 +219,7 @@ def attach_centroids(index: dict, matrix, codes, categories, key, row_mask=None)
 
     `matrix` is an (n, P) feature matrix (e.g. standardized PMH vectors) aligned
     with `codes`/`categories`. When `row_mask` is given (bool (n,)), only those
-    rows contribute to the means — used to build PMH centroids from has-history
+    rows contribute to the means - used to build PMH centroids from has-history
     rows only. Codes with no contributing rows get a zero (neutral) centroid.
     """
     n = matrix.shape[0]
@@ -336,9 +317,7 @@ def rank_within_category_v2(text_q_l2, physio_q, cat_entry, weights, k):
     ]
 
 
-# ---------------------------------------------------------------------------
 # Scoring
-# ---------------------------------------------------------------------------
 def _minmax(a: np.ndarray) -> np.ndarray:
     """Min-max normalize a 1-D array to [0, 1]; flat arrays map to 0.5."""
     a = np.asarray(a, dtype=np.float32)
@@ -416,7 +395,7 @@ def resolve_exact_diagnoses(
 
     Parameters
     ----------
-    category_probs : iterable of ``(category_label, p_category)`` — typically
+    category_probs : iterable of ``(category_label, p_category)`` - typically
         the Doctor v3 top-5 categories with their softmax probabilities.
     query_l2 : dense (V,) L2-normalized TF-IDF complaint vector.
     granularity_index : one granularity's index (``resolver["granularities"][g]``).
@@ -524,9 +503,7 @@ def resolve_exact_diagnoses_v2(
     return {"per_category": per_category, "flat_top": flat[:k_flat]}
 
 
-# ---------------------------------------------------------------------------
 # Persistence
-# ---------------------------------------------------------------------------
 def make_resolver(granularities: dict, alpha: float, vocab_size: int,
                   tfidf_path: str, n_train: int, weights: dict | None = None,
                   standardizer: dict | None = None,

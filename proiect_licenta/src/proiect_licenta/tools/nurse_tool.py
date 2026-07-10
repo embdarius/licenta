@@ -1,12 +1,9 @@
-"""
-Nurse Data Collection Tool — CrewAI Tool
+"""Nurse data collection tool.
 
-Interactively collects vital signs, cardiac rhythm, and medication history
-from the patient. Each field can be skipped if the patient doesn't know.
-Returns structured JSON consumed by the Doctor prediction tools (v2 and v3).
-
-Output schema is additive: the v2 tool ignores the `rhythm` field added
-for v3, so this tool can drive both pipelines without breakage.
+Interactively collects vital signs, cardiac rhythm, and medication history; each
+field can be skipped. Returns structured JSON consumed by the doctor tools. The
+output schema is additive: the v2 tool ignores the rhythm field added for v3, so
+this tool drives both pipelines.
 """
 
 import json
@@ -79,7 +76,7 @@ def _collect_reading_round(idx: int, ask) -> dict:
     rhythm + an optional timestamp. Returns a dict with the 6 vitals, `rhythm`,
     and `ts` (float sort-key or None). `idx` is 1-based, for display only.
 
-    `ask(prompt, kind, meta=...)` does the asking — stdin at the terminal, or the
+    `ask(prompt, kind, meta=...)` does the asking - stdin at the terminal, or the
     web channel behind the UI. The `kind`/`meta` hints let the web client render
     the right input widget; the terminal ignores them."""
     setno = {"meta": {"reading": idx}}
@@ -110,10 +107,9 @@ def build_nurse_payload(
 ) -> dict:
     """Assemble the canonical nurse-output dict from one or more reading rounds.
 
-    This is the SINGLE SOURCE OF TRUTH for the nurse payload shape: the stdin
-    tool (``NurseDataCollectionTool._run``) and the web backend both call it so
-    they produce a byte-identical structure (`vital_signs`, `vital_trajectory`,
-    `rhythm`, `medications_raw`, `prior_history`, `n_prior_admissions`).
+    Single source of truth for the nurse payload shape: the stdin tool and the
+    web backend both call it so they produce an identical structure (vital_signs,
+    vital_trajectory, rhythm, medications_raw, prior_history, n_prior_admissions).
 
     `rounds` is a list of dicts each holding the 6 vitals + `rhythm` + `ts`
     (float sort-key or None), exactly as ``_collect_reading_round`` builds. The
@@ -202,9 +198,7 @@ class NurseDataCollectionTool(BaseTool):
         """Interactively collect vital signs and medications."""
         ask = make_ask(self.channel, default_role="Nurse")
         if self.channel is None:
-            print(f"\n{'='*55}")
             print("  NURSE: Vital Signs & Medication Assessment")
-            print(f"{'='*55}")
             print("  (Type 'skip' or press Enter if you don't know)\n")
 
         # Collect ONE OR MORE chronological reading sets. The first set is the
@@ -232,7 +226,7 @@ class NurseDataCollectionTool(BaseTool):
         if meds_raw.lower() in SKIP_WORDS:
             meds_raw = None
 
-        # Prior history — Change 1 in v3 nurse. Free-text chronic conditions
+        # Prior history - Change 1 in v3 nurse. Free-text chronic conditions
         # / past medical history; parsed against pmh_vocab at inference. The
         # v2 tool ignores `prior_history` and `n_prior_admissions`, so the
         # same nurse output still drives the v2 pipeline.
@@ -255,10 +249,10 @@ class NurseDataCollectionTool(BaseTool):
         else:
             n_prior_admissions = int(_parse_numeric(prior_adm_raw) or -1)
 
-        # Build the result via the shared assembler so the stdin tool and the
-        # web backend produce a byte-identical payload. The `rhythm`,
-        # `prior_history`, and `n_prior_admissions` fields are new in v3; the v2
-        # tool ignores them, so the same nurse output drives both pipelines.
+        # Build the result via the shared assembler so the stdin tool and the web
+        # backend produce an identical payload. rhythm, prior_history, and
+        # n_prior_admissions are v3-only; the v2 tool ignores them, so the same
+        # nurse output drives both pipelines.
         result = build_nurse_payload(
             rounds, meds_raw, prior_history_raw, n_prior_admissions,
         )
@@ -285,6 +279,5 @@ class NurseDataCollectionTool(BaseTool):
                 print(f"           Prior history: {prior_history_raw}")
             if n_prior_admissions >= 0:
                 print(f"           Prior admissions reported: {n_prior_admissions}")
-            print(f"{'='*55}")
 
         return json.dumps(result, indent=2)

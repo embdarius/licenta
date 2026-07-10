@@ -1,23 +1,10 @@
-"""
-Data Pipeline for Triage Agent v2 — MIMIC-IV Emergency Department
+"""Triage v2 training pipeline (MIMIC-IV-ED).
 
-Builds on v1 (TF-IDF + pain + demographics + arrival transport + severity priors
-+ interaction features) by adding triage vital signs:
-  - 6 raw vitals: temperature, heartrate, resprate, o2sat, sbp, dbp
-  - 6 missing flags (one per vital)
-  - 8 clinical abnormality flags (fever, hypothermic, tachycardic, bradycardic,
-    tachypneic, hypoxic, hypertensive, hypotensive)
-  - Interaction features: vitals x ambulance, vitals x elderly, abnormal_vital_count
-
-Realistic training: vitals are masked to NaN for non-ambulance/helicopter patients
-before feature engineering, matching inference behavior where only EMS patients
-have vitals at triage.
-
-Trains two supervised models:
-  1. Acuity: all features → ESI 1-5
-  2. Disposition: same + predicted acuity → ADMITTED vs DISCHARGED
-
-Models saved to artifacts/triage/v2/ to keep v1 artifacts intact.
+Adds triage vital signs to v1: 6 raw vitals, 6 missing flags, 8 clinical
+abnormality flags, and vital interaction features. Vitals are masked to NaN for
+non-ambulance/helicopter patients before feature engineering, matching inference
+where only EMS patients have vitals at triage. Trains the same two models as v1
+and saves to artifacts/triage/v2/.
 """
 
 import os
@@ -40,24 +27,18 @@ from proiect_licenta.preprocessing import normalize_complaint_text, ABBREVIATION
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 TRAIN_CAP = None  # None = use full dataset
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 from proiect_licenta.paths import (
     TRIAGE_V2_DIR as MODELS_DIR,
     TRIAGE_CSV, EDSTAYS_CSV, PATIENTS_CSV,
 )
 
 
-# ---------------------------------------------------------------------------
 # Vital sign constants
-# ---------------------------------------------------------------------------
-# Physiologically plausible ranges — values outside are treated as data entry errors
+# Physiologically plausible ranges - values outside are treated as data entry errors
 VITAL_CLIP_RANGES = {
     "temperature": (90.0, 110.0),   # Fahrenheit (data is in °F, median ~98)
     "heartrate":   (20.0, 250.0),
@@ -82,14 +63,10 @@ ABNORMALITY_THRESHOLDS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # 1. Load & Clean Data
-# ---------------------------------------------------------------------------
 def load_and_clean_data() -> pd.DataFrame:
     """Load triage + edstays + patients, clean, merge, and process vitals."""
-    print("=" * 60)
-    print("STEP 1: Loading data...")
-    print("=" * 60)
+    print("Loading data...")
 
     # Load triage (now including vital sign columns)
     triage = pd.read_csv(TRIAGE_CSV)
@@ -115,13 +92,13 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(patients, on="subject_id", how="left")
     print(f"  Merged: {len(df):,} rows")
 
-    # --- Compute age ---
+    # Compute age
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # --- Clean chief complaints & acuity ---
+    # Clean chief complaints & acuity
     initial_count = len(df)
     df = df.dropna(subset=["chiefcomplaint", "acuity"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
@@ -131,25 +108,25 @@ def load_and_clean_data() -> pd.DataFrame:
     df["acuity"] = df["acuity"].astype(int)
     df = df[df["acuity"].between(1, 5)]
 
-    # --- Clean pain ---
+    # Clean pain
     df["pain"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain"].isna().astype(int)
     df["pain"] = df["pain"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
 
-    # --- Gender ---
+    # Gender
     df["gender_male"] = (df["gender"] == "M").astype(int)
 
-    # --- Arrival transport ---
+    # Arrival transport
     df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
     df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
-    # --- Disposition ---
+    # Disposition
     df["admitted"] = (df["disposition"] == "ADMITTED").astype(int)
 
-    # --- Clean vital signs ---
+    # Clean vital signs
     print(f"\n  Vital sign processing:")
     for col in VITAL_COLS:
         raw_missing = df[col].isna().sum()
@@ -161,7 +138,7 @@ def load_and_clean_data() -> pd.DataFrame:
         print(f"    {col}: {raw_missing:,} raw NaN + {out_of_range:,} out-of-range "
               f"-> {total_missing:,} total missing ({100*total_missing/len(df):.1f}%)")
 
-    # --- Mask vitals for non-ambulance/helicopter patients ---
+    # Mask vitals for non-ambulance/helicopter patients
     # At inference, only ambulance/helicopter patients have EMS vitals at triage.
     # Walk-in/other patients haven't had vitals measured yet. We mask them to NaN
     # during training so the model learns to handle missing vitals for walk-ins.
@@ -172,7 +149,7 @@ def load_and_clean_data() -> pd.DataFrame:
     for col in VITAL_COLS:
         df.loc[walkin_mask, col] = np.nan
 
-    # --- Cap rows ---
+    # Cap rows
     if TRAIN_CAP and len(df) > TRAIN_CAP:
         print(f"\n  Capping to {TRAIN_CAP:,} rows (stratified by acuity)...")
         df, _ = train_test_split(
@@ -180,7 +157,7 @@ def load_and_clean_data() -> pd.DataFrame:
         )
         print(f"  After cap: {len(df):,} rows")
 
-    # --- Print distributions ---
+    # Print distributions
     print(f"\n  Acuity distribution:")
     for level in sorted(df["acuity"].unique()):
         count = (df["acuity"] == level).sum()
@@ -206,9 +183,7 @@ def load_and_clean_data() -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
 # 2. Feature Engineering
-# ---------------------------------------------------------------------------
 def build_features(
     df: pd.DataFrame,
     tfidf: TfidfVectorizer = None,
@@ -217,22 +192,20 @@ def build_features(
     fit: bool = True,
 ) -> tuple:
     """Build full feature matrix including vital signs."""
-    print("\n" + "=" * 60)
-    print(f"STEP 2: Feature engineering ({'fitting' if fit else 'transforming'})")
-    print("=" * 60)
+    print(f"Feature engineering ({'fitting' if fit else 'transforming'})")
 
     df = df.copy()
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
 
-    # --- Count of complaints ---
+    # Count of complaints
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
 
-    # --- Complaint text length ---
+    # Complaint text length
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # --- TF-IDF ---
+    # TF-IDF
     if fit:
         tfidf = TfidfVectorizer(
             max_features=2000,
@@ -253,7 +226,7 @@ def build_features(
         index=df.index,
     )
 
-    # --- Severity Priors ---
+    # Severity Priors
     if fit:
         word_acuity = defaultdict(list)
         texts = df["complaint_text"].values
@@ -285,19 +258,19 @@ def build_features(
     df["max_severity_prior"] = severity_features.apply(lambda x: x[2])
     df["std_severity_prior"] = severity_features.apply(lambda x: x[3])
 
-    # --- Age bins ---
+    # Age bins
     df["age_bin"] = pd.cut(
         df["age"],
         bins=[0, 18, 35, 50, 65, 80, 120],
         labels=[0, 1, 2, 3, 4, 5],
     ).astype(float).fillna(2)
 
-    # --- Pain bins ---
+    # Pain bins
     df["pain_low"] = ((df["pain"] >= 0) & (df["pain"] <= 3)).astype(int)
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
-    # --- v1 interaction features ---
+    # v1 interaction features
     df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
     df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
     df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
@@ -305,15 +278,13 @@ def build_features(
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # ===================================================================
-    # NEW in v2: Vital sign features
-    # ===================================================================
+    # Vital sign features
 
-    # --- Missing flags (before imputation) ---
+    # Missing flags (before imputation)
     for col in VITAL_COLS:
         df[f"{col}_missing"] = df[col].isna().astype(int)
 
-    # --- Compute or apply medians for imputation ---
+    # Compute or apply medians for imputation
     if fit:
         vital_medians = {}
         for col in VITAL_COLS:
@@ -322,31 +293,29 @@ def build_features(
     for col in VITAL_COLS:
         df[col] = df[col].fillna(vital_medians[col])
 
-    # --- Abnormality flags ---
+    # Abnormality flags
     for flag_name, (col, op, threshold) in ABNORMALITY_THRESHOLDS.items():
         if op == ">":
             df[flag_name] = (df[col] > threshold).astype(int)
         else:
             df[flag_name] = (df[col] < threshold).astype(int)
 
-    # --- Count of abnormal vitals ---
+    # Count of abnormal vitals
     abnormality_flag_names = list(ABNORMALITY_THRESHOLDS.keys())
     df["abnormal_vital_count"] = df[abnormality_flag_names].sum(axis=1)
 
-    # --- Vital-transport interactions ---
+    # Vital-transport interactions
     df["tachycardic_ambulance"] = df["tachycardic"] * df["arrival_ambulance"]
     df["hypoxic_ambulance"] = df["hypoxic"] * df["arrival_ambulance"]
     df["hypotensive_ambulance"] = df["hypotensive"] * df["arrival_ambulance"]
     df["fever_ambulance"] = df["fever"] * df["arrival_ambulance"]
 
-    # --- Vital-age interactions ---
+    # Vital-age interactions
     df["tachycardic_elderly"] = df["tachycardic"] * df["elderly"]
     df["hypoxic_elderly"] = df["hypoxic"] * df["elderly"]
     df["hypotensive_elderly"] = df["hypotensive"] * df["elderly"]
 
-    # ===================================================================
     # Assemble feature vector
-    # ===================================================================
     # v1 structured columns (same order as v1)
     v1_structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
@@ -391,9 +360,7 @@ def build_features(
     return features, tfidf, severity_map, vital_medians
 
 
-# ---------------------------------------------------------------------------
 # 3. Train Models
-# ---------------------------------------------------------------------------
 def train_acuity_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -401,9 +368,7 @@ def train_acuity_model(
     y_test: pd.Series,
 ) -> XGBClassifier:
     """Train acuity model with XGBoost + early stopping."""
-    print("\n" + "=" * 60)
-    print("STEP 4a: Training ACUITY model (XGBoost, ESI 1-5)")
-    print("=" * 60)
+    print("Training ACUITY model (XGBoost, ESI 1-5)")
 
     # Soft class weights
     class_counts = y_train.value_counts()
@@ -466,9 +431,7 @@ def train_disposition_model(
     y_test: pd.Series,
 ) -> XGBClassifier:
     """Train disposition model with XGBoost."""
-    print("\n" + "=" * 60)
-    print("STEP 4b: Training DISPOSITION model (XGBoost)")
-    print("=" * 60)
+    print("Training DISPOSITION model (XGBoost)")
 
     neg_count = (y_train == 0).sum()
     pos_count = (y_train == 1).sum()
@@ -517,9 +480,7 @@ def train_disposition_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 4. Save Artifacts
-# ---------------------------------------------------------------------------
 def save_models(
     acuity_model,
     disposition_model,
@@ -532,9 +493,7 @@ def save_models(
     n_features: int,
 ):
     """Save trained models and metadata to artifacts/triage/v2/."""
-    print("\n" + "=" * 60)
-    print("STEP 5: Saving model artifacts")
-    print("=" * 60)
+    print("Saving model artifacts")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -577,23 +536,17 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
     print("  MIMIC-IV Triage Model Training Pipeline v2")
     cap_str = f"{TRAIN_CAP:,}" if TRAIN_CAP else "full dataset"
     print(f"  (v1 features + Vital Signs, {cap_str} rows)")
-    print("#" * 60)
 
     # 1. Load (includes row cap)
     df = load_and_clean_data()
 
     # 2. Split (80/20, stratified)
-    print("\n" + "=" * 60)
-    print("STEP 3: Train/test split (80/20, stratified by acuity)")
-    print("=" * 60)
+    print("Train/test split (80/20, stratified by acuity)")
 
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
@@ -645,15 +598,12 @@ def main():
         n_features=X_train.shape[1],
     )
 
-    print("\n" + "#" * 60)
-    print("  TRAINING COMPLETE!")
-    print("#" * 60)
+    print("Training complete.")
     print(f"  Training rows (before split): {len(df):,}")
     print(f"  Total features: {X_train.shape[1]}")
     print(f"  Acuity accuracy (exact):    {acuity_accuracy:.4f}")
     print(f"  Acuity accuracy (within 1): {within_1:.4f}")
     print(f"  Disposition accuracy:       {disp_accuracy:.4f}")
-    print("#" * 60 + "\n")
 
 
 if __name__ == "__main__":

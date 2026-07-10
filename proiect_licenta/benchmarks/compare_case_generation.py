@@ -1,20 +1,9 @@
-"""
-Case-Generation comparison — Experiment B (Flash vs MedGemma narrative quality)
-===============================================================================
+"""Case-generation comparison: Flash vs MedGemma narrative quality.
 
-Compares the synthetic narratives produced by each LLM backend, kept as two
-SEPARATE experiments from the parser/pipeline comparison (Experiment A in
-benchmark_pipeline_e2e.py). This scores the Case-Generation agent itself, NOT
-the downstream pipeline.
-
-It reads the per-backend case sets written by:
-    uv run generate_cases                      -> data/derived/synthetic_cases/
-    uv run generate_cases --backend medgemma   -> data/derived/synthetic_cases_medgemma/
-
-and reports, per backend, the deterministic grounding-validator pass rate
-(stated age/pain match the row, no fabricated vitals in the opening narrative)
-plus retry counts, then prints a few side-by-side narratives for the same
-stay_ids so the difference in voice is visible.
+Scores the case-generation agent itself (not the downstream pipeline) by reading
+the per-backend case sets written by `uv run generate_cases` and
+`--backend medgemma`. Reports the grounding-validator pass rate and retry counts
+per backend, then prints a few side-by-side narratives for the same stay_ids.
 
 Usage:
     uv run python benchmarks/compare_case_generation.py [--show N]
@@ -62,9 +51,7 @@ def main():
                     help="How many side-by-side narratives to print.")
     args = ap.parse_args()
 
-    print("\n" + "#" * 78)
     print("  CASE-GENERATION COMPARISON  (grounding quality per LLM backend)")
-    print("#" * 78)
 
     loaded = {b: _load(b) for b in BACKEND_DIRS}
     available = {b: p for b, p in loaded.items() if p is not None}
@@ -98,7 +85,6 @@ def main():
                 print(f"    flash    : {fa[sid].get('narrative', '')[:110]}")
                 print(f"    medgemma : {mg[sid].get('narrative', '')[:110]}")
 
-    print("\n" + "#" * 78 + "\n")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-"""
-Benchmark script for the trained doctor models (diagnosis + department).
+"""Benchmark script for the trained doctor models (diagnosis + department).
 
 Reproduces the exact data loading, sampling, and train/test split from training
 (random_state=42, stratified), loads saved model artifacts, and evaluates
@@ -21,9 +20,7 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Make the proiect_licenta package importable from this script
-# ---------------------------------------------------------------------------
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -38,9 +35,7 @@ from proiect_licenta.training.train_doctor import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def print_confusion_matrix(cm, labels, short_labels=None):
@@ -58,19 +53,13 @@ def print_confusion_matrix(cm, labels, short_labels=None):
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  DOCTOR MODEL BENCHMARK")
     print("  Evaluating diagnosis + department models on held-out test set (20%)")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
     # 1. Load data (same as training)
-    # ------------------------------------------------------------------
     df = load_and_clean_data()
 
-    # ------------------------------------------------------------------
     # 2. Reproduce exact sampling + split
-    # ------------------------------------------------------------------
     print_section("SAMPLING 100K + TRAIN/TEST SPLIT (80/20, stratified)")
     if len(df) > 100_000:
         df, _ = train_test_split(
@@ -99,19 +88,15 @@ def main():
         )
     print(f"  Train: {len(X_train):,} | Test: {len(X_test):,}")
 
-    # ------------------------------------------------------------------
     # 3. Load saved models
-    # ------------------------------------------------------------------
     print_section("LOADING SAVED MODELS")
     diagnosis_model = joblib.load(DOCTOR_MODELS_DIR / "diagnosis_model.joblib")
     department_model = joblib.load(DOCTOR_MODELS_DIR / "department_model.joblib")
     print(f"  Loaded diagnosis_model + department_model")
     print(f"  Trained at: {metadata['trained_at']}")
 
-    # ===================================================================
     #  DIAGNOSIS CATEGORY MODEL BENCHMARK
-    # ===================================================================
-    print_section("DIAGNOSIS CATEGORY MODEL — 14 CLASSES")
+    print_section("DIAGNOSIS CATEGORY MODEL - 14 CLASSES")
 
     y_pred_diag = diagnosis_model.predict(X_test)
     y_prob_diag = diagnosis_model.predict_proba(X_test)
@@ -191,7 +176,7 @@ def main():
         print(f"    {true_l:35s} -> {pred_l:35s}  {count:>5,}  ({100*count/true_total:5.1f}% of true class)")
 
     # Feature importance (top 20)
-    print_section("TOP 20 FEATURE IMPORTANCES — DIAGNOSIS MODEL")
+    print_section("TOP 20 FEATURE IMPORTANCES - DIAGNOSIS MODEL")
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     tfidf_vocab_inv = {v: k for k, v in tfidf.vocabulary_.items()}
     feature_names = list(X_test.columns)
@@ -209,10 +194,8 @@ def main():
         bar = "#" * max(1, int(40 * importances[idx] / importances[sorted_idx[0]]))
         print(f"  {rank:>2}. {display:<50s} {importances[idx]:.5f}  {bar}")
 
-    # ===================================================================
     #  DEPARTMENT MODEL BENCHMARK
-    # ===================================================================
-    print_section("DEPARTMENT MODEL — 11 CLASSES")
+    print_section("DEPARTMENT MODEL - 11 CLASSES")
 
     X_test_dept = X_test.copy()
     X_test_dept["predicted_diagnosis"] = y_pred_diag  # cascading
@@ -272,24 +255,22 @@ def main():
             acc = accuracy_score(y_dept_test[mask], y_pred_dept[mask])
             print(f"    {label:42s}  acc={acc:.4f}  (n={mask.sum():,})")
 
-    # ===================================================================
     #  BASELINE COMPARISONS
-    # ===================================================================
     print_section("BASELINE COMPARISONS")
 
     # Majority class baseline
     diag_majority = y_diag_train.mode()[0]
     diag_majority_acc = accuracy_score(y_diag_test, [diag_majority] * len(y_diag_test))
-    print(f"  Diagnosis — majority class baseline: {diag_majority_acc:.4f} "
+    print(f"  Diagnosis - majority class baseline: {diag_majority_acc:.4f} "
           f"(always predict '{diagnosis_labels[diag_majority]}')")
-    print(f"  Diagnosis — model accuracy:          {diag_acc:.4f}  "
+    print(f"  Diagnosis - model accuracy:          {diag_acc:.4f}  "
           f"(+{diag_acc - diag_majority_acc:.4f} over baseline)")
 
     dept_majority = y_dept_train.mode()[0]
     dept_majority_acc = accuracy_score(y_dept_test, [dept_majority] * len(y_dept_test))
-    print(f"\n  Department — majority class baseline: {dept_majority_acc:.4f} "
+    print(f"\n  Department - majority class baseline: {dept_majority_acc:.4f} "
           f"(always predict '{department_labels[dept_majority]}')")
-    print(f"  Department — model accuracy:          {dept_acc:.4f}  "
+    print(f"  Department - model accuracy:          {dept_acc:.4f}  "
           f"(+{dept_acc - dept_majority_acc:.4f} over baseline)")
 
     # Random weighted baseline
@@ -297,18 +278,16 @@ def main():
     diag_priors = y_diag_train.value_counts(normalize=True).sort_index()
     random_diag = rng.choice(len(diagnosis_labels), size=len(y_diag_test), p=diag_priors.values)
     random_diag_acc = accuracy_score(y_diag_test, random_diag)
-    print(f"\n  Diagnosis — weighted random baseline: {random_diag_acc:.4f}")
-    print(f"  Diagnosis — model lift over random:   {diag_acc / random_diag_acc:.2f}x")
+    print(f"\n  Diagnosis - weighted random baseline: {random_diag_acc:.4f}")
+    print(f"  Diagnosis - model lift over random:   {diag_acc / random_diag_acc:.2f}x")
 
     dept_priors = y_dept_train.value_counts(normalize=True).sort_index()
     random_dept = rng.choice(len(department_labels), size=len(y_dept_test), p=dept_priors.values)
     random_dept_acc = accuracy_score(y_dept_test, random_dept)
-    print(f"\n  Department — weighted random baseline: {random_dept_acc:.4f}")
-    print(f"  Department — model lift over random:   {dept_acc / random_dept_acc:.2f}x")
+    print(f"\n  Department - weighted random baseline: {random_dept_acc:.4f}")
+    print(f"  Department - model lift over random:   {dept_acc / random_dept_acc:.2f}x")
 
-    # ===================================================================
     #  SUMMARY
-    # ===================================================================
     print_section("BENCHMARK SUMMARY")
     print(f"  Test set size:                    {len(y_diag_test):,}")
     print(f"  ---")
@@ -327,9 +306,7 @@ def main():
     print(f"    Accuracy excl. MED:             {acc_no_med:.4f}  ({acc_no_med*100:.2f}%)")
     print(f"    Majority baseline:              {dept_majority_acc:.4f}")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 70 + "\n")
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

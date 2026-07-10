@@ -1,5 +1,4 @@
-"""
-Benchmark script for the Doctor v3 base model (catch-all excluded, 13 classes).
+"""Benchmark script for the Doctor v3 base model (catch-all excluded, 13 classes).
 
 Reproduces the exact data loading and train/test split from training
 (random_state=42, stratified, NO sub-sampling), loads saved v3_base
@@ -25,9 +24,7 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Make the proiect_licenta package importable from this script
-# ---------------------------------------------------------------------------
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -45,9 +42,7 @@ from proiect_licenta.training.train_doctor_v3 import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def print_confusion_matrix(cm, labels, short_labels=None):
@@ -65,21 +60,15 @@ def print_confusion_matrix(cm, labels, short_labels=None):
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  DOCTOR v3 BASE MODEL BENCHMARK")
-    print(f"  Catch-all class '{CATCH_ALL_LABEL}' EXCLUDED — 13-class label space")
+    print(f"  Catch-all class '{CATCH_ALL_LABEL}' EXCLUDED - 13-class label space")
     print("  Held-out test set (20%)")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
     # 1. Load data (catch-all filter applied inside)
-    # ------------------------------------------------------------------
     df = load_and_clean_data()
 
-    # ------------------------------------------------------------------
     # 2. Reproduce exact split (NO sub-sampling for v3)
-    # ------------------------------------------------------------------
-    print_section("TRAIN/TEST SPLIT (80/20, stratified — full filtered dataset)")
+    print_section("TRAIN/TEST SPLIT (80/20, stratified - full filtered dataset)")
     print(f"  Full filtered dataset: {len(df):,}")
 
     features = build_features(df)
@@ -92,7 +81,7 @@ def main():
     dept_label_to_idx = {l: i for i, l in enumerate(department_labels)}
 
     assert CATCH_ALL_LABEL not in diagnosis_labels, (
-        f"v3 metadata still contains catch-all '{CATCH_ALL_LABEL}' — bug"
+        f"v3 metadata still contains catch-all '{CATCH_ALL_LABEL}' - bug"
     )
 
     y_diagnosis = df["diagnosis_group"].map(diag_label_to_idx).reset_index(drop=True)
@@ -106,9 +95,7 @@ def main():
         )
     print(f"  Train: {len(X_train):,} | Test: {len(X_test):,}")
 
-    # ------------------------------------------------------------------
     # 3. Load saved v3 base models
-    # ------------------------------------------------------------------
     print_section("LOADING SAVED v3 BASE MODELS")
     diagnosis_model = joblib.load(DOCTOR_MODELS_DIR / "diagnosis_model.joblib")
     department_model = joblib.load(DOCTOR_MODELS_DIR / "department_model.joblib")
@@ -116,10 +103,8 @@ def main():
     print(f"  Trained at: {metadata['trained_at']}")
     print(f"  Catch-all excluded: {metadata.get('catch_all_excluded', '?')}")
 
-    # ===================================================================
     #  DIAGNOSIS MODEL BENCHMARK
-    # ===================================================================
-    print_section(f"DIAGNOSIS CATEGORY MODEL — {len(diagnosis_labels)} CLASSES")
+    print_section(f"DIAGNOSIS CATEGORY MODEL - {len(diagnosis_labels)} CLASSES")
 
     y_pred_diag = diagnosis_model.predict(X_test)
     y_prob_diag = diagnosis_model.predict_proba(X_test)
@@ -180,7 +165,7 @@ def main():
               f"({100*count/true_total:5.1f}% of true class)")
 
     # Feature importance (top 20)
-    print_section("TOP 20 FEATURE IMPORTANCES — DIAGNOSIS MODEL")
+    print_section("TOP 20 FEATURE IMPORTANCES - DIAGNOSIS MODEL")
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     tfidf_vocab_inv = {v: k for k, v in tfidf.vocabulary_.items()}
     feature_names = list(X_test.columns)
@@ -198,10 +183,8 @@ def main():
         bar = "#" * max(1, int(40 * importances[idx] / importances[sorted_idx[0]]))
         print(f"  {rank:>2}. {display:<50s} {importances[idx]:.5f}  {bar}")
 
-    # ===================================================================
     #  DEPARTMENT MODEL BENCHMARK
-    # ===================================================================
-    print_section(f"DEPARTMENT MODEL — {len(department_labels)} CLASSES")
+    print_section(f"DEPARTMENT MODEL - {len(department_labels)} CLASSES")
 
     X_test_dept = X_test.copy()
     X_test_dept["predicted_diagnosis"] = y_pred_diag  # cascading
@@ -261,9 +244,7 @@ def main():
             acc = accuracy_score(y_dept_test[mask], y_pred_dept[mask])
             print(f"    {label:42s}  acc={acc:.4f}  (n={mask.sum():,})")
 
-    # ===================================================================
     #  BASELINE COMPARISONS
-    # ===================================================================
     print_section("BASELINE COMPARISONS")
 
     diag_majority = y_diag_train.mode()[0]
@@ -293,9 +274,7 @@ def main():
     print(f"\n  Department - weighted random baseline: {random_dept_acc:.4f}")
     print(f"  Department - model lift over random:   {dept_acc / random_dept_acc:.2f}x")
 
-    # ===================================================================
     #  SUMMARY
-    # ===================================================================
     print_section("BENCHMARK SUMMARY (v3 base)")
     print(f"  Test set size:                    {len(y_diag_test):,}")
     print(f"  Catch-all excluded:               {metadata.get('catch_all_excluded', '?')}")
@@ -315,9 +294,7 @@ def main():
         print(f"    Accuracy excl. MED:             {acc_no_med:.4f}  ({acc_no_med*100:.2f}%)")
     print(f"    Majority baseline:              {dept_majority_acc:.4f}")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE (v3 base)")
-    print("#" * 70 + "\n")
+    print("Benchmark complete (v3 base).")
 
 
 if __name__ == "__main__":

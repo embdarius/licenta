@@ -1,11 +1,9 @@
-"""
-Parse the LLM/nurse-provided vital-trajectory JSON string into a readings dict.
+"""Parse the vital-trajectory JSON string into a readings dict.
 
-The nurse tool emits an optional ``vital_trajectory`` block — multiple
-chronological readings per vital collected during the ED stay. The doctor
-disposition + v3 reassessment tools accept it as a single JSON string argument
-(``vital_trajectory_json``) so it travels cleanly through one LLM tool-call
-parameter rather than ~36 separate numeric args.
+The nurse tool emits an optional vital_trajectory block (multiple chronological
+readings per vital). The disposition and v3 tools accept it as a single JSON
+string argument so it travels through one tool-call parameter rather than ~36
+numeric args.
 
 Accepted shapes (all tolerated; unknown keys ignored):
     {"temperature": [98.1, 99.0], "heartrate": [88, 105, 112], ...}
@@ -22,7 +20,7 @@ _SKIP = {"", "none", "null", "n/a", "na", "-", "{}", "unknown", "skip"}
 def parse_vital_trajectory(raw) -> dict:
     """Return {vital: [float, ...]} for whatever vitals are present, else {}.
 
-    Never raises — malformed input degrades to an empty dict so the caller
+    Never raises - malformed input degrades to an empty dict so the caller
     falls back to the single-snapshot representation."""
     if raw is None:
         return {}

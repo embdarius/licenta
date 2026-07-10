@@ -15,7 +15,7 @@ const blankForm = (): IntakeForm => ({
   ems_vitals: { temperature: null, heartrate: null, resprate: null, o2sat: null, sbp: null, dbp: null },
 });
 
-// Free-text intake → one LLM parse call → editable, pre-filled form. The LLM
+// Free-text intake, one LLM parse call, then an editable pre-filled form. The LLM
 // seeds the free-text-derived fields (complaints/age/gender/transport/pain);
 // the form collects the structured interview fields the live crew would gather
 // via ask_patient (MRN, PMH, prior admissions, EMS vitals).

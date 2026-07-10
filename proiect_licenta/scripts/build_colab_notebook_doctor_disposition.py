@@ -36,7 +36,7 @@ def code(cell_id: str, src: str) -> None:
 md("intro-md", """# Doctor Disposition v3 Training on Colab GPU
 
 Trains `artifacts/doctor/v3/disposition_model.joblib` from the current HEAD
-of the repo on Colab GPU. This is the **Option B peer model** described in
+of the repo on Colab GPU. This is the Option B peer model described in
 plan section 3: a binary admit/discharge classifier trained on the FULL
 425K ED stays (not the admitted-only ~102K slice used by diagnosis +
 department) and consumed by `doctor_disposition_tool` to refine the
@@ -46,35 +46,35 @@ triage disposition after the nurse step.
 
 Refines the triage-time disposition (triage v3 iter 2 production:
 77.98% acc / ROC AUC 0.8644 / under-triage 15.56% / over-triage 16.90%
-— see `docs/agents/triage-agent.md`) using everything nurse data adds:
+- see `docs/agents/triage-agent.md`) using everything nurse data adds:
 snapshot vitals + longitudinal vitals + rhythm + medications + PMH.
-Plan section 3 predicted lift band: **+3-6pp accuracy, +0.03-0.05 ROC AUC**.
+Plan section 3 predicted lift band: +3-6pp accuracy, +0.03-0.05 ROC AUC.
 
 ## Key differences vs the diagnosis / department v3 training
 
-- **Full 425K dataset** (no admitted-only filter, no catch-all filter)
-- **Soft cascade** from triage (5 acuity softmax columns + 1 disposition
+- Full 425K dataset (no admitted-only filter, no catch-all filter)
+- Soft cascade from triage (5 acuity softmax columns + 1 disposition
   probability) instead of the hard cascade used elsewhere. Plan section
   2/3 recommends this; it lets the model honestly weight borderline
   ESI 2-3 cases instead of hard-locking on the argmax.
-- **Binary:logistic** objective with `scale_pos_weight = sqrt(N_neg/N_pos)`
-- **Isotonic calibration** on a 10% held-out fit slice (A4 pattern). The
+- Binary:logistic objective with `scale_pos_weight = sqrt(N_neg/N_pos)`
+- Isotonic calibration on a 10% held-out fit slice (A4 pattern). The
   plan calls out calibration as more important here than for diagnosis
-  because disposition output is a clinical-decision probability — a
+  because disposition output is a clinical-decision probability - a
   miscalibrated 0.8 hurts.
-- **Leakage guard** kept from nurse_v3: longitudinal vital window is
+- Leakage guard kept from nurse_v3: longitudinal vital window is
   `[intime, intime + 4h]` so late-stay disposition decisions never leak
   back into the feature vector.
 
 ## Feature set (~2140 columns)
 
-The disposition model reuses the **full triage v3 input vector** as its
+The disposition model reuses the full triage v3 input vector as its
 base (so structured + snapshot vitals + PMH + TF-IDF appear inside it),
 then layers the cascade + nurse-only signals on top:
 
 - ~2069 columns from `train_triage_v3.build_features` (23 v1 structured
   + ~28 v2 vital + 19 PMH + 2000 TF-IDF)
-- 6 **soft cascade** columns from triage v3 (5 acuity softmax + 1 dispo
+- 6 soft cascade columns from triage v3 (5 acuity softmax + 1 dispo
   probability)
 - 24 medication features (n_medications + meds_unknown + 22 categories)
 - ~40 longitudinal vital + rhythm features (min/max/last/delta over
@@ -99,14 +99,14 @@ licenta/                                       <- git repo root (cloned to /cont
 
 ## Prereq: Colab runtime must have GPU
 
-Runtime menu -> Change runtime type -> **T4 GPU** (free tier) or L4/A100
+Runtime menu -> Change runtime type -> T4 GPU (free tier) or L4/A100
 (Colab Pro). Cell 5 refuses to continue if `nvidia-smi` doesn't see a
 CUDA device.
 
 ## One-Time Drive Setup
 
 Required Drive structure (most of this is the same as the Doctor v3-nurse
-notebook — same heavy CSVs, plus the existing triage v3 artifacts as the
+notebook - same heavy CSVs, plus the existing triage v3 artifacts as the
 soft cascade):
 
 ```
@@ -115,7 +115,7 @@ MyDrive/proiect_licenta/
 |   +-- mimic-iv-ed/
 |   |   +-- triage.csv
 |   |   +-- edstays.csv
-|   |   +-- vitalsign.csv           (~115 MB — for longitudinal vitals)
+|   |   +-- vitalsign.csv           (~115 MB - for longitudinal vitals)
 |   |   +-- medrecon.csv            (~37 MB)
 |   |   +-- files_created/
 |   |       +-- categorized_diagnosis.csv
@@ -145,19 +145,18 @@ MyDrive/proiect_licenta/
 |------|------|
 | Setup + install | ~3 min |
 | GPU smoke test + file checks | < 1 min |
-| `train_doctor_disposition` total | **~60-90 min** |
+| `train_doctor_disposition` total | ~60-90 min |
 | &nbsp;&nbsp;discharge.csv PMH parse (CPU, ~425K stays) | ~25-40 min |
 | &nbsp;&nbsp;vitalsign.csv longitudinal aggregation | ~5-8 min |
 | &nbsp;&nbsp;XGBoost disposition (GPU, up to 5000 trees) | ~20-30 min |
 | &nbsp;&nbsp;Isotonic calibration fit + metrics | ~1 min |
 | `benchmark_doctor_disposition` | ~3-5 min |
 
-> The PMH parse is now over the FULL 425K (vs ~102K admitted) — that's where
+> The PMH parse is now over the FULL 425K (vs ~102K admitted) - that's where
 > the extra ~10-20 min vs the nurse_v3 notebook comes from.""")
 
 
-md("section1-md", """---
-## Section 1 - Environment Setup
+md("section1-md", """## Environment Setup
 *Run these cells at the start of every Colab session.*""")
 
 
@@ -228,15 +227,14 @@ pip('scikit-learn>=1.4.0')
 print('All dependencies installed.')""")
 
 
-md("section-gpu-md", """---
-## Section 2 - Verify GPU + Environment
+md("section-gpu-md", """## Verify GPU + Environment
 
-Cell 5 is the **gate** for the rest of the notebook:
+Cell 5 is the gate for the rest of the notebook:
 1. Confirms `nvidia-smi` sees a CUDA device.
 2. Confirms XGBoost >= 2.0 can build a small model on the GPU end-to-end.
 3. Confirms all required MIMIC-IV files and the triage v3 cascade artifacts are reachable through the symlinks set up in Cell 3.
 
-**If any check fails, stop and fix it before proceeding.**""")
+If any check fails, stop and fix it before proceeding.""")
 
 
 code("cell-gpu-smoke", """# Cell 5: GPU + XGBoost CUDA smoke test
@@ -349,19 +347,18 @@ if _acu_n != EXPECTED_V3_FEATURE_COUNT:
           f'got {_acu_n}. The cascade may still work if the column set is '
           f'compatible, but the smoke-test cell will surface any real mismatch.')
 else:
-    print(f'  -> Looks like iter 2 production artifacts (2069 cols, no rf_*). ✓')
+    print(f'  -> Looks like iter 2 production artifacts (2069 cols, no rf_*).')
 
 print(f'\\nDOCTOR_V3_DIR (disposition_model.joblib will be added here): {DOCTOR_V3_DIR}')
 print('All required checks passed. Ready to train.')""")
 
 
-md("section-smoke-md", """---
-## Section 2.5 - Dry-run smoke test (~30 s, cheap)
+md("section-smoke-md", """## Dry-run smoke test (~30 s, cheap)
 
 Catches the most common pre-flight failures *before* committing to the 60-90 min
 full training run. Specifically:
 
-1. Loads a **500-row sample** of triage.csv + edstays.csv merged.
+1. Loads a 500-row sample of triage.csv + edstays.csv merged.
 2. Synthesizes the minimum columns `train_triage_v3.build_features` needs
    (PMH cols zeroed out, vitals walk-in-masked the way `build_features`
    does it at training time).
@@ -373,11 +370,11 @@ full training run. Specifically:
    be assembled (one-off `CalibratedClassifierCV` smoke fit on the tiny
    sample, then `.predict_proba`).
 
-If this cell fails, the full run will fail — only with a 25-minute PMH parse
-wasted first. **Run this before cell 7.** Expected runtime: < 30 seconds.""")
+If this cell fails, the full run will fail - only with a 25-minute PMH parse
+wasted first. Run this before cell 7. Expected runtime: < 30 seconds.""")
 
 
-code("cell-smoke-test", """# Cell 6b: Dry-run smoke test — verifies the v3 cascade before the full train
+code("cell-smoke-test", """# Cell 6b: Dry-run smoke test - verifies the v3 cascade before the full train
 import joblib, numpy as np, pandas as pd
 from proiect_licenta.training import train_triage_v3
 from proiect_licenta.pmh_features import PMH_FEATURE_COLS
@@ -414,13 +411,13 @@ print(f'  sample size: {len(df)}')
 
 # Minimum cleaning required by train_triage_v3.build_features
 df['intime'] = pd.to_datetime(df['intime'])
-df['age'] = 50  # dummy — build_features only uses for age_bin / interactions
+df['age'] = 50  # dummy - build_features only uses for age_bin / interactions
 df['gender_male'] = (df['gender'] == 'M').astype(int)
 df['arrival_ambulance'] = (df['arrival_transport'] == 'AMBULANCE').astype(int)
 df['arrival_helicopter'] = (df['arrival_transport'] == 'HELICOPTER').astype(int)
 df['arrival_walk_in'] = (df['arrival_transport'] == 'WALK IN').astype(int)
 
-# Pain → int, with _missing flag (build_features uses `pain_missing` directly)
+# Pain -> int, with _missing flag (build_features uses `pain_missing` directly)
 df['pain_triage'] = pd.to_numeric(df['pain'], errors='coerce')
 df['pain_missing'] = df['pain_triage'].isna().astype(int)
 df['pain'] = df['pain_triage'].fillna(-1).astype(int)
@@ -433,7 +430,7 @@ for col in train_triage_v3.VITAL_COLS:
     df[col] = pd.to_numeric(df[col], errors='coerce')
     df.loc[walkin_mask, col] = np.nan
 
-# Synthesize PMH columns (all zero — fine for a smoke test, the disposition
+# Synthesize PMH columns (all zero - fine for a smoke test, the disposition
 # pipeline computes them properly via aggregate_pmh in the real run)
 for col in PMH_FEATURE_COLS:
     if col not in df.columns:
@@ -481,7 +478,7 @@ from xgboost import XGBClassifier
 # all-one-class. Pick whatever's available in the sample.
 y_smoke = (df['disposition'] == 'ADMITTED').astype(int).values
 if y_smoke.sum() == 0 or y_smoke.sum() == len(y_smoke):
-    print('  (sample is single-class — synthesizing balanced y for smoke fit)')
+    print('  (sample is single-class - synthesizing balanced y for smoke fit)')
     y_smoke = (np.arange(len(df)) % 2).astype(int)
 raw_smoke = XGBClassifier(
     n_estimators=20, max_depth=4, eval_metric='logloss',
@@ -503,45 +500,44 @@ print('correctly. Safe to proceed to the full train (cell 7).')
 print('=' * 60)""")
 
 
-md("section3-md", """---
-## Section 3 - Train Doctor Disposition v3 (GPU)
+md("section3-md", """## Train Doctor Disposition v3 (GPU)
 
 Trains the binary disposition model on GPU. Heavy steps inside this cell:
 
 1. Load `triage.csv` + full `edstays.csv` + `patients.csv` + `medrecon.csv` (~1-2 min).
-2. **Longitudinal vitals aggregation** from `vitalsign.csv` with the [intime, intime + 4h] window (~5-8 min, CPU).
-3. **PMH aggregation** over the full 425K dataset: stream `discharge.csv` (3.3 GB) in chunks, parse PMH sections, OR with ICD-derived flags from `diagnoses_icd.csv`. ~25-40 min, CPU-bound (this dominates total runtime).
-4. Build the feature matrix: **2069 v3 input cols** (structured + v3 vitals + PMH + TF-IDF, via `train_triage_v3.build_features`) + 6 **soft cascade** + 24 medication + ~40 longitudinal vital + rhythm = **~2140 features**.
+2. Longitudinal vitals aggregation from `vitalsign.csv` with the [intime, intime + 4h] window (~5-8 min, CPU).
+3. PMH aggregation over the full 425K dataset: stream `discharge.csv` (3.3 GB) in chunks, parse PMH sections, OR with ICD-derived flags from `diagnoses_icd.csv`. ~25-40 min, CPU-bound (this dominates total runtime).
+4. Build the feature matrix: 2069 v3 input cols (structured + v3 vitals + PMH + TF-IDF, via `train_triage_v3.build_features`) + 6 soft cascade + 24 medication + ~40 longitudinal vital + rhythm = ~2140 features.
 5. Split 80/20 (random_state=42, stratified on admit label).
 6. Split out 10% of train as calibration holdout (A4 pattern).
-7. **Train XGBoost on GPU** (~20-30 min, up to 5000 trees, lr=0.02, early stopping=150).
-8. **Fit isotonic calibration** on the 10% holdout (~1 min).
+7. Train XGBoost on GPU (~20-30 min, up to 5000 trees, lr=0.02, early stopping=150).
+8. Fit isotonic calibration on the 10% holdout (~1 min).
 9. Save to Drive:
-   - `disposition_model.joblib` — calibrated wrapper (deployment)
-   - `disposition_model_raw.joblib` — uncalibrated (audit)
-   - `metadata.json` — extended with `disposition` block (existing diagnosis + department blocks preserved)
+   - `disposition_model.joblib` - calibrated wrapper (deployment)
+   - `disposition_model_raw.joblib` - uncalibrated (audit)
+   - `metadata.json` - extended with `disposition` block (existing diagnosis + department blocks preserved)
 
 ### What you should see in the cell output
 
 - Live tqdm progress bar per phase, with `logloss` postfix during XGBoost training.
 - Class balance report at top of step 1 (admitted vs discharged ratio).
-- Final block reports both **uncalibrated** and **calibrated** metrics: accuracy, ROC AUC, Brier, ECE (10-bin), over-triage rate, under-triage rate, sensitivity, specificity.
+- Final block reports both uncalibrated and calibrated metrics: accuracy, ROC AUC, Brier, ECE (10-bin), over-triage rate, under-triage rate, sensitivity, specificity.
 
 ### Headline numbers to look for
 
-Triage v3 iter 2 **disposition** baselines (the correct apples-to-apples
-reference — both are binary admit/discharge): accuracy 0.7798,
+Triage v3 iter 2 disposition baselines (the correct apples-to-apples
+reference - both are binary admit/discharge): accuracy 0.7798,
 ROC AUC 0.8644. Triage v3 disposition over/under-triage rates aren't
 published in the docs, but the training script computes them on the
 same held-out test rows by thresholding the soft-cascade dispo column
-at 0.5 — those numbers print inline in the test-metric table.
+at 0.5 - those numbers print inline in the test-metric table.
 
-- **Accuracy** > 0.81 (triage v3 dispo: 0.7798)
-- **ROC AUC** > 0.89 (triage v3 dispo: 0.8644)
-- **ECE (calibrated)** < 0.04 (the whole point of isotonic)
-- **Under-triage** should be < the triage v3 dispo baseline (printed
-  inline in the test-metric table; **not** the ESI acuity under-triage
-  rate of 0.1556 — that's a different model)
+- Accuracy > 0.81 (triage v3 dispo: 0.7798)
+- ROC AUC > 0.89 (triage v3 dispo: 0.8644)
+- ECE (calibrated) < 0.04 (the whole point of isotonic)
+- Under-triage should be < the triage v3 dispo baseline (printed
+  inline in the test-metric table; not the ESI acuity under-triage
+  rate of 0.1556 - that's a different model)
 
 *Expected runtime: 60-90 min on T4 GPU. PMH parse dominates the first half.*""")
 
@@ -582,7 +578,7 @@ for f in required_artifacts:
 # Show the disposition block from metadata
 meta = json.loads((DOCTOR_V3_DIR / 'metadata.json').read_text())
 dispo = meta.get('disposition')
-assert dispo is not None, 'metadata.json has no `disposition` block — training did not save it.'
+assert dispo is not None, 'metadata.json has no `disposition` block - training did not save it.'
 print('\\nDisposition block from metadata:')
 print(f'  version:          {dispo.get(\"version\")}')
 print(f'  trained_at:       {dispo.get(\"trained_at\")}')
@@ -610,24 +606,23 @@ preserved = [k for k in ('diagnosis_accuracy', 'department_accuracy') if k in me
 print(f'\\nPreserved diag/dept metadata fields: {preserved}')""")
 
 
-md("section4-md", """---
-## Section 4 - Benchmark (head-to-head vs triage v3 cascade)
+md("section4-md", """## Benchmark (head-to-head vs triage v3 cascade)
 
 Runs `benchmark_doctor_disposition.py`, which:
 
 1. Re-runs `load_and_clean_data` from `train_doctor_disposition.py` (full PMH/long-vitals pipeline).
 2. Reproduces the same 80/20 stratified split via `random_state=42`.
-3. Compares **triage v3 cascade dispo** (already in the soft-cascade features) vs the new **calibrated doctor dispo** on the same test rows.
+3. Compares triage v3 cascade dispo (already in the soft-cascade features) vs the new calibrated doctor dispo on the same test rows.
 4. Reports the Δ on accuracy / ROC AUC / Brier / ECE / sensitivity / specificity / over-triage / under-triage.
-5. Per-subgroup breakdown — plan section 3 predicts the lift concentrates in **elderly / polypharmacy / abnormal-vitals / repeat-visitors / prior-admission / non-sinus-rhythm** cohorts.
+5. Per-subgroup breakdown - plan section 3 predicts the lift concentrates in elderly / polypharmacy / abnormal-vitals / repeat-visitors / prior-admission / non-sinus-rhythm cohorts.
 6. Calibration curve (10 reliability bins).
 7. Feature-importance audit on the uncalibrated XGBoost: gain-totals broken down by feature group, top-25 columns, and a PMH wiring check.
 
-**What to look for:**
+What to look for:
 - Accuracy Δ: predicted +3-6pp (plan section 3 estimate)
 - ROC AUC Δ: predicted +0.03-0.05
-- Under-triage Δ: should be **negative** (the safety-critical reduction)
-- Feature group totals: **soft_cascade + pmh + longitudinal + medications + snapshot_vitals** should each contribute non-trivial gain. If TF-IDF dominates ≥60% of total gain, the cascade is under-trusted.
+- Under-triage Δ: should be negative (the safety-critical reduction)
+- Feature group totals: soft_cascade + pmh + longitudinal + medications + snapshot_vitals should each contribute non-trivial gain. If TF-IDF dominates >=60% of total gain, the cascade is under-trusted.
 
 *Expected runtime: 3-5 min.*""")
 
@@ -639,16 +634,15 @@ runpy.run_path(
 )""")
 
 
-md("section5-md", """---
-## Section 5 - Audit + sanity checks
+md("section5-md", """## Audit + sanity checks
 
 Fail-fast verification gates. Failing any of these should block trusting the new model.
 
-- **Calibration fitted:** `disposition_model.joblib` must wrap the raw XGBoost in a `CalibratedClassifierCV`.
-- **Calibrated ECE < uncalibrated ECE:** isotonic should NOT hurt calibration.
-- **No catastrophic accuracy loss from calibration:** calibrated accuracy must be within 1.5pp of uncalibrated accuracy.
-- **Headline lift achieved:** calibrated doctor accuracy must beat the triage v3 cascade baseline (~78% disposition reference from v3 iter 2 — see `docs/agents/triage-agent.md`) — if not, the model adds no value and we shouldn't ship it.
-- **Soft cascade carries weight:** at least 4 of the 6 soft-cascade columns must have non-zero importance in the raw XGBoost.""")
+- Calibration fitted: `disposition_model.joblib` must wrap the raw XGBoost in a `CalibratedClassifierCV`.
+- Calibrated ECE < uncalibrated ECE: isotonic should NOT hurt calibration.
+- No catastrophic accuracy loss from calibration: calibrated accuracy must be within 1.5pp of uncalibrated accuracy.
+- Headline lift achieved: calibrated doctor accuracy must beat the triage v3 cascade baseline (~78% disposition reference from v3 iter 2 - see `docs/agents/triage-agent.md`) - if not, the model adds no value and we shouldn't ship it.
+- Soft cascade carries weight: at least 4 of the 6 soft-cascade columns must have non-zero importance in the raw XGBoost.""")
 
 
 code("cell-audit", """# Cell 10: Audit calibration + cascade wiring + headline lift
@@ -659,9 +653,7 @@ meta = json.loads((DOCTOR_V3_DIR / 'metadata.json').read_text())
 dispo = meta['disposition']
 m = dispo['metrics']
 
-print('=' * 60)
 print('A. Calibration audit')
-print('=' * 60)
 cal = joblib.load(DOCTOR_V3_DIR / 'disposition_model.joblib')
 raw = joblib.load(DOCTOR_V3_DIR / 'disposition_model_raw.joblib')
 assert isinstance(cal, CalibratedClassifierCV), (
@@ -675,11 +667,10 @@ print(f'  ECE calibrated      : {m[\"ece_calibrated\"]:.4f}')
 assert m['ece_calibrated'] <= m['ece_uncalibrated'] + 0.005, (
     'Isotonic made calibration WORSE - something is wrong with the holdout split.'
 )
-print('  -> calibration helped (or stayed flat) ✓')
+print('  -> calibration helped (or stayed flat)')
 
 print('\\n' + '=' * 60)
 print('B. Headline lift audit (vs triage v3 *disposition* baseline on the same test rows)')
-print('=' * 60)
 tri = m.get('triage_v3_dispo_baseline') or {}
 ACC = m['accuracy_calibrated']; T_ACC = tri.get('accuracy')
 AUC = m['roc_auc_calibrated'];  T_AUC = tri.get('roc_auc')
@@ -693,12 +684,11 @@ if T_ACC is not None and ACC < T_ACC:
 if T_AUC is not None and AUC < T_AUC + 0.02:
     print('  WARN: ROC AUC gain over triage v3 dispo is < 0.02. Cascade may be under-trusted.')
 if T_UND is not None and UND > T_UND:
-    print('  WARN: under-triage rate did not improve over triage v3 dispo — the safety-critical metric.')
+    print('  WARN: under-triage rate did not improve over triage v3 dispo - the safety-critical metric.')
     print('        Consider threshold-tuning at inference or retraining with asymmetric scale_pos_weight.')
 
 print('\\n' + '=' * 60)
 print('C. Soft-cascade wiring audit')
-print('=' * 60)
 soft_cols = dispo['soft_cascade_cols']
 booster = raw.get_booster()
 gains = booster.get_score(importance_type='gain')
@@ -719,15 +709,14 @@ assert non_zero_cascade >= 4, (
     f'Only {non_zero_cascade}/6 soft-cascade columns earned gain. '
     f'Expected >=4. Cascade is being ignored by the model.'
 )
-print(f'  -> {non_zero_cascade}/6 cascade columns earned gain ✓')
+print(f'  -> {non_zero_cascade}/6 cascade columns earned gain')
 
 print('\\n' + '=' * 60)
 print('All audits PASSED. Model is safe to ship to inference.')
 print('=' * 60)""")
 
 
-md("section6-md", """---
-## Section 6 - Download artifacts (optional)
+md("section6-md", """## Download artifacts (optional)
 
 After training succeeds you can pull the calibrated model + metadata onto
 your local machine. The artifacts are also on Drive at

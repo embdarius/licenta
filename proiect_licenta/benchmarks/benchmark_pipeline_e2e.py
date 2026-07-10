@@ -1,46 +1,24 @@
-"""
-End-to-End Pipeline Benchmark — synthetic NL cases vs the tabular benchmark
-===========================================================================
+"""End-to-end pipeline benchmark: synthetic NL cases vs the tabular benchmark.
 
-Runs the synthetic cases produced by `uv run generate_cases` through THREE
-prediction modes on the SAME stay_ids and scores each against MIMIC ground
-truth:
+Runs the synthetic cases from `uv run generate_cases` through three prediction
+modes on the same stay_ids and scores each against MIMIC ground truth:
 
-  1. E2E (real crew)      — feed only the generated free-text narrative into
-                            the full ProiectLicenta crew (NLP parser + triage +
-                            doctor v3_base + nurse + disposition + reassessment).
-                            The interactive tools are monkeypatched to answer
-                            from the case's structured fields; the 4 prediction
-                            tools are wrapped to tee their exact JSON output.
-  2. Tool-direct          — call the same crew tools directly with the exact
-                            tabular field values (no LLM), replicating the
-                            crew's gating in Python. Isolates the NL layer.
-  3. Feature-vector       — predict from the cached build_features rows + the
-                            trained models (the existing benchmark methodology),
-                            restricted to the 20 stay_ids.
+  1. E2E (real crew): feed only the generated narrative into the full crew, with
+     the interactive tools monkeypatched to answer from the case's structured
+     fields and the prediction tools wrapped to tee their JSON output.
+  2. Tool-direct: call the same tools directly with the tabular values (no LLM),
+     replicating the crew's gating. Isolates the NL layer.
+  3. Feature-vector: predict from the cached build_features rows and the trained
+     models, restricted to the sampled stay_ids.
 
-Targets scored: ESI acuity, refined disposition (admit/discharge), diagnosis
-top-1/top-3, department top-1/top-3, and the Stage-2 exact-ICD resolver
-(doctor+nurse, 3-char rollup): exact @1/@5, flat@10, and union — comparable to the
-E2E flat-10 / E2E union metrics in benchmark_icd_resolution.py (the runtime tool
-resolves over top-5 cats / k_per_cat=5 / k_flat=10, the same parameters). The
-exact-ICD candidates come from the v3 tool's `exact_diagnoses` block (E2E +
-tool-direct) or from running the resolver on the cached features (feature-vector).
-Diagnosis/department/exact-ICD are scored over the admitted ground-truth cases
-(with a coverage note for cases the pipeline routed to discharge). Also prints a
-per-case dump and an NL-fidelity report (what the parser extracted vs tabular truth).
+Targets: ESI acuity, refined disposition, diagnosis top-1/top-3, department
+top-1/top-3, and the Stage-2 exact-ICD resolver. Also prints a per-case dump and
+an NL-fidelity report (parser output vs tabular truth), which is the fair
+parser-quality anchor across LLM backends.
 
 Usage:
     uv run python benchmarks/benchmark_pipeline_e2e.py [--limit N] [--skip-feature-vector] [--skip-e2e]
-
-LLM backend comparison (Flash vs MedGemma):
-    # Flash (default) — full agentic crew, unchanged baseline:
-    uv run python benchmarks/benchmark_pipeline_e2e.py --dump-json artifacts/benchmarks/e2e_flash.json
-    # MedGemma — full agentic crew if it can tool-call, else add the bypass mode:
-    uv run python benchmarks/benchmark_pipeline_e2e.py --llm-backend medgemma --parser-llm \
-        --dump-json artifacts/benchmarks/e2e_medgemma.json
-The orchestration-independent NL-FIDELITY section is the fair parser-quality
-anchor across backends (printed for both the E2E and parser-llm modes).
+    uv run python benchmarks/benchmark_pipeline_e2e.py --llm-backend medgemma --parser-llm --dump-json OUT.json
 """
 
 import argparse
@@ -56,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import joblib
 
-# Force UTF-8 stdout/stderr before crewai/tool imports wrap the streams — the
+# Force UTF-8 stdout/stderr before crewai/tool imports wrap the streams - the
 # loaders + LLM narratives emit non-cp1252 chars that crash the Windows console.
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -99,9 +77,7 @@ from proiect_licenta.tools.patient_history_lookup_tool import (
 )
 
 
-# ===========================================================================
 # Shared helpers
-# ===========================================================================
 def print_section(title):
     print(f"\n{'='*78}\n  {title}\n{'='*78}")
 
@@ -172,9 +148,7 @@ def true_rollups(stay_ids) -> dict:
     return out
 
 
-# ===========================================================================
-# Mode 2 — TOOL-DIRECT (exact tabular values, crew gating replicated, no LLM)
-# ===========================================================================
+# Mode 2 - TOOL-DIRECT (exact tabular values, crew gating replicated, no LLM)
 _DIRECT_TOOLS = {}
 
 
@@ -190,11 +164,11 @@ def _direct_tools():
 
 def _lookup_blocks(case) -> tuple:
     """Call the PatientHistoryLookupTool with the case's REAL subject_id + intime
-    and return ``(pmh_json, med_json)`` — the `pmh_block` and `med_block` as JSON
+    and return ``(pmh_json, med_json)`` - the `pmh_block` and `med_block` as JSON
     strings (each "" if unknown / not on record / index not built). This is what
     an EHR lookup for a returning patient would supply at runtime."""
     # The benchmark reconstructs a HISTORICAL visit, so it must pass that stay's
-    # exact intime as the leakage cutoff — never the 'now' sentinel (which would
+    # exact intime as the leakage cutoff - never the 'now' sentinel (which would
     # anchor to the subject's latest encounter and could include this stay).
     # If the case bundle predates the `intime` field, skip the lookup entirely.
     intime = str(case.get("intime", "")).strip()
@@ -233,7 +207,7 @@ def run_tool_direct(case, pmh_lookup_json: str = "", med_lookup_json: str = "") 
 
     # Triage also receives the EHR lookup block (when present) so its
     # acuity/disposition models use a returning patient's real prior-encounter
-    # numerics instead of zero-filling — matching the live crew, where the
+    # numerics instead of zero-filling - matching the live crew, where the
     # triage agent calls patient_history_lookup_tool itself (tasks.yaml step 1b).
     # With "" (the plain tool_direct column) it falls back to self-report.
     triage_j = json.loads(tools["triage"]._run(
@@ -298,16 +272,14 @@ def run_tool_direct_lookup(case) -> dict:
     return run_tool_direct(case, pmh_lookup_json=pmh_json, med_lookup_json=med_json)
 
 
-# ===========================================================================
-# Mode — PARSER-LLM bypass (MedGemma-only fallback for broken agentic tool-calling)
-# ===========================================================================
+# Mode - PARSER-LLM bypass (MedGemma-only fallback for broken agentic tool-calling)
 # When an LLM can't reliably drive CrewAI's agentic tool-calling (the main risk
 # for a non-function-calling medical model like MedGemma), this mode isolates the
-# part we actually want to compare — clinical NL *parsing* — by calling the LLM
+# part we actually want to compare - clinical NL *parsing* - by calling the LLM
 # as a single direct completion for the parse step only, then feeding the parsed
 # fields into the deterministic, LLM-free tool-direct path. The interactive
-# fields the live crew would collect via (monkeypatched) tools — EMS vitals, PMH,
-# prior-admission count — are kept from the case, exactly as in the E2E run, so
+# fields the live crew would collect via (monkeypatched) tools - EMS vitals, PMH,
+# prior-admission count - are kept from the case, exactly as in the E2E run, so
 # only the free-text-parsed fields vary. Gemini is never run here (it always
 # drives the full agentic crew); this is MedGemma's evaluation path.
 # Two prompt variants so the clinical-term steering (Track 1) can be measured in
@@ -361,7 +333,7 @@ def _coerce_int(v):
         return None
 
 
-# --- Parse cache -----------------------------------------------------------
+# Parse cache
 # The LLM parse of a narrative is deterministic (temperature=0) and depends only
 # on the prompt + narrative, so we cache it keyed by (prompt hash, narrative).
 # This lets system-side iterations (e.g. toggling the lay->clinical clinicalize
@@ -450,7 +422,7 @@ def run_parser_llm_bypass(case: dict, llm, clinicalize: bool = False) -> dict:
     deterministic lay->clinical map (``clinicalize_complaint``) before it reaches
     the tools. This is the only difference from the baseline parser-llm run, so
     the accuracy delta isolates the map's value. The map is applied ONLY to the
-    parsed free text here — never to the tabular complaint in ``tool_direct`` —
+    parsed free text here - never to the tabular complaint in ``tool_direct`` -
     so the reference modes stay clean."""
     parsed = _llm_parse_triage(case["narrative"], llm)
     ti = dict(case["triage_inputs"])
@@ -482,7 +454,7 @@ def run_parser_llm_bypass(case: dict, llm, clinicalize: bool = False) -> dict:
     # Feed the SAME EHR lookup (prior-encounter PMH + reconciled home meds) that
     # the feature_vector path's build_features draws on, so the ONLY feature that
     # differs between this mode and feature_vector is the LLM-parsed chief
-    # complaint — a fair like-for-like parser comparison (equal feature sets).
+    # complaint - a fair like-for-like parser comparison (equal feature sets).
     # The lookup uses the original case (its same-complaint-as-prior signal stays
     # on the tabular complaint, keeping PMH/med parity exact with feature_vector).
     pmh_json, med_json = _lookup_blocks(case)
@@ -499,9 +471,7 @@ def run_parser_llm_bypass(case: dict, llm, clinicalize: bool = False) -> dict:
     return out
 
 
-# ===========================================================================
-# Mode 3 — FEATURE-VECTOR (cached build_features rows + trained models)
-# ===========================================================================
+# Mode 3 - FEATURE-VECTOR (cached build_features rows + trained models)
 _FV = {}
 
 
@@ -596,9 +566,7 @@ def run_feature_vector(case, cache_entry) -> dict:
     return out
 
 
-# ===========================================================================
-# Mode 1 — E2E (real crew, patched I/O, captured tool outputs)
-# ===========================================================================
+# Mode 1 - E2E (real crew, patched I/O, captured tool outputs)
 CAPTURE = {}        # tool_name -> list of parsed JSON outputs (current case)
 CURRENT_CASE = {}   # the case whose scripted answers the patched tools serve
 
@@ -698,11 +666,11 @@ def _install_patches():
         return _nurse_json(CURRENT_CASE)
 
     def patched_lookup(self, subject_id, current_intime="now", chief_complaints=""):
-        # Option A — force the case's REAL stay intime (the historical leakage
+        # Option A - force the case's REAL stay intime (the historical leakage
         # cutoff) instead of the live "now" the disposition prompt passes, so the
         # E2E lookup reproduces the tool_direct_lookup / feature_vector_gated
         # scenario rather than live "now" semantics (which for a returning
-        # patient anchors to their LATEST encounter — a different cutoff).
+        # patient anchors to their LATEST encounter - a different cutoff).
         # subject_id + complaints still come from the agent: the parser must have
         # collected the MRN for this to fire, so the full chain is exercised.
         forced_intime = str(CURRENT_CASE.get("intime") or current_intime)
@@ -793,9 +761,7 @@ def run_e2e(case: dict) -> dict:
     return out
 
 
-# ===========================================================================
 # Scoring
-# ===========================================================================
 def _acc(pairs):
     pairs = [p for p in pairs if p is not None]
     return (sum(pairs) / len(pairs)) if pairs else float("nan")
@@ -836,7 +802,7 @@ def score(cases, preds_by_mode, modes, true_roll):
                     p3.append(int(gt["service_group"] in pr["dept_top3"][:3]))
                 else:
                     p1.append(0); p3.append(0)
-                # Exact-ICD (rollup) — only scored when MIMIC records a coded
+                # Exact-ICD (rollup) - only scored when MIMIC records a coded
                 # primary diagnosis for the stay; miss when no Dx was produced.
                 tr = true_roll.get(sid)
                 if tr:
@@ -919,9 +885,7 @@ def print_nl_fidelity(cases, mode_preds):
             "complaint_jaccard_raw_mean": jacc_raw, "map_rewrote": map_rewrote}
 
 
-# ===========================================================================
 # Detailed per-case audit (--out-dir): per-agent CSVs + graded ICD + rich JSON
-# ===========================================================================
 DISPO_THRESHOLDS = [0.15, 0.20, 0.30, 0.40, 0.50]
 LIVE_THRESHOLD = 0.40
 
@@ -966,7 +930,7 @@ def _rollup_versions() -> dict:
 
 def build_case_graders(cases, true_info):
     """Prepare the 3 graded engines (TF-IDF / Gemini / ICD-tree) over the case
-    order for per-case rollup graded-ICD scoring. Best-effort — returns
+    order for per-case rollup graded-ICD scoring. Best-effort - returns
     ``(None, None)`` (graded ICD skipped, strict still works) on any failure."""
     try:
         resolver = icdr.load_resolver(DOCTOR_V3_ICD_RESOLVER_DIR)
@@ -1356,9 +1320,7 @@ def _write_detailed_audit(out_dir, backend, args, cases, preds, modes,
     print(f"    json -> e2e_full_{backend}.json")
 
 
-# ===========================================================================
 # Main
-# ===========================================================================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
@@ -1378,7 +1340,7 @@ def main():
                              "parse cache, so this costs no extra LLM calls.")
     parser.add_argument("--plain-prompt", action="store_true",
                         help="Use the original parser prompt (no clinical-term "
-                             "steering) — reproduces the documented baseline. Omit "
+                             "steering) - reproduces the documented baseline. Omit "
                              "to use the clinical-term prompt (Track 1).")
     parser.add_argument("--dump-json", default=None,
                         help="Write the scored metrics + backend tag to this JSON "
@@ -1403,13 +1365,11 @@ def main():
     # Ground-truth primary-diagnosis ICD rollup per stay (for exact-ICD targets).
     true_roll = true_rollups([c["stay_id"] for c in cases])
 
-    print("\n" + "#" * 78)
     print("  END-TO-END PIPELINE BENCHMARK  (NL crew vs tabular benchmark)")
     print(f"  Cases: {len(cases)}  (generated {payload.get('generated_at','?')}, "
           f"seed {payload.get('seed','?')})")
     print(f"  LLM backend: {backend.upper()}"
           f"{'  (model ' + os.getenv('MEDGEMMA_MODEL', '?') + ')' if backend == 'medgemma' else ''}")
-    print("#" * 78)
     n_admit_gt = sum(1 for c in cases if c["ground_truth"]["admitted"])
     n_flagged = sum(1 for c in cases if c.get("grounding") and not c["grounding"]["ok"])
     print(f"  Ground truth: {n_admit_gt} admitted / {len(cases)-n_admit_gt} discharged")
@@ -1418,7 +1378,7 @@ def main():
     modes = []
     preds = {}
 
-    # Tool-direct (no lookup — the live ED with no chart access)
+    # Tool-direct (no lookup - the live ED with no chart access)
     print_section("MODE: tool-direct (exact tabular values, no LLM)")
     preds["tool_direct"] = {}
     modes.append("tool_direct")
@@ -1433,7 +1393,7 @@ def main():
     # The gap vs tool_direct = the value of EHR access at triage. Skipped with a
     # note if the history index hasn't been built.
     if get_history_index() is None:
-        print_section("MODE: tool-direct-lookup — SKIPPED (no history index)")
+        print_section("MODE: tool-direct-lookup - SKIPPED (no history index)")
         print("  Run `uv run build_history_index` first to enable this column.")
     else:
         print_section("MODE: tool-direct-lookup (EHR history lookup by subject_id)")
@@ -1498,7 +1458,7 @@ def main():
 
     # Parser-LLM mode: one direct LLM parse -> deterministic tool-direct. Runs for
     # BOTH backends (get_parse_llm() is never None) so Flash and MedGemma can be
-    # compared in the SAME mode — isolating parser quality from agentic tool-calling.
+    # compared in the SAME mode - isolating parser quality from agentic tool-calling.
     if args.parser_llm:
         from proiect_licenta.llm_config import get_parse_llm
         global _ACTIVE_PARSE_PROMPT
@@ -1523,7 +1483,7 @@ def main():
         print(f"  parse cache: {_PARSE_CACHE_HITS} hits / {_PARSE_CACHE_MISSES} "
               f"LLM calls -> {_PARSE_CACHE_PATH}")
 
-    # E2E (last — heaviest, runs the LLM crew)
+    # E2E (last - heaviest, runs the LLM crew)
     if not args.skip_e2e:
         print_section("MODE: E2E (real crew, narrative -> NLP parser -> models)")
         restore = _install_patches()
@@ -1539,7 +1499,7 @@ def main():
         finally:
             restore()
 
-    # ── Headline table ──
+    # Headline table
     rows = score(cases, preds, modes, true_roll)
     print_section("ACCURACY ON THE SAME CASES  (per target, per mode)")
     header = f"  {'target':16s}" + "".join(f"{m:>22s}" for m in modes)
@@ -1574,7 +1534,7 @@ def main():
               f"{r['icd_cov']}/{r['icd_n']} (rest counted as miss). Compare ICD union / "
               f"flat@10 with the full-test-set numbers in benchmark_icd_resolution.py.")
 
-    # ── Per-case dump ──
+    # Per-case dump
     print_section("PER-CASE DETAIL")
     for c in cases:
         sid = c["stay_id"]
@@ -1600,7 +1560,7 @@ def main():
                   f"refined_admit={pr.get('refined_admit')}, dx={dx}, dept={dp}, "
                   f"icd={ic}{extra}")
 
-    # ── NL-fidelity report (parser extraction vs tabular truth) ──
+    # NL-fidelity report (parser extraction vs tabular truth)
     # This is the orchestration-independent, apples-to-apples parser-quality
     # comparison: it works identically for the E2E crew parser AND the MedGemma
     # parser-llm bypass, so Flash and MedGemma can be compared here even when
@@ -1625,9 +1585,7 @@ def main():
         _write_detailed_audit(args.out_dir, backend, args, cases, preds, modes,
                               rows, nl_fidelity)
 
-    print("\n" + "#" * 78)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 78 + "\n")
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

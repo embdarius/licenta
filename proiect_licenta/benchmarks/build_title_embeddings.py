@@ -1,18 +1,13 @@
 """Build the Gemini ICD-title embedding cache for the graded near-miss metric.
 
-Standalone, one-time helper (no heavy MIMIC load): embeds the distinct ICD
-*titles* the Stage-2 graded benchmark needs and caches the vectors to disk, so
-``benchmark_icd_resolution.py`` reads them offline (zero API calls) under any LLM
-backend. The title set is a superset of what any run needs:
+Standalone one-time helper (no heavy MIMIC load): embeds the distinct ICD titles
+the Stage-2 graded benchmark needs and caches the vectors to disk, so
+benchmark_icd_resolution.py reads them offline. The title set covers every
+candidate code's representative title in the resolver index plus every distinct
+primary-diagnosis title in categorized_diagnosis.csv. Embedding is rate-limited
+and resumable, so re-running only embeds titles not already cached.
 
-  - every candidate code's representative title in the resolver index, PLUS
-  - every distinct primary-diagnosis title in categorized_diagnosis.csv
-    (a superset of the test rows' true titles, regardless of the split).
-
-Embedding is rate-limited + resumable (see icd_similarity.build_or_load_title_
-embeddings): safe to re-run — it only embeds titles not already cached.
-
-Run: ``uv run python benchmarks/build_title_embeddings.py``
+Run: uv run python benchmarks/build_title_embeddings.py
 """
 import sys
 from pathlib import Path

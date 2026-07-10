@@ -58,7 +58,6 @@ def save(fig, name):
     print(f"  wrote {path.relative_to(ROOT)}")
 
 
-# ---------------------------------------------------------------------------
 def fig_triaj_confuzie():
     df = pd.read_csv(TAB / "triage_acuity_confusion_norm.csv", index_col=0)
     M = df.values

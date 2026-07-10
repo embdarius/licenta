@@ -1,42 +1,29 @@
-"""
-Shared medication vocabulary for Doctor v2 / v3 training and inference.
+"""Shared medication vocabulary for doctor v2/v3 training and inference.
 
-Provides a unified mapping of drug names and class keywords to 9 binary
-medication category flags:
-    has_cardiac_meds, has_diabetes_meds, has_psych_meds, has_respiratory_meds,
-    has_opioid_meds, has_anticoagulant_meds, has_gi_meds, has_thyroid_meds,
-    has_anticonvulsant_meds
+Maps drug names and class keywords to binary medication category flags
+(has_cardiac_meds, has_diabetes_meds, has_psych_meds, has_respiratory_meds,
+has_opioid_meds, has_anticoagulant_meds, has_gi_meds, has_thyroid_meds,
+has_anticonvulsant_meds). Training (train_nurse) and inference (doctor_tool_v2/v3)
+share it so medication flags occupy the same feature space.
 
-Used by:
-    training/train_nurse.py (training: medrecon.csv `name` + `etcdescription`)
-    doctor_tool_v2 / v3     (inference: patient-reported medications)
-
-Expanded based on the medication vocabulary audit (audit_med_vocab.py) that
-found 39.3% of stays had mismatched flag sets between training and inference,
-most severely `has_opioid_meds` at 44.4% Jaccard.
-
-Matching rules:
-  - Names are tokenized into alphabetic runs (handles hyphens, brackets, slashes
-    in names like "fluticasone-salmeterol [advair diskus]").
-  - Class keywords are matched with word boundaries to avoid spurious hits like
-    "statin" in "nystatin" or "insulin" in "noninsulin".
+Matching tokenizes names into alphabetic runs (handling hyphens/brackets/slashes
+like "fluticasone-salmeterol [advair diskus]") and matches class keywords with
+word boundaries to avoid spurious hits like "statin" in "nystatin".
   - "non-opioid" / "non-salicylate" negations are neutralized before matching.
 """
 
 import re
 
 
-# ---------------------------------------------------------------------------
 # Drug name -> category. Generic + brand names. Any alphabetic token matching
 # a key in this map flips the corresponding category flag.
-# ---------------------------------------------------------------------------
 # Values may be a single category string or a tuple of categories. Drugs
 # that belong to two classes (e.g., benzodiazepines used as anticonvulsants,
 # valproate/lamotrigine used for bipolar) must flag both, otherwise the
 # training vocabulary (which reads the full etcdescription) will tag
 # categories that inference cannot reach from the drug name alone.
 DRUG_NAME_MAP = {
-    # ── Cardiac ──
+    # Cardiac
     # ACE inhibitors / ARBs
     "lisinopril": "has_cardiac_meds", "enalapril": "has_cardiac_meds",
     "ramipril": "has_cardiac_meds", "captopril": "has_cardiac_meds",
@@ -100,7 +87,7 @@ DRUG_NAME_MAP = {
     "prazosin": "has_cardiac_meds",
     "hydralazine": "has_cardiac_meds", "clonidine": "has_cardiac_meds",
     "minoxidil": "has_cardiac_meds", "methyldopa": "has_cardiac_meds",
-    # Omega-3 (lipid adjunct) — training flags via antihyperlipidemic class
+    # Omega-3 (lipid adjunct) - training flags via antihyperlipidemic class
     "omega": "has_cardiac_meds",
     "lovaza": "has_cardiac_meds",  # prescription omega-3
     "krill": "has_cardiac_meds",
@@ -108,7 +95,7 @@ DRUG_NAME_MAP = {
     "cholestyramine": "has_cardiac_meds", "questran": "has_cardiac_meds",
     "colestipol": "has_cardiac_meds", "colestid": "has_cardiac_meds",
     "colesevelam": "has_cardiac_meds", "welchol": "has_cardiac_meds",
-    # Timolol (beta-blocker, also used topically for glaucoma — training
+    # Timolol (beta-blocker, also used topically for glaucoma - training
     # flags cardiac regardless; matches its pharmacologic class)
     "timolol": "has_cardiac_meds",
     "cosopt": "has_cardiac_meds",  # dorzolamide-timolol eye drops
@@ -121,7 +108,7 @@ DRUG_NAME_MAP = {
     "maxzide": "has_cardiac_meds",
     "lopressor": "has_cardiac_meds",  # metoprolol
 
-    # ── Diabetes ──
+    # Diabetes
     "metformin": "has_diabetes_meds", "glucophage": "has_diabetes_meds",
     "insulin": "has_diabetes_meds", "lantus": "has_diabetes_meds",
     "humalog": "has_diabetes_meds", "novolog": "has_diabetes_meds",
@@ -155,7 +142,7 @@ DRUG_NAME_MAP = {
     "precose": "has_diabetes_meds",
     "pramlintide": "has_diabetes_meds", "symlin": "has_diabetes_meds",
 
-    # ── Psychiatric ──
+    # Psychiatric
     # SSRIs / SNRIs / atypicals
     "sertraline": "has_psych_meds", "zoloft": "has_psych_meds",
     "fluoxetine": "has_psych_meds", "prozac": "has_psych_meds",
@@ -210,7 +197,7 @@ DRUG_NAME_MAP = {
     "iloperidone": "has_psych_meds",
     "haloperidol": "has_psych_meds", "haldol": "has_psych_meds",
     # Prochlorperazine/compazine are phenothiazine antipsychotics that are
-    # also heavily used as antiemetics — flag both categories.
+    # also heavily used as antiemetics - flag both categories.
     "prochlorperazine": ("has_psych_meds", "has_gi_meds"),
     "compazine": ("has_psych_meds", "has_gi_meds"),
     "chlorpromazine": "has_psych_meds", "thorazine": "has_psych_meds",
@@ -238,7 +225,7 @@ DRUG_NAME_MAP = {
     "suvorexant": "has_psych_meds", "belsomra": "has_psych_meds",
     "ramelteon": "has_psych_meds", "rozerem": "has_psych_meds",
 
-    # ── Respiratory ──
+    # Respiratory
     "albuterol": "has_respiratory_meds", "salbutamol": "has_respiratory_meds",
     "proair": "has_respiratory_meds", "proventil": "has_respiratory_meds",
     "ventolin": "has_respiratory_meds",
@@ -279,7 +266,7 @@ DRUG_NAME_MAP = {
     "dupilumab": "has_respiratory_meds", "dupixent": "has_respiratory_meds",
     "cromolyn": "has_respiratory_meds",
 
-    # ── Opioid ──
+    # Opioid
     "oxycodone": "has_opioid_meds", "percocet": "has_opioid_meds",
     "oxycontin": "has_opioid_meds", "roxicodone": "has_opioid_meds",
     "hydrocodone": "has_opioid_meds", "vicodin": "has_opioid_meds",
@@ -302,10 +289,10 @@ DRUG_NAME_MAP = {
     "oxymorphone": "has_opioid_meds", "opana": "has_opioid_meds",
     "levorphanol": "has_opioid_meds",
     # Note: butalbital / Fioricet / Fiorinal WITHOUT codeine are barbiturate
-    # combos classified as "Non-Opioid" in MIMIC — deliberately NOT mapped
+    # combos classified as "Non-Opioid" in MIMIC - deliberately NOT mapped
     # here. Their codeine-containing variants flag via the codeine token.
 
-    # ── Anticoagulant / antiplatelet ──
+    # Anticoagulant / antiplatelet
     "warfarin": "has_anticoagulant_meds", "coumadin": "has_anticoagulant_meds",
     "jantoven": "has_anticoagulant_meds",
     "apixaban": "has_anticoagulant_meds", "eliquis": "has_anticoagulant_meds",
@@ -344,7 +331,7 @@ DRUG_NAME_MAP = {
     "bivalirudin": "has_anticoagulant_meds", "angiomax": "has_anticoagulant_meds",
     "lepirudin": "has_anticoagulant_meds", "desirudin": "has_anticoagulant_meds",
 
-    # ── GI ──
+    # GI
     # PPIs
     "omeprazole": "has_gi_meds", "prilosec": "has_gi_meds",
     "pantoprazole": "has_gi_meds", "protonix": "has_gi_meds",
@@ -393,12 +380,12 @@ DRUG_NAME_MAP = {
     "dicyclomine": "has_gi_meds", "bentyl": "has_gi_meds",
     "hyoscyamine": "has_gi_meds", "levsin": "has_gi_meds",
 
-    # ── Thyroid / calcium regulation (grouped for training parity) ──
+    # Thyroid / calcium regulation (grouped for training parity)
     "levothyroxine": "has_thyroid_meds", "synthroid": "has_thyroid_meds",
     "levoxyl": "has_thyroid_meds", "levothroid": "has_thyroid_meds",
     "unithroid": "has_thyroid_meds", "tirosint": "has_thyroid_meds",
     "euthyrox": "has_thyroid_meds",
-    # Desiccated / natural thyroid ("thyroid (pork)") — tokenizes as
+    # Desiccated / natural thyroid ("thyroid (pork)") - tokenizes as
     # "thyroid" + "pork". Map both.
     "thyroid": "has_thyroid_meds", "throid": "has_thyroid_meds",
     "westhroid": "has_thyroid_meds", "naturethroid": "has_thyroid_meds",
@@ -407,7 +394,7 @@ DRUG_NAME_MAP = {
     "liotrix": "has_thyroid_meds", "thyrolar": "has_thyroid_meds",
     "methimazole": "has_thyroid_meds", "tapazole": "has_thyroid_meds",
     "propylthiouracil": "has_thyroid_meds", "ptu": "has_thyroid_meds",
-    # Calcitriol / calcimimetics — training groups these here (description
+    # Calcitriol / calcimimetics - training groups these here (description
     # contains thyroid/parathyroid-related terms). Kept for training parity.
     "calcitriol": "has_thyroid_meds", "rocaltrol": "has_thyroid_meds",
     "doxercalciferol": "has_thyroid_meds", "hectorol": "has_thyroid_meds",
@@ -415,7 +402,7 @@ DRUG_NAME_MAP = {
     "cinacalcet": "has_thyroid_meds", "sensipar": "has_thyroid_meds",
     "teriparatide": "has_thyroid_meds", "forteo": "has_thyroid_meds",
 
-    # ── Anticonvulsant ──
+    # Anticonvulsant
     "gabapentin": "has_anticonvulsant_meds", "neurontin": "has_anticonvulsant_meds",
     "gralise": "has_anticonvulsant_meds",
     "pregabalin": "has_anticonvulsant_meds", "lyrica": "has_anticonvulsant_meds",
@@ -460,12 +447,10 @@ DRUG_NAME_MAP = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Class / free-text keywords -> category. Used on etcdescription (training)
 # and patient free-text (inference: "blood thinner", "anxiety pill").
 # Matched with word boundaries; "non-opioid" / "non-salicylate" negations
 # are neutralized first.
-# ---------------------------------------------------------------------------
 MED_CLASS_KEYWORDS = {
     "has_cardiac_meds": [
         "statin", "beta blocker", "beta-blocker",
@@ -531,7 +516,7 @@ MED_CLASS_KEYWORDS = {
         "vitamin d analog",
         "parathyroid",
         # Note: plain "Vitamins - D Derivatives" (cholecalciferol / vit D3
-        # supplements) is intentionally NOT flagged — those are OTC
+        # supplements) is intentionally NOT flagged - those are OTC
         # vitamins, not thyroid therapy. Prescription analogs (doxercalciferol,
         # paricalcitol, calcitriol) are covered via DRUG_NAME_MAP.
     ],
@@ -549,9 +534,7 @@ MED_CATEGORIES = list(MED_CLASS_KEYWORDS.keys())
 MED_FEATURE_COLS = ["n_medications", "meds_unknown"] + MED_CATEGORIES
 
 
-# ---------------------------------------------------------------------------
 # Matching helpers
-# ---------------------------------------------------------------------------
 
 # Replace "non-opioid" / "non opioid" / "non-salicylate" etc. with a placeholder
 # so the bare keyword inside them doesn't get matched.
@@ -626,9 +609,7 @@ def flags_from_row(name, etcdescription) -> set:
     return flags_from_name(name) | flags_from_text(etcdescription)
 
 
-# ---------------------------------------------------------------------------
 # EHR-lookup helpers (returning-patient medication block)
-# ---------------------------------------------------------------------------
 import json as _json
 
 
@@ -659,7 +640,7 @@ def parse_med_lookup(med_lookup_json):
 
     Accepts either the raw ``med_block`` object or the tool's full output (with
     a nested ``med_block``). Returns ``None`` on empty/invalid input or a block
-    missing any required column — so a malformed lookup never corrupts the
+    missing any required column - so a malformed lookup never corrupts the
     feature vector; it just reverts to self-report. Mirrors
     ``pmh_features.parse_pmh_lookup``.
     """
@@ -682,7 +663,7 @@ def med_self_report_discrepancy(medications_raw, med_block) -> list:
 
     When an EHR lookup overrides the patient's free-text meds (record wins, by
     design), this surfaces categories the patient mentioned that the documented
-    list lacks — e.g. a newly started drug, or one filled elsewhere. Purely
+    list lacks - e.g. a newly started drug, or one filled elsewhere. Purely
     informational: it does NOT alter the feature vector. Returns a sorted list
     of category names, empty when they agree / no free-text / falsy block.
     """

@@ -1,16 +1,10 @@
-"""
-Disposition decision-threshold sweep (NO retraining).
-=====================================================
+"""Disposition decision-threshold sweep (no retraining).
 
-Scores the EXISTING calibrated doctor-disposition model over the SAME held-out
-test split as benchmark_doctor_disposition.py (random_state=42, stratified on
-`admitted`), and reports sensitivity / specificity / over- & under-triage / F1 /
-Youden's J at a range of decision thresholds.
-
-This is a pure operating-point analysis: the model's predict_proba output is
-fixed; we only vary the cutoff that turns P(admit) into a binary decision
-(DECISION_THRESHOLD in tools/doctor_disposition_tool.py). The ROC curve does not
-move — lower thresholds buy admit-recall at the cost of specificity.
+Scores the existing calibrated disposition model over the same held-out test
+split as benchmark_doctor_disposition.py and reports sensitivity, specificity,
+over/under-triage, F1, and Youden's J at a range of decision thresholds. A pure
+operating-point analysis: predict_proba is fixed, only the cutoff varies (lower
+thresholds buy admit-recall at the cost of specificity).
 
 Run: uv run python benchmarks/sweep_disposition_threshold.py
 """
@@ -59,16 +53,14 @@ def metrics_at(y_true, proba, thr):
 
 
 def main():
-    print("\n" + "#" * 78)
-    print("  DOCTOR DISPOSITION v3 — THRESHOLD SWEEP (no retraining)")
-    print("#" * 78)
+    print("  DOCTOR DISPOSITION v3 - THRESHOLD SWEEP (no retraining)")
 
     df = load_and_clean_data().reset_index(drop=True)
     y = df["admitted"].astype(int).reset_index(drop=True)
 
     # Reproduce the SAME split as benchmark_doctor_disposition.py from indices +
     # labels only (no feature matrix needed for the split). Then build features
-    # on ONLY the test rows — building on the full 418K densifies a ~6.9 GB
+    # on ONLY the test rows - building on the full 418K densifies a ~6.9 GB
     # TF-IDF matrix and OOMs. build_features is a pure fit=False transform, so
     # per-row results are identical to building on the full frame and slicing.
     _, test_idx = train_test_split(
@@ -107,7 +99,7 @@ def main():
               f"{m['youden']:>7.4f}   {m['tp']:>6} {m['fn']:>6} {m['fp']:>6} "
               f"{m['tn']:>6}{star}")
 
-    # ── Deltas vs current 0.50 ──
+    # Deltas vs current 0.50
     base = rows[CURRENT]
     print(f"\n  Deltas vs current threshold {CURRENT:.2f} "
           f"(positive under/over = worse):")
@@ -124,7 +116,7 @@ def main():
               f"{m['under']-base['under']:>+8.4f} {m['over']-base['over']:>+8.4f}   "
               f"{caught:>+20,} {false:>+19,}")
 
-    # ── Criterion-based picks ──
+    # Criterion-based picks
     print(f"\n  Threshold that maximizes each criterion (on this test split):")
     best_f1 = max(THRESHOLDS, key=lambda t: rows[t]['f1'])
     best_y = max(THRESHOLDS, key=lambda t: rows[t]['youden'])
@@ -132,14 +124,12 @@ def main():
     print(f"    max F1        : {best_f1:.2f}  (F1={rows[best_f1]['f1']:.4f})")
     print(f"    max Youden's J: {best_y:.2f}  (J={rows[best_y]['youden']:.4f})")
     print(f"    max accuracy  : {best_acc:.2f}  (acc={rows[best_acc]['acc']:.4f})")
-    print(f"\n  Note: 'best accuracy' is biased toward the majority (discharge) "
-          f"class; for a clinical disposition, under-triage (missed admits) is "
-          f"the costlier error, so F1 / Youden / a target under-triage rate are "
-          f"the clinically appropriate selectors.")
+    print(f"\n  'best accuracy' is biased toward the majority (discharge) class; "
+          f"for a clinical disposition, under-triage (missed admits) is the "
+          f"costlier error, so F1 / Youden / a target under-triage rate are the "
+          f"clinically appropriate selectors.")
 
-    print("\n" + "#" * 78)
-    print("  SWEEP COMPLETE — no model was retrained; only the cutoff varied.")
-    print("#" * 78 + "\n")
+    print("  No model was retrained; only the cutoff varied.")
 
 
 if __name__ == "__main__":

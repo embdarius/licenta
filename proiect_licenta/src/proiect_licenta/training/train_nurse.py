@@ -1,13 +1,8 @@
-"""
-Data Pipeline for Doctor Agent v2 — Enhanced with Nurse Data
+"""Doctor v2 training pipeline (adds nurse data).
 
-Trains two supervised models for admitted patients (same as train_doctor)
-but with additional features from vital signs (triage.csv) and medication
-history (medrecon.csv).
-
-Comparison:
-  - Doctor v1: complaints + demographics + triage predictions (2025 features)
-  - Doctor v2: v1 + vitals + vital flags + medication features (~2055 features)
+Same two models as train_doctor, plus vital signs (triage.csv) and medication
+history (medrecon.csv). v1 uses ~2025 features; v2 adds vitals, vital flags, and
+medication features for ~2055.
 """
 
 import json
@@ -25,9 +20,7 @@ from xgboost import XGBClassifier
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
 # Paths (canonical layout in proiect_licenta.paths)
-# ---------------------------------------------------------------------------
 # Doctor v2 reuses triage v1 base artifacts (tfidf, severity_map, cascading
 # triage models) for feature consistency with doctor v1.
 from proiect_licenta.paths import (
@@ -37,17 +30,13 @@ from proiect_licenta.paths import (
     DIAGNOSIS_CSV, SERVICES_CSV, MEDRECON_CSV,
 )
 
-# ---------------------------------------------------------------------------
 # Reuse from doctor pipeline
-# ---------------------------------------------------------------------------
 from proiect_licenta.training.train_doctor import (
     DIAGNOSIS_GROUP_MAP, SERVICE_GROUP_MAP, DEPARTMENT_NAMES,
 )
 from proiect_licenta.preprocessing import normalize_complaint_text
 
-# ---------------------------------------------------------------------------
 # Medication category grouping
-# ---------------------------------------------------------------------------
 # Both the drug-name map and the class-keyword map live in the shared
 # `tools.med_vocab` module so training (this file) and inference
 # (`tools.doctor_tool_v2`) use exactly the same vocabulary. See the module
@@ -72,14 +61,10 @@ def classify_medication(name: str, etcdescription: str) -> set:
     return flags_from_row(name, etcdescription)
 
 
-# ---------------------------------------------------------------------------
-# 1. Load & Clean Data — same as doctor pipeline + vitals + meds
-# ---------------------------------------------------------------------------
+# 1. Load & Clean Data - same as doctor pipeline + vitals + meds
 def load_and_clean_data() -> pd.DataFrame:
     """Load admitted patient data with diagnosis, service, vitals, and medications."""
-    print("=" * 60)
-    print("STEP 1: Loading data (admitted patients + vitals + meds)")
-    print("=" * 60)
+    print("Loading data (admitted patients + vitals + meds)")
 
     # Load triage (includes vitals)
     triage = pd.read_csv(TRIAGE_CSV)
@@ -120,11 +105,11 @@ def load_and_clean_data() -> pd.DataFrame:
     med_features = _aggregate_medications(med)
     print(f"  medrecon.csv: {len(med):,} rows -> {len(med_features):,} stay-level records")
 
-    # ── Filter to admitted patients ──
+    # Filter to admitted patients
     admitted = edstays[edstays["disposition"] == "ADMITTED"].copy()
     print(f"\n  Admitted stays: {len(admitted):,}")
 
-    # ── Merge all tables ──
+    # Merge all tables
     df = triage.merge(admitted, on=["subject_id", "stay_id"], how="inner")
     df = df.merge(patients, on="subject_id", how="left")
     df = df.merge(diag, on="stay_id", how="inner")
@@ -132,45 +117,45 @@ def load_and_clean_data() -> pd.DataFrame:
     df = df.merge(med_features, on="stay_id", how="left")  # left join: not all have meds
     print(f"  After full merge: {len(df):,}")
 
-    # ── Compute age ──
+    # Compute age
     df["intime"] = pd.to_datetime(df["intime"])
     df["visit_year"] = df["intime"].dt.year
     df["age"] = df["anchor_age"] + (df["visit_year"] - df["anchor_year"])
     df["age"] = df["age"].clip(0, 120).fillna(50).astype(int)
 
-    # ── Clean chief complaints ──
+    # Clean chief complaints
     initial = len(df)
     df = df.dropna(subset=["chiefcomplaint", "category", "curr_service"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
     print(f"  After dropping missing data: {len(df):,} (dropped {initial - len(df):,})")
 
-    # ── Apply category groupings ──
+    # Apply category groupings
     df["diagnosis_group"] = df["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
     df["service_group"] = df["curr_service"].map(SERVICE_GROUP_MAP).fillna("OTHER")
 
-    # ── Clean pain ──
+    # Clean pain
     df["pain_triage"] = pd.to_numeric(df["pain"], errors="coerce")
     df["pain_missing"] = df["pain_triage"].isna().astype(int)
     df["pain"] = df["pain_triage"].fillna(-1).astype(int)
     df.loc[df["pain"] > 10, "pain"] = -1
     df.loc[df["pain"] < 0, "pain"] = -1
 
-    # ── Encode demographics ──
+    # Encode demographics
     df["gender_male"] = (df["gender"] == "M").astype(int)
     df["arrival_ambulance"] = (df["arrival_transport"] == "AMBULANCE").astype(int)
     df["arrival_helicopter"] = (df["arrival_transport"] == "HELICOPTER").astype(int)
     df["arrival_walk_in"] = (df["arrival_transport"] == "WALK IN").astype(int)
 
-    # ── Acuity ──
+    # Acuity
     df["acuity"] = pd.to_numeric(df["acuity"], errors="coerce")
     df = df[df["acuity"].between(1, 5)]
     df["acuity"] = df["acuity"].astype(int)
     df["admitted"] = 1
 
-    # ── Clean vital signs ──
+    # Clean vital signs
     _clean_vitals(df)
 
-    # ── Fill missing medication flags (patients with no medrecon data) ──
+    # Fill missing medication flags (patients with no medrecon data)
     med_flag_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     for col in med_flag_cols:
         if col not in df.columns:
@@ -180,7 +165,7 @@ def load_and_clean_data() -> pd.DataFrame:
     for flag in MED_CATEGORY_KEYWORDS:
         df[flag] = df[flag].fillna(0).astype(int)
 
-    # ── Print distributions ──
+    # Print distributions
     print(f"\n  Diagnosis Category Distribution (grouped):")
     for cat in df["diagnosis_group"].value_counts().index:
         count = (df["diagnosis_group"] == cat).sum()
@@ -271,32 +256,28 @@ def _clean_vitals(df: pd.DataFrame):
     df["map"] = (df["sbp"] + 2 * df["dbp"]) / 3
 
 
-# ---------------------------------------------------------------------------
 # 2. Build features
-# ---------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Build feature matrix: triage features + triage predictions + vitals + meds."""
-    print("\n" + "=" * 60)
-    print("STEP 2: Feature engineering (triage artifacts + vitals + meds)")
-    print("=" * 60)
+    print("Feature engineering (triage artifacts + vitals + meds)")
 
     df = df.copy()
 
-    # ── Load triage artifacts ──
+    # Load triage artifacts
     tfidf = joblib.load(TRIAGE_MODELS_DIR / "tfidf_vectorizer.joblib")
     severity_map = joblib.load(TRIAGE_MODELS_DIR / "severity_map.joblib")
     acuity_model = joblib.load(TRIAGE_MODELS_DIR / "acuity_model.joblib")
     disposition_model = joblib.load(TRIAGE_MODELS_DIR / "disposition_model.joblib")
     print("  Loaded triage artifacts")
 
-    # ── Text features ──
+    # Text features
     df["complaint_text"] = df["chiefcomplaint"].apply(normalize_complaint_text)
     df["n_complaints"] = df["chiefcomplaint"].apply(
         lambda x: len([c.strip() for c in str(x).split(",") if c.strip()])
     )
     df["complaint_length"] = df["complaint_text"].apply(len)
 
-    # ── TF-IDF ──
+    # TF-IDF
     tfidf_matrix = tfidf.transform(df["complaint_text"])
     tfidf_df = pd.DataFrame(
         tfidf_matrix.toarray(),
@@ -305,7 +286,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     print(f"  TF-IDF features: {tfidf_df.shape[1]}")
 
-    # ── Severity priors ──
+    # Severity priors
     def compute_severity_priors(text: str) -> tuple:
         words = text.split()
         severities = [severity_map[w] for w in words if w in severity_map]
@@ -320,7 +301,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["max_severity_prior"] = sev.apply(lambda x: x[2])
     df["std_severity_prior"] = sev.apply(lambda x: x[3])
 
-    # ── Age/pain bins ──
+    # Age/pain bins
     df["age_bin"] = pd.cut(
         df["age"], bins=[0, 18, 35, 50, 65, 80, 120], labels=[0, 1, 2, 3, 4, 5],
     ).astype(float).fillna(2)
@@ -328,7 +309,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["pain_mid"] = ((df["pain"] >= 4) & (df["pain"] <= 6)).astype(int)
     df["pain_high"] = ((df["pain"] >= 7) & (df["pain"] <= 10)).astype(int)
 
-    # ── Interaction features ──
+    # Interaction features
     df["age_ambulance"] = df["age"] * df["arrival_ambulance"]
     df["pain_x_min_severity"] = df["pain"].clip(0, 10) * (5 - df["min_severity_prior"])
     df["age_severity"] = df["age"] * (5 - df["min_severity_prior"])
@@ -336,7 +317,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["elderly"] = (df["age"] >= 65).astype(int)
     df["elderly_ambulance"] = df["elderly"] * df["arrival_ambulance"]
 
-    # ── Assemble triage feature vector (same order as triage pipeline) ──
+    # Assemble triage feature vector (same order as triage pipeline)
     structured_cols = [
         "pain", "pain_missing", "pain_low", "pain_mid", "pain_high",
         "n_complaints", "complaint_length",
@@ -352,7 +333,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     tfidf_df = tfidf_df.reset_index(drop=True)
     triage_features = pd.concat([structured, tfidf_df], axis=1)
 
-    # ── Generate triage predictions (cascading) ──
+    # Generate triage predictions (cascading)
     print("  Generating triage predictions...")
     predicted_acuity = acuity_model.predict(triage_features) + 1
     triage_features_disp = triage_features.copy()
@@ -362,7 +343,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     triage_features["predicted_acuity"] = predicted_acuity
     triage_features["predicted_disposition"] = predicted_disposition
 
-    # ── Vital sign features ──
+    # Vital sign features
     vital_cols = [
         "temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp",
         "temperature_missing", "heartrate_missing", "resprate_missing",
@@ -373,28 +354,24 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     vitals = df[vital_cols].reset_index(drop=True)
     print(f"  Vital sign features: {len(vital_cols)}")
 
-    # ── Medication features ──
+    # Medication features
     med_cols = ["n_medications", "meds_unknown"] + list(MED_CATEGORY_KEYWORDS.keys())
     meds = df[med_cols].reset_index(drop=True)
     print(f"  Medication features: {len(med_cols)}")
 
-    # ── Assemble all ──
+    # Assemble all
     features = pd.concat([triage_features, vitals, meds], axis=1)
     print(f"  Total features: {features.shape[1]}")
 
     return features
 
 
-# ---------------------------------------------------------------------------
 # 3-4. Train models (same as train_doctor)
-# ---------------------------------------------------------------------------
 def train_model(
     X_train, y_train, X_test, y_test, label_names, model_name,
 ) -> XGBClassifier:
     """Train an XGBoost multiclass model."""
-    print(f"\n{'='*60}")
     print(f"  Training {model_name} ({len(label_names)} classes, XGBoost)")
-    print(f"{'='*60}")
 
     n_classes = len(label_names)
     class_counts = y_train.value_counts()
@@ -427,9 +404,7 @@ def train_model(
     return model
 
 
-# ---------------------------------------------------------------------------
 # 5. Save
-# ---------------------------------------------------------------------------
 def save_models(
     diagnosis_model, department_model,
     diagnosis_labels, department_labels,
@@ -437,9 +412,7 @@ def save_models(
     vital_medians,
 ):
     """Save v2 doctor models and metadata."""
-    print(f"\n{'='*60}")
     print("  Saving Doctor v2 model artifacts")
-    print(f"{'='*60}")
 
     DOCTOR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -472,22 +445,16 @@ def save_models(
         print(f"  - {fname}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
-    print("\n" + "#" * 60)
-    print("  Doctor Agent v2 — Model Training Pipeline")
+    print("  Doctor Agent v2 - Model Training Pipeline")
     print("  (With Vital Signs + Medication Features)")
-    print("#" * 60)
 
     # 1. Load
     df = load_and_clean_data()
 
     # 2. Sample 100K
-    print(f"\n{'='*60}")
     print("  Sampling 100K rows (stratified by diagnosis)")
-    print(f"{'='*60}")
     if len(df) > 100_000:
         df, _ = train_test_split(
             df, train_size=100_000, random_state=42,
@@ -507,9 +474,7 @@ def main():
     y_dept = df["service_group"].map(dept_map).reset_index(drop=True)
 
     # 5. Split
-    print(f"\n{'='*60}")
     print("  Train/test split (80/20, stratified)")
-    print(f"{'='*60}")
     X_train, X_test, y_diag_train, y_diag_test, y_dept_train, y_dept_test = \
         train_test_split(features, y_diag, y_dept, test_size=0.2,
                          random_state=42, stratify=y_diag)
@@ -542,12 +507,9 @@ def main():
         diag_acc, dept_acc, vital_medians,
     )
 
-    print(f"\n{'#'*60}")
-    print("  TRAINING COMPLETE!")
-    print(f"{'#'*60}")
+    print("Training complete.")
     print(f"  Diagnosis v2 accuracy: {diag_acc:.4f}")
     print(f"  Department v2 accuracy: {dept_acc:.4f}")
-    print(f"{'#'*60}\n")
 
 
 if __name__ == "__main__":

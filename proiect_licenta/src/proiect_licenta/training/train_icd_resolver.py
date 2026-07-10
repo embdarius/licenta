@@ -1,20 +1,13 @@
 """Offline builder for the Stage-2 exact-ICD resolver (Doctor v3).
 
 Builds per-category candidate indices (prototype centroids + prevalence priors)
-from the **Doctor v3 training split only**, at two granularities:
-  - "rollup" : 3-char ICD category (headline target)
-  - "full"   : full ICD code (secondary/stretch target)
-
-Each candidate code also carries a vitals centroid (mean standardized
-physiology vector). The 3-term blend weights (text cosine / vitals / prevalence)
-are grid-searched on a held-out slice of the training split using the
-oracle-category top-5 rollup hit rate, then the final indices are rebuilt on the
-*full* training split and saved (with the legacy 2-term alpha kept for the
-backward-compatible text+prevalence path).
-
-Run: ``uv run train_icd_resolver``  (heavy: reuses the v3 data loader).
-
-This is offline/benchmark tooling — it is NOT part of the live patient crew.
+from the doctor v3 training split only, at two granularities: 3-char rollup and
+full code. Each candidate also carries a vitals centroid. The 3-term blend
+weights (text cosine / vitals / prevalence) are grid-searched on a held-out slice
+using the oracle-category top-5 rollup hit rate, then the final indices are
+rebuilt on the full training split and saved (with the legacy 2-term alpha kept
+for the text+prevalence path). Offline/benchmark tooling, not part of the live
+crew. Run with `uv run train_icd_resolver`.
 """
 import argparse
 import json
@@ -53,7 +46,7 @@ PMH_CACHE = DERIVED_DIR / "icd_resolver_pmh.parquet"
 # (from triage.csv) PLUS the genuinely-new longitudinal signals that the
 # snapshot lacks: cardiac rhythm (one-hot buckets + rhythm_irregular) and the
 # per-vital trajectory delta. min/max/last and abnormal-reading counts are
-# excluded — they mostly triplicate the snapshot value (a snapshot-only patient
+# excluded - they mostly triplicate the snapshot value (a snapshot-only patient
 # has min==max==last==snapshot), adding redundancy without new information.
 _LONG_RHYTHM_DELTA = [c for c in LONG_VITAL_FEATURE_COLS
                       if c.endswith("_delta") or c.startswith("rhythm_")]
@@ -98,12 +91,10 @@ def _weight_simplex4(step: int = 10):
 WEIGHT_GRID4 = _weight_simplex4(10)  # 286 (text, vit, pmh, prev) combinations
 
 
-# ---------------------------------------------------------------------------
 # Data assembly
-# ---------------------------------------------------------------------------
 # The resolver only needs each train-split stay's complaint text + ICD code +
 # diagnosis group. It does NOT need the snapshot/longitudinal vitals, the
-# medication flags, or the PMH features — and building those is where
+# medication flags, or the PMH features - and building those is where
 # train_nurse_v3.load_and_clean_data spends ~all of its time (the uncached
 # 3.3 GB discharge.csv parse + the vitalsign.csv per-stay loop).
 #
@@ -113,7 +104,7 @@ WEIGHT_GRID4 = _weight_simplex4(10)  # 286 (text, vit, pmh, prev) combinations
 # is determined entirely by the triage/edstays/diagnosis/services merges and
 # the dropna/catch-all/acuity filters below. `_load_light` reproduces exactly
 # those row-determining steps (mirroring train_nurse_v3.load_and_clean_data),
-# so the split is identical with no leakage — at a fraction of the cost.
+# so the split is identical with no leakage - at a fraction of the cost.
 #
 # Run `uv run train_icd_resolver --verify` to assert (once) that the light
 # loader's row order matches the full v3 loader's, then use the fast default.
@@ -157,7 +148,7 @@ def _load_light() -> pd.DataFrame:
     df = df.merge(diag, on="stay_id", how="inner")
     df = df.merge(services_first, on="hadm_id", how="inner")
 
-    # ── Row-dropping filters (identical to the v3 loader) ──
+    # Row-dropping filters (identical to the v3 loader)
     df = df.dropna(subset=["chiefcomplaint", "category", "curr_service"])
     df = df[df["chiefcomplaint"].str.strip() != ""]
     df["diagnosis_group"] = df["category"].map(DIAGNOSIS_GROUP_MAP).fillna("Other")
@@ -166,7 +157,7 @@ def _load_light() -> pd.DataFrame:
     df["acuity"] = pd.to_numeric(df["acuity"], errors="coerce")
     df = df[df["acuity"].between(1, 5)].reset_index(drop=True)
 
-    # ── Derived columns the resolver needs ──
+    # Derived columns the resolver needs
     df["icd_code"] = df["icd_code"].fillna("").str.strip().str.upper()
     df["icd_version"] = df["icd_version"].fillna("").str.strip()
     df["icd_title"] = df["icd_title"].fillna("")
@@ -181,7 +172,7 @@ def _load_light() -> pd.DataFrame:
 
     # Longitudinal vitals + cardiac rhythm from vitalsign.csv (over the same
     # [intime, intime+4h] window the v3 model uses). This is the one heavy add
-    # vs the pure light loader (~a few minutes) — still far cheaper than the
+    # vs the pure light loader (~a few minutes) - still far cheaper than the
     # full v3 loader, which also parses the 3.3 GB discharge.csv for PMH (which
     # the resolver does not need). `_fill_longitudinal_vitals` falls back to the
     # snapshot for stays with no readings, mirroring inference.
@@ -210,9 +201,9 @@ def _attach_pmh(df: pd.DataFrame, edstays_full: pd.DataFrame) -> pd.DataFrame:
         cached = pd.read_parquet(PMH_CACHE)
         if need.issubset(set(cached["stay_id"].astype(int))):
             pmh_df = cached[cached["stay_id"].astype(int).isin(need)].copy()
-            print(f"  [PMH cache] hit — {len(pmh_df):,} stays from {PMH_CACHE.name}")
+            print(f"  [PMH cache] hit - {len(pmh_df):,} stays from {PMH_CACHE.name}")
     if pmh_df is None:
-        print("  [PMH cache] miss — computing PMH (heavy discharge.csv parse)...")
+        print("  [PMH cache] miss - computing PMH (heavy discharge.csv parse)...")
         pmh_df = aggregate_pmh(
             stays_df=df[["stay_id", "subject_id", "intime", "complaint_text_norm"]],
             edstays_full=edstays_full,
@@ -236,7 +227,7 @@ def _verify_against_full(light_df: pd.DataFrame) -> None:
 
     Opt-in (`--verify`) one-time check: if the stay_id sequence matches, the
     train/test split is provably identical (the split depends only on row order
-    + count). Heavy — runs the full v3 loader once.
+    + count). Heavy - runs the full v3 loader once.
     """
     from proiect_licenta.training.train_nurse_v3 import load_and_clean_data
     print("\n  [--verify] Running the FULL v3 loader to compare row order...")
@@ -244,11 +235,11 @@ def _verify_against_full(light_df: pd.DataFrame) -> None:
     a = light_df["stay_id"].tolist()
     b = full_df["stay_id"].tolist()
     if a == b:
-        print(f"  [--verify] PASS — identical row order ({len(a):,} rows). "
+        print(f"  [--verify] PASS - identical row order ({len(a):,} rows). "
               f"Light loader split == v3 split.")
     else:
         raise AssertionError(
-            f"[--verify] FAIL — row order differs (light={len(a):,}, "
+            f"[--verify] FAIL - row order differs (light={len(a):,}, "
             f"full={len(b):,}). The light loader has drifted from "
             f"train_nurse_v3.load_and_clean_data; fix before trusting the split."
         )
@@ -259,7 +250,7 @@ def _train_rows(verify: bool = False) -> tuple[pd.DataFrame, int]:
 
     The split partition depends only on (n, test_size, random_state, stratify),
     so splitting np.arange(n) with the identical y_diag stratify reproduces the
-    exact partition train_nurse_v3.main used — no feature matrix needed here.
+    exact partition train_nurse_v3.main used - no feature matrix needed here.
     """
     df = _load_light()
     if verify:
@@ -279,9 +270,7 @@ def _train_rows(verify: bool = False) -> tuple[pd.DataFrame, int]:
     return df_train, len(test_idx)
 
 
-# ---------------------------------------------------------------------------
 # Index building at one granularity
-# ---------------------------------------------------------------------------
 def _code_column(df: pd.DataFrame, granularity: str) -> list:
     return df["rollup_code"].tolist() if granularity == "rollup" else df["icd_code"].tolist()
 
@@ -299,15 +288,13 @@ def _build_for_granularity(df_rows: pd.DataFrame, tfidf, granularity: str,
     )
 
 
-# ---------------------------------------------------------------------------
-# Weight tuning — 3-term simplex (text cosine / vitals / prevalence)
-# ---------------------------------------------------------------------------
+# Weight tuning - 3-term simplex (text cosine / vitals / prevalence)
 def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict,
                   pmh_standardizer: dict):
     """Grid-search the blend weights on a held-out train slice.
 
-    Tunes (a) the 3-term (text, vit, prev) simplex on ALL val rows — the weights
-    used for patients without history — and (b) the gated 4-term (text, vit,
+    Tunes (a) the 3-term (text, vit, prev) simplex on ALL val rows - the weights
+    used for patients without history - and (b) the gated 4-term (text, vit,
     pmh, prev) simplex on the HAS-PMH val rows only, the weights applied to
     patients with prior history. Metric: oracle-category top-5 rollup hit rate.
     Returns best 3-term, best 2-term (vit=0 ablation), best 4-term, and rates.
@@ -400,9 +387,7 @@ def _tune_weights(df_train: pd.DataFrame, tfidf, standardizer: dict,
     }
 
 
-# ---------------------------------------------------------------------------
 # Sanity summary
-# ---------------------------------------------------------------------------
 def _print_summary(index: dict, granularity: str) -> None:
     print(f"\n  [{granularity}] per-category candidate counts + top prevalence code:")
     for cat in sorted(index):
@@ -414,9 +399,7 @@ def _print_summary(index: dict, granularity: str) -> None:
               f"{entry['titles'][top][:40]}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Build the Stage-2 exact-ICD resolver from the Doctor v3 "
@@ -429,9 +412,7 @@ def main():
     )
     args, _ = parser.parse_known_args()
 
-    print("\n" + "#" * 70)
     print("  Stage-2 exact-ICD resolver builder (Doctor v3 training split)")
-    print("#" * 70)
 
     df_train, n_test = _train_rows(verify=args.verify)
 
@@ -530,9 +511,7 @@ def main():
     print(f"\n  Saved resolver -> {DOCTOR_V3_ICD_RESOLVER_DIR}")
     print(f"  - {icdr.RESOLVER_FILENAME}")
     print(f"  - {icdr.RESOLVER_META_FILENAME}")
-    print("\n" + "#" * 70)
     print("  RESOLVER BUILD COMPLETE")
-    print("#" * 70 + "\n")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-"""
-Benchmark script for triage v3 models (v2 features + PMH).
+"""Benchmark script for triage v3 models (v2 features + PMH).
 
 Reproduces the exact train/test split from training (random_state=42, stratified)
 and evaluates v3 against the same v2 baseline on the same held-out rows so the
@@ -37,9 +36,7 @@ from proiect_licenta.training.train_triage_v2 import (
 
 
 def print_section(title):
-    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*70}")
 
 
 def print_confusion_matrix(cm, labels):
@@ -82,19 +79,13 @@ def evaluate_acuity(name, y_true, y_pred, y_prob=None):
 
 
 def main():
-    print("\n" + "#" * 70)
     print("  TRIAGE v3 MODEL BENCHMARK (v2 features + PMH)")
     print("  Head-to-head vs v2 on the same held-out test rows")
-    print("#" * 70)
 
-    # ------------------------------------------------------------------
     # 1. Load v3 data (which already includes the PMH aggregation step)
-    # ------------------------------------------------------------------
     df, _edstays = load_v3_data()
 
-    # ------------------------------------------------------------------
     # 2. Reproduce the same train/test split used at training
-    # ------------------------------------------------------------------
     print_section("TRAIN/TEST SPLIT (80/20, stratified, random_state=42)")
     train_df, test_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["acuity"],
@@ -105,9 +96,7 @@ def main():
     y_admit_test = test_df["admitted"].reset_index(drop=True)
     arrival_test = test_df["arrival_transport"].reset_index(drop=True)
 
-    # ------------------------------------------------------------------
     # 3. Load v3 artifacts and build v3 features on the test rows
-    # ------------------------------------------------------------------
     print_section("LOADING v3 ARTIFACTS")
     v3_tfidf = joblib.load(TRIAGE_V3_DIR / "tfidf_vectorizer.joblib")
     v3_severity = joblib.load(TRIAGE_V3_DIR / "severity_map.joblib")
@@ -134,9 +123,7 @@ def main():
     y_pred_v3_disp = v3_disp.predict(X_test_v3_disp)
     y_prob_v3_disp = v3_disp.predict_proba(X_test_v3_disp)[:, 1]
 
-    # ------------------------------------------------------------------
     # 4. Load v2 artifacts and predict on the same test rows
-    # ------------------------------------------------------------------
     print_section("LOADING v2 ARTIFACTS (baseline)")
     v2_tfidf = joblib.load(TRIAGE_V2_DIR / "tfidf_vectorizer.joblib")
     v2_severity = joblib.load(TRIAGE_V2_DIR / "severity_map.joblib")
@@ -160,15 +147,13 @@ def main():
     y_pred_v2_disp = v2_disp.predict(X_test_v2_disp)
     y_prob_v2_disp = v2_disp.predict_proba(X_test_v2_disp)[:, 1]
 
-    # ===================================================================
     #  ACUITY HEAD-TO-HEAD (v2 vs v3 on identical test rows)
-    # ===================================================================
-    print_section("ACUITY — HEAD-TO-HEAD v2 vs v3")
+    print_section("ACUITY - HEAD-TO-HEAD v2 vs v3")
 
     v2_metrics = evaluate_acuity("v2", y_acuity_test, y_pred_v2_acuity)
     v3_metrics = evaluate_acuity("v3", y_acuity_test, y_pred_v3_acuity)
 
-    print("\n  Δ v3 − v2:")
+    print("\n  Δ v3 - v2:")
     print(f"    Exact accuracy:           "
           f"{(v3_metrics['exact'] - v2_metrics['exact'])*100:+.2f}pp")
     print(f"    Within-1-level accuracy:  "
@@ -191,10 +176,8 @@ def main():
     cm_v3 = confusion_matrix(y_acuity_test, y_pred_v3_acuity, labels=[1, 2, 3, 4, 5])
     print_confusion_matrix(cm_v3, [1, 2, 3, 4, 5])
 
-    # ===================================================================
     #  DISPOSITION HEAD-TO-HEAD
-    # ===================================================================
-    print_section("DISPOSITION — HEAD-TO-HEAD v2 vs v3")
+    print_section("DISPOSITION - HEAD-TO-HEAD v2 vs v3")
 
     v2_disp_acc = accuracy_score(y_admit_test, y_pred_v2_disp)
     v3_disp_acc = accuracy_score(y_admit_test, y_pred_v3_disp)
@@ -204,10 +187,10 @@ def main():
     except Exception:
         v2_auc = v3_auc = None
 
-    print(f"\n  Accuracy:  v2 {v2_disp_acc:.4f}  →  v3 {v3_disp_acc:.4f}  "
+    print(f"\n  Accuracy:  v2 {v2_disp_acc:.4f}  ->  v3 {v3_disp_acc:.4f}  "
           f"(Δ {(v3_disp_acc - v2_disp_acc)*100:+.2f}pp)")
     if v2_auc is not None:
-        print(f"  ROC AUC:   v2 {v2_auc:.4f}  →  v3 {v3_auc:.4f}  "
+        print(f"  ROC AUC:   v2 {v2_auc:.4f}  ->  v3 {v3_auc:.4f}  "
               f"(Δ {v3_auc - v2_auc:+.4f})")
 
     print(f"\n  v3 classification report:")
@@ -229,10 +212,8 @@ def main():
             print(f"    ESI {esi}: accuracy={acc:.4f}  "
                   f"(n={n:,}, actual admit rate={admit_rate:.1%})")
 
-    # ===================================================================
-    #  ACUITY BY ARRIVAL TRANSPORT (v3 only — confirms walk-in lift)
-    # ===================================================================
-    print_section("v3 ACUITY — BY ARRIVAL TRANSPORT")
+    #  ACUITY BY ARRIVAL TRANSPORT (v3 only - confirms walk-in lift)
+    print_section("v3 ACUITY - BY ARRIVAL TRANSPORT")
 
     for group_name, group_mask in [
         ("AMBULANCE/HELICOPTER (real vitals)",
@@ -261,25 +242,21 @@ def main():
         print(f"    v3 within-1:     {w1_v3:.4f}  ({w1_v3*100:.2f}%)")
         print(f"    v3 MAE:          {mae_v3:.4f}")
 
-    # ===================================================================
     #  PMH-FEATURE COVERAGE ON THE TEST SET
-    # ===================================================================
-    print_section("PMH FEATURE COVERAGE — TEST SET")
+    print_section("PMH FEATURE COVERAGE - TEST SET")
 
     no_hist = (test_df["no_history"] == 1).mean()
     any_pmh = (test_df[[c for c in test_df.columns
                         if c.startswith("pmh_")]].sum(axis=1) > 0).mean()
     print(f"  Test rows with no_history=1 (first-time MIMIC patients): "
           f"{100*no_hist:.1f}%")
-    print(f"  Test rows with ≥1 PMH flag set:                          "
+    print(f"  Test rows with >=1 PMH flag set:                          "
           f"{100*any_pmh:.1f}%")
     print(f"  Mean n_prior_admissions:  {test_df['n_prior_admissions'].mean():.2f}")
     print(f"  Mean n_prior_ed_visits:   {test_df['n_prior_ed_visits'].mean():.2f}")
 
-    # ===================================================================
-    #  FEATURE IMPORTANCE — verify PMH features are non-zero on v3 acuity
-    # ===================================================================
-    print_section("v3 ACUITY — TOP 30 FEATURE IMPORTANCES + PMH AUDIT")
+    #  FEATURE IMPORTANCE - verify PMH features are non-zero on v3 acuity
+    print_section("v3 ACUITY - TOP 30 FEATURE IMPORTANCES + PMH AUDIT")
 
     feature_names = list(X_test_v3.columns)
     importances = v3_acuity.feature_importances_
@@ -309,9 +286,7 @@ def main():
     pmh_in_top50 = sum(1 for i in sorted_idx[:50] if i in pmh_feature_idxs)
     print(f"  PMH features in top 50: {pmh_in_top50}")
 
-    # ===================================================================
     #  SUMMARY
-    # ===================================================================
     print_section("BENCHMARK SUMMARY")
     print(f"  Test set size:                {len(y_acuity_test):,}")
     print(f"  v3 total features:            {X_test_v3.shape[1]}")
@@ -336,9 +311,7 @@ def main():
         print(f"    v3 ROC AUC:                 {v3_auc:.4f}  "
               f"(Δ {v3_auc - v2_auc:+.4f})")
 
-    print("\n" + "#" * 70)
-    print("  BENCHMARK COMPLETE")
-    print("#" * 70 + "\n")
+    print("Benchmark complete.")
 
 
 if __name__ == "__main__":

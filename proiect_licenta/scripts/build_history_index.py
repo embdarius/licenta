@@ -1,26 +1,19 @@
 #!/usr/bin/env python
-"""
-Offline builder for the patient-history (EHR-simulation) index.
-================================================================
+"""Offline builder for the patient-history lookup index.
 
-Runs the heavy half of the PMH pipeline ONCE
-(`pmh_features.build_pmh_index`) over a set of subject_ids and persists the
-four per-subject prior-encounter structures to `HISTORY_INDEX_PKL` (joblib,
-gitignored — MIMIC DUA). `PatientHistoryLookupTool` then loads this index at
-inference and queries it per patient with the strict `< intime` leakage filter,
-simulating an EHR record lookup for returning patients WITHOUT re-parsing the
-3.3 GB discharge.csv every time.
+Runs the heavy half of the PMH pipeline once (pmh_features.build_pmh_index) over a
+set of subject_ids and persists the per-subject prior-encounter structures to
+HISTORY_INDEX_PKL (joblib, gitignored). PatientHistoryLookupTool loads this at
+inference and queries each patient with the strict `< intime` leakage filter,
+avoiding a re-parse of the 3.3 GB discharge.csv. The index uses the same loaders,
+ICD-to-group map, catch-all filter, and leakage-safe construction as
+train_nurse_v3 / train_triage_v3, so the tool's PMH features match training.
 
-The index uses the SAME loaders, ICD→group map, catch-all filter, and
-leakage-safe construction as `train_nurse_v3` / `train_triage_v3`, so the
-PMH features the tool produces match what the models were trained on.
-
-Subject scope (pick one; default `--from-cases`):
-  --from-cases     index exactly the subject_ids in the generated cases.json
-                   (fast, targeted; the cohort the E2E benchmark queries).
-                   Requires `uv run generate_cases` to have run first.
-  --all-subjects   index every subject in edstays.csv (deployment-grade; parses
-                   the full discharge.csv — minutes, but reusable for any case).
+Subject scope (default --from-cases):
+  --from-cases     index the subject_ids in the generated cases.json (needs
+                   `uv run generate_cases` first).
+  --all-subjects   index every subject in edstays.csv (parses the full
+                   discharge.csv; slower but reusable).
 
 Usage:
     uv run build_history_index                 # from cases.json (default)
@@ -78,9 +71,7 @@ def main():
                        help="Index every subject in edstays.csv (full population).")
     args = parser.parse_args()
 
-    print("=" * 70)
     print("  BUILD PATIENT-HISTORY INDEX (EHR-simulation, offline)")
-    print("=" * 70)
 
     print("\n[1/3] Loading edstays.csv...")
     edstays = pd.read_csv(EDSTAYS_CSV)
@@ -91,7 +82,7 @@ def main():
     else:
         subjects = _subjects_from_cases()
 
-    print("\n[2/3] Building index (heaviest step — parses discharge.csv)...")
+    print("\n[2/3] Building index (heaviest step - parses discharge.csv)...")
     index = build_pmh_index(
         subjects=subjects,
         edstays_full=edstays,
@@ -119,7 +110,6 @@ def main():
     print(f"  icd_pmh_by_hadm: {len(index['icd_pmh_by_hadm']):,} admissions with ICD PMH")
     print(f"  note_pmh_by_hadm:{len(index['note_pmh_by_hadm']):,} admissions with note PMH")
     print(f"  med_by_stay    : {len(index.get('med_by_stay', {})):,} stays with a medrecon block")
-    print("=" * 70)
 
 
 if __name__ == "__main__":
