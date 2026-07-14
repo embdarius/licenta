@@ -121,6 +121,13 @@ def register_listeners() -> None:
     from crewai.events.types.tool_usage_events import (
         ToolUsageStartedEvent, ToolUsageFinishedEvent,
     )
+    # CrewAI emits the STARTED event with the raw tool name the LLM typed
+    # (`action.tool`) but the FINISHED event with the canonical
+    # `sanitize_tool_name(tool.name)`. Normalize both here so the browser can
+    # correlate a running chip with its completion by an identical key (and so
+    # the frontend's snake_case TOOL_LABELS lookup always matches). Without
+    # this, any non-canonical spelling (spaces, casing) leaves the chip spinning.
+    from crewai.tools.tool_usage import sanitize_tool_name
 
     @crewai_event_bus.on(TaskStartedEvent)
     def _on_task_started(source, event):  # noqa: ANN001
@@ -153,7 +160,8 @@ def register_listeners() -> None:
     def _on_tool_started(source, event):  # noqa: ANN001
         ch = _active()
         if ch:
-            ch.emit({"type": "tool_started", "tool": event.tool_name,
+            ch.emit({"type": "tool_started",
+                     "tool": sanitize_tool_name(event.tool_name or ""),
                      "agent": (event.agent_role or "").strip(),
                      "args": _coerce(event.tool_args)})
 
@@ -161,7 +169,8 @@ def register_listeners() -> None:
     def _on_tool_finished(source, event):  # noqa: ANN001
         ch = _active()
         if ch:
-            ch.emit({"type": "tool_finished", "tool": event.tool_name,
+            ch.emit({"type": "tool_finished",
+                     "tool": sanitize_tool_name(event.tool_name or ""),
                      "agent": (event.agent_role or "").strip(),
                      "output": _coerce(getattr(event, "output", None))})
 
